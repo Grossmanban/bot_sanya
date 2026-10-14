@@ -59,6 +59,26 @@ export interface Shift {
   fact_volume: number | null;
   fact_pay?: number;
   can_set_fact: boolean;
+  shortfall: number;
+  shortfall_status: "fined" | "waived" | null;
+  shortfall_penalty: number | null;
+}
+
+export interface Shortfall {
+  shift_id: number;
+  date: string;
+  user_id: number;
+  name: string;
+  username: string | null;
+  location: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  volume: number;
+  fact_volume: number;
+  shortfall: number;
+  percent: number;
+  status: "fined" | "waived" | null;
+  penalty: number | null;
 }
 
 export interface Point {
@@ -128,6 +148,9 @@ export interface StatsItem {
   expected_pay: number | null;
   penalty_amount: number | null;
   fact_volume: number | null;
+  shortfall: number;
+  shortfall_status: "fined" | "waived" | null;
+  shortfall_penalty: number | null;
   notes: string;
 }
 
@@ -146,11 +169,16 @@ export interface Stats {
     fact_volume: number;
     fact_pay: number;
     fact_missing: number;
+    shortfall_shifts: number;
+    shortfall_volume: number;
+    shortfall_pending: number;
   };
 }
 
 export interface PenaltyRow {
   shift_id: number;
+  kind: "final_cancel" | "shortfall";
+  status: "fined" | "waived" | null;
   date: string;
   user_id: number;
   name: string;
@@ -243,9 +271,9 @@ export const api = {
   setFact: (id: number, fact_volume: number, key: string) =>
     post<ShiftResponse>(`/api/shifts/${id}/fact`, { fact_volume, idempotency_key: key }),
   myPenalties: () =>
-    request<{ items: { id: number; shift_date: string; penalty_amount: number | null; penalty_set_at: string | null }[] }>(
-      "/api/me/penalties",
-    ),
+    request<{
+      items: { id: number; kind: "final_cancel" | "shortfall"; shift_date: string; penalty_amount: number | null; reason: string }[];
+    }>("/api/me/penalties"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
     request<{ weeks: { start: string; end: string; shifts: Shift[] }[] }>(`/api/history?weeks_back=${weeksBack}`),
@@ -283,6 +311,9 @@ export const api = {
     broadcastTest: (html: string, signed: boolean) => post<{ ok: boolean }>("/api/admin/broadcasts/test", { html, signed }),
     exportXlsx: (date_from: string, date_to: string, user_id?: number) =>
       post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
+    shortfalls: () => request<{ items: Shortfall[] }>("/api/admin/shortfalls"),
+    decideShortfall: (shiftId: number, amount: number | null) =>
+      post<{ shift: Shift; changed: boolean }>(`/api/admin/shifts/${shiftId}/shortfall`, { amount, override: true }),
     team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),
     setRole: (userId: number, role: User["role"], key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/role`, { role, idempotency_key: key }),

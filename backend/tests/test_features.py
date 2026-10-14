@@ -274,3 +274,69 @@ def test_sanitizer_closes_open_tags_and_rejects_empty():
         svc.prepare_message("<b> </b><br>")
     with pytest.raises(svc.ServiceError):
         svc.prepare_message("x" * 4001)
+
+
+# ---------------------------------------------------------------- plan vs fact shortfall
+
+
+def test_shortfall_flow_notifies_and_fines(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    u = make_user()
+    s = shift(conn, u, payload={**P, "volume": 20})
+    res = svc.set_fact(conn, u, s["id"], 10, svc.new_key(), today=THU)
+    assert svc.shortfall(res.shift) == 10 and svc.shortfall_percent(res.shift) == 50
+    view = svc.serialize_shift(res.shift, THU)
+    assert view["shortfall"] == 10 and view["shortfall_status"] is None
+
+    n = FakeNotifier(conn)
+    run(n.fact_result(res.shift))
+    to_user = [t for chat, t in n.sent if chat == u["telegram_id"]]
+    to_admin = [t for chat, t in n.sent if chat == 999]
+    assert to_user and "Не по норме" in to_user[0] and "План 20, факт 10 шт. — 50% (−10 шт.)" in to_user[0]
+    assert to_admin and "Назначить штраф" in to_admin[0]
+
+    assert svc.shortfalls(conn)[0]["shift_id"] == s["id"]
+    fined = svc.decide_shortfall(conn, owner, s["id"], 700)
+    assert fined.changed and fined.shift["shortfall_penalty"] == 700
+    assert not svc.decide_shortfall(conn, owner, s["id"], 2000).changed  # first decision wins in the bot
+    assert svc.shortfalls(conn) == []
+    # the employee can no longer rewrite the fact to dodge the fine
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_fact(conn, u, s["id"], 20, svc.new_key(), today=THU)
+    assert e.value.code == "fact_locked"
+
+    penalties = svc.user_penalties(conn, u["id"])
+    assert penalties[0]["kind"] == "shortfall" and penalties[0]["penalty_amount"] == 700
+    st = svc.stats(conn, u["id"], TODAY, THU)
+    assert st["totals"]["penalties"] == 700 and st["totals"]["shortfall_volume"] == 10
+    log = svc.penalty_log(conn, None, None, None)
+    assert log[0]["kind"] == "shortfall" and log[0]["amount"] == 700
+
+    run(n.shortfall_decided(fined.shift, "Саня", 999))
+    assert any("Штраф 700 ₽" in t for chat, t in n.sent if chat == u["telegram_id"])
+
+    wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
+    header = list(wb["Итоги"].iter_rows(values_only=True))[0]
+    row = list(wb["Итоги"].iter_rows(values_only=True))[1]
+    assert row[header.index("Недобор, шт.")] == 10 and row[header.index("Штрафы, ₽")] == 700
+
+
+def test_shortfall_waive_and_admin_correction(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    u = make_user()
+    s = shift(conn, u, payload={**P, "volume": 20})
+    svc.set_fact(conn, u, s["id"], 20, svc.new_key(), today=THU)
+    with pytest.raises(svc.ServiceError) as e:
+        svc.decide_shortfall(conn, owner, s["id"], 500)
+    assert e.value.code == "no_shortfall"
+    n = FakeNotifier(conn)
+    run(n.fact_result(svc.get_shift(conn, s["id"])))
+    assert n.sent == []  # plan met: nobody is bothered
+
+    svc.admin_edit_shift(conn, owner, s["id"], {"fact_volume": 15, "reason": "пересчитали"}, svc.new_key())
+    waived = svc.decide_shortfall(conn, owner, s["id"], None)
+    assert waived.shift["shortfall_status"] == "waived"
+    assert svc.penalty_log(conn, None, None, None) == []
+    # admin raises the fact back to the plan: the decision is cleared
+    fixed = svc.admin_edit_shift(conn, owner, s["id"], {"fact_volume": 20, "reason": "нашли ещё"}, svc.new_key())
+    assert fixed.shift["shortfall_status"] is None

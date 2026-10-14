@@ -216,6 +216,8 @@ function HistoryView({ onBack }: { onBack: () => void }) {
                       <span className="mt-2 block text-xs text-muted-foreground">
                         {s.location ? `${s.location}, план ${s.volume} шт.` : ""}
                         {s.fact_volume != null ? `, факт ${s.fact_volume} шт.` : ""}
+                        {s.shortfall > 0 && <span className="font-semibold text-cancel">, не по норме −{s.shortfall}</span>}
+                        {s.shortfall_status === "fined" && <span className="text-final">, штраф {rub(s.shortfall_penalty ?? 0)}</span>}
                         {s.lazy ? ", налог на лень" : ""}
                         {s.status === "finally_cancelled" &&
                           (s.penalty_amount != null ? `, штраф ${rub(s.penalty_amount)}` : ", штраф ещё не назначен")}
@@ -242,7 +244,7 @@ function PenaltiesView({ onBack }: { onBack: () => void }) {
       {data && data.items.length === 0 && (
         <div className="rounded-3xl bg-card p-6 shadow-lift">
           <p className="font-semibold">Штрафов нет</p>
-          <p className="mt-1 text-sm text-muted-foreground">Штраф начисляется, только если отменить смену второй раз.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Штраф бывает за повторную отмену смены и за невыполненную норму.</p>
         </div>
       )}
       {data && data.items.length > 0 && (
@@ -253,10 +255,10 @@ function PenaltiesView({ onBack }: { onBack: () => void }) {
           </div>
           <ul className="divide-y border-t">
             {data.items.map((p) => (
-              <li key={p.id} className="flex items-center justify-between px-5 py-3.5 md:px-6">
+              <li key={`${p.kind}-${p.id}`} className="flex items-center justify-between px-5 py-3.5 md:px-6">
                 <div>
                   <p className="font-medium">{dayMonth(p.shift_date)}</p>
-                  <p className="text-xs text-muted-foreground">Окончательная отмена смены</p>
+                  <p className="text-xs text-muted-foreground">{p.reason}</p>
                 </div>
                 <span className="font-semibold tabular">{p.penalty_amount != null ? rub(p.penalty_amount) : "ждёт решения"}</span>
               </li>

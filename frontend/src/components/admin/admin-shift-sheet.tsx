@@ -20,6 +20,7 @@ import { STATUS_META, longDate } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
+import { PlanFactBar, ShortfallDecision } from "./shortfall";
 
 export interface EditableShift {
   id: number;
@@ -31,6 +32,9 @@ export interface EditableShift {
   location: string | null;
   penalty_amount: number | null;
   fact_volume?: number | null;
+  shortfall?: number;
+  shortfall_status?: "fined" | "waived" | null;
+  shortfall_penalty?: number | null;
   name: string;
   username: string | null;
 }
@@ -185,6 +189,18 @@ export function AdminShiftSheet({
                       <input inputMode="numeric" className={cn(field, "tabular")} value={volume}
                              onChange={(e) => setVolume(e.target.value.replace(/\D/g, "").slice(0, 5))} />
                     </Field>
+                  </div>
+                )}
+
+                {going && !!shift.shortfall && shift.volume != null && shift.fact_volume != null && (
+                  <div className="space-y-3 rounded-2xl bg-cancel-soft p-4">
+                    <p className="font-semibold text-cancel">Не по норме: −{shift.shortfall} шт.</p>
+                    <PlanFactBar plan={shift.volume} fact={shift.fact_volume} />
+                    <ShortfallDecision
+                      shiftId={shift.id}
+                      current={{ status: shift.shortfall_status ?? null, penalty: shift.shortfall_penalty ?? null }}
+                      onDone={onChanged}
+                    />
                   </div>
                 )}
 

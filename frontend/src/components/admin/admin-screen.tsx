@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
 import { TeamSection } from "./team-section";
+import { PlanFactBar, ShortfallInbox } from "./shortfall";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
@@ -44,6 +45,8 @@ export function AdminScreen({ me }: { me: User }) {
   const [section, setSection] = useState<Section>("raspred");
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
+  const pendingShort = useLoad(() => api.admin.shortfalls(), [version, section]);
+  const shortCount = pendingShort.data?.items.length ?? 0;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -60,11 +63,17 @@ export function AdminScreen({ me }: { me: User }) {
                 setSection(s.id);
               }}
               className={cn(
-                "press h-10 shrink-0 rounded-xl px-4 text-sm font-semibold transition-colors duration-200 md:flex-1 md:px-2",
+                "press inline-flex h-10 shrink-0 items-center justify-center rounded-xl px-4 text-sm font-semibold whitespace-nowrap transition-colors duration-200 md:flex-1 md:px-2",
                 section === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
               {s.label}
+              {s.id === "penalties" && shortCount > 0 && (
+                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
+                  section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
+                  {shortCount}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -74,7 +83,7 @@ export function AdminScreen({ me }: { me: User }) {
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
-        {section === "penalties" && <PenaltiesSection version={version} onEdit={setEditing} />}
+        {section === "penalties" && <PenaltiesSection version={version} onEdit={setEditing} onChanged={() => setVersion((v) => v + 1)} />}
         {section === "team" && <TeamSection me={me} />}
         {section === "points" && <PointsSection />}
         {section === "broadcast" && <BroadcastSection />}
@@ -251,6 +260,11 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
                     <span className="shrink-0 text-right text-sm">
                       <span className="block font-semibold tabular">{s.start_time ? timeRange(s) : ""}</span>
                       <span className="text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
+                      {s.fact_volume != null && (
+                        <span className={cn("block text-xs font-semibold", s.shortfall ? "text-cancel" : "text-go")}>
+                          факт {s.fact_volume}{s.shortfall ? ` (−${s.shortfall})` : ""}
+                        </span>
+                      )}
                     </span>
                   </button>
                 </li>
@@ -368,6 +382,12 @@ function StatsSection({ version, onEdit }: { version: number; onEdit: EditFn }) 
               <Fact label="Заработок, факт">{rub(t.fact_pay)}</Fact>
               <Fact label="Отменено">{t.cancelled_volume} шт.</Fact>
               <Fact label="Штрафы">{rub(t.penalties)}</Fact>
+              <Fact label="Не по норме">
+                <span className={t.shortfall_shifts ? "text-cancel" : ""}>
+                  {t.shortfall_shifts ? `${t.shortfall_shifts} ${plural(t.shortfall_shifts, "смена", "смены", "смен")}, −${t.shortfall_volume} шт.` : "нет"}
+                </span>
+                {t.shortfall_pending > 0 && <span className="block text-xs font-normal text-wait">ждут решения: {t.shortfall_pending}</span>}
+              </Fact>
             </dl>
           </div>
           {stats.data.items.length === 0 ? (
@@ -404,7 +424,11 @@ function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; on
           </span>
           {item.start_time && <span className="text-sm font-semibold tabular">{timeRange(item)}</span>}
         </span>
-        <DayTrack className="mt-2.5" state={item.status} mine={item.start_time ? item : null} others={[]} index={index} />
+        {item.shortfall > 0 && item.volume && item.fact_volume != null ? (
+          <PlanFactBar className="mt-2.5" plan={item.volume} fact={item.fact_volume} />
+        ) : (
+          <DayTrack className="mt-2.5" state={item.status} mine={item.start_time ? item : null} others={[]} index={index} />
+        )}
         <span className="mt-2 block truncate text-xs text-muted-foreground">
           {[
             item.location && `${item.location}, план ${item.volume} шт.`,
@@ -419,14 +443,14 @@ function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; on
   );
 }
 
-function PenaltiesSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
+function PenaltiesSection({ version, onEdit, onChanged }: { version: number; onEdit: EditFn; onChanged: () => void }) {
   const users = useLoad(() => api.admin.users(), [version]);
   const [user, setUser] = useState<User | null>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const { data, loading } = useLoad(() => api.admin.penalties({ userId: user?.id, from, to }), [user?.id, from, to, version]);
   const total = data?.items.reduce((s, p) => s + (p.amount ?? 0), 0) ?? 0;
-  const pending = data?.items.filter((p) => p.amount == null).length ?? 0;
+  const pending = data?.items.filter((p) => p.kind === "final_cancel" && p.amount == null).length ?? 0;
 
   async function open(shiftId: number, date: string) {
     const day = await api.admin.day(date);
@@ -436,7 +460,9 @@ function PenaltiesSection({ version, onEdit }: { version: number; onEdit: EditFn
 
   return (
     <div className="space-y-4">
+      <ShortfallInbox version={version} onChanged={onChanged} />
       <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <h2 className="font-semibold">Журнал штрафов</h2>
         {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-12 rounded-2xl" />}
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1.5">
@@ -462,18 +488,21 @@ function PenaltiesSection({ version, onEdit }: { version: number; onEdit: EditFn
               <p className="font-display text-3xl font-semibold">{rub(total)}</p>
               {pending > 0 && (
                 <p className="mt-1 text-sm text-wait">
-                  {pending} {plural(pending, "штраф ждёт", "штрафа ждут", "штрафов ждут")} суммы
+                  {pending} {plural(pending, "отмена ждёт", "отмены ждут", "отмен ждут")} суммы штрафа
                 </p>
               )}
             </div>
             <ul className="divide-y border-t">
               {data?.items.map((p) => (
-                <li key={p.shift_id}>
+                <li key={`${p.kind}-${p.shift_id}`}>
                   <button className="press flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-muted/60 md:px-6"
                           onClick={() => open(p.shift_id, p.date)}>
                     <span className="min-w-0">
                       <span className="block truncate font-medium">{p.name}</span>
-                      <span className="block text-sm text-muted-foreground">
+                      <span className={cn("block text-sm", p.kind === "shortfall" ? "text-cancel" : "text-muted-foreground")}>
+                        {p.reason}
+                      </span>
+                      <span className="block text-xs text-muted-foreground">
                         Смена {dayMonth(p.date)}
                         {p.set_by ? `, назначил ${p.set_by}` : ""}
                       </span>

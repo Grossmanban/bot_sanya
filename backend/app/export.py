@@ -9,7 +9,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import pricing
-from .services import ACTIVE, full_name
+from .services import ACTIVE, full_name, shortfall
 
 STATUS_RU = {
     "active": "Выход",
@@ -63,7 +63,7 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
         t = totals.setdefault(
             s["user_id"],
             {"name": full_name(s), "username": s["username"] or "", "shifts": 0, "plan": 0, "fact": 0, "no_fact": 0,
-             "plan_pay": 0, "fact_pay": 0, "cancelled": 0, "penalties": 0, "off": 0},
+             "plan_pay": 0, "fact_pay": 0, "cancelled": 0, "penalties": 0, "off": 0, "short": 0, "short_shifts": 0},
         )
         if s["status"] in ACTIVE:
             t["shifts"] += 1
@@ -78,19 +78,22 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
             t["cancelled"] += 1
         elif s["status"] == "pre_declared_off":
             t["off"] += 1
-        t["penalties"] += s["penalty_amount"] or 0
+        t["penalties"] += (s["penalty_amount"] or 0) + (s["shortfall_penalty"] or 0)
+        if shortfall(s):
+            t["short"] += shortfall(s)
+            t["short_shifts"] += 1
     total_rows = [
-        [t["name"], t["username"], t["shifts"], t["plan"], t["fact"], t["no_fact"], t["plan_pay"], t["fact_pay"],
-         t["cancelled"], t["off"], t["penalties"], t["fact_pay"] - t["penalties"]]
+        [t["name"], t["username"], t["shifts"], t["plan"], t["fact"], t["no_fact"], t["short_shifts"], t["short"],
+         t["plan_pay"], t["fact_pay"], t["cancelled"], t["off"], t["penalties"], t["fact_pay"] - t["penalties"]]
         for t in sorted(totals.values(), key=lambda x: x["name"])
     ]
     if total_rows:
-        total_rows.append(["Итого", "", *[sum(r[i] for r in total_rows) for i in range(2, 12)]])
+        total_rows.append(["Итого", "", *[sum(r[i] for r in total_rows) for i in range(2, 14)]])
     ws = _sheet(
         wb, "Итоги",
-        ["Сотрудник", "Username", "Выходов", "План, шт.", "Факт, шт.", "Без факта", "План, ₽", "Факт, ₽",
-         "Отмен", "Выходных", "Штрафы, ₽", "К выплате (факт − штрафы), ₽"],
-        total_rows, [24, 16, 10, 11, 11, 11, 12, 12, 9, 11, 12, 28], first=True,
+        ["Сотрудник", "Username", "Выходов", "План, шт.", "Факт, шт.", "Без факта", "Не по норме, смен",
+         "Недобор, шт.", "План, ₽", "Факт, ₽", "Отмен", "Выходных", "Штрафы, ₽", "К выплате (факт − штрафы), ₽"],
+        total_rows, [24, 16, 10, 11, 11, 11, 18, 13, 12, 12, 9, 11, 12, 28], first=True,
     )
     if total_rows:
         for cell in ws[ws.max_row]:
@@ -99,7 +102,7 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
     _sheet(
         wb, "Смены",
         ["Дата", "Сотрудник", "Статус", "Начало", "Конец", "Точка", "План, шт.", "Ставка, ₽", "План, ₽",
-         "Факт, шт.", "Факт, ₽", "Штраф, ₽", "Срочная"],
+         "Факт, шт.", "Факт, ₽", "Недобор, шт.", "Штраф за норму, ₽", "Штраф за отмену, ₽", "Срочная"],
         [
             [
                 date.fromisoformat(s["shift_date"]).strftime("%d.%m.%Y"), full_name(s), STATUS_RU.get(s["status"], s["status"]),
@@ -108,12 +111,14 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
                 pricing.expected_pay(s["volume"]) if s["volume"] and s["status"] in ACTIVE else "",
                 s["fact_volume"] if s["fact_volume"] is not None else "",
                 pricing.expected_pay(s["fact_volume"]) if s["fact_volume"] is not None else "",
+                shortfall(s) or "",
+                s["shortfall_penalty"] if s["shortfall_penalty"] is not None else ("без штрафа" if s["shortfall_status"] == "waived" else ""),
                 s["penalty_amount"] if s["penalty_amount"] is not None else "",
                 "да" if s["is_urgent"] else "",
             ]
             for s in shifts
         ],
-        [12, 24, 20, 9, 9, 16, 10, 10, 10, 10, 10, 10, 9],
+        [12, 24, 20, 9, 9, 16, 10, 10, 10, 10, 10, 12, 18, 18, 9],
     )
 
     _sheet(
@@ -124,6 +129,11 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
              s["penalty_amount"] if s["penalty_amount"] is not None else "не назначен"]
             for s in shifts
             if s["status"] == "finally_cancelled"
+        ] + [
+            [date.fromisoformat(s["shift_date"]).strftime("%d.%m.%Y"), full_name(s),
+             f"Не выполнена норма: план {s['volume']}, факт {s['fact_volume']}", s["shortfall_penalty"]]
+            for s in shifts
+            if s["shortfall_status"] == "fined"
         ],
         [12, 24, 30, 14],
     )
