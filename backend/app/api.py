@@ -85,8 +85,14 @@ class PointPatch(BaseModel):
 
 
 class BroadcastBody(BaseModel):
-    audience: str
-    text: str
+    audiences: list[str]
+    html: str
+    signed: bool = True
+
+
+class BroadcastTest(BaseModel):
+    html: str
+    signed: bool = True
 
 
 class ExportBody(BaseModel):
@@ -282,16 +288,28 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/broadcasts")
     async def admin_broadcasts(_: dict = Depends(admin_user)):
-        return {"items": svc.list_broadcasts(conn), "audiences": svc.AUDIENCES,
-                "counts": {a: len(svc.broadcast_recipients(conn, a)) for a in svc.AUDIENCES}}
+        people = [
+            {"id": u["id"], "working": u["work_status"] == "working", "admin": u["role"] == "admin"}
+            for u in svc.list_users(conn)
+        ]
+        return {"items": svc.list_broadcasts(conn), "audiences": svc.AUDIENCES, "people": people}
 
     @api.post("/admin/broadcasts")
     async def admin_broadcast(body: BroadcastBody, admin: dict = Depends(admin_user)):
         if notifier.bot is None:
             raise svc.ServiceError("Бот не запущен: рассылка недоступна", 503, "no_bot")
-        row, recipients = svc.create_broadcast(conn, admin, body.audience, body.text)
-        notifier.spawn(notifier.broadcast(row["id"], recipients, row["text"]))
+        row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed)
+        notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], bool(row["signed"])))
         return {"broadcast": row}
+
+    @api.post("/admin/broadcasts/test")
+    async def admin_broadcast_test(body: BroadcastTest, admin: dict = Depends(admin_user)):
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен: проверка недоступна", 503, "no_bot")
+        html, _ = svc.prepare_message(body.html)
+        if not await notifier.send(admin["telegram_id"], notifier.broadcast_body(html, body.signed)):
+            raise svc.ServiceError("Telegram не принял сообщение. Проверьте ссылки и форматирование", 502, "send_failed")
+        return {"ok": True}
 
     @api.post("/admin/export")
     async def admin_export(body: ExportBody, admin: dict = Depends(admin_user)):

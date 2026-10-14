@@ -23,7 +23,8 @@ import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
 import { TeamSection } from "./team-section";
-import { BroadcastSection, ExportCard, PointsSection, SettingsSection } from "./admin-extra";
+import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
+import { BroadcastSection } from "./broadcast-section";
 
 type Section = "raspred" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 const SECTIONS: { id: Section; label: string }[] = [

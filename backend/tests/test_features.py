@@ -200,7 +200,7 @@ def test_broadcast_audiences(conn, make_user):
     row, recipients = svc.create_broadcast(conn, admin, "all", "  Привет всем  ")
     assert row["text"] == "Привет всем" and row["recipients"] == 3
     n = FakeNotifier(conn)
-    assert run(n.broadcast(row["id"], recipients, row["text"])) == 3
+    assert run(n.broadcast(row["id"], recipients, row["html"])) == 3
     assert svc.list_broadcasts(conn)[0]["delivered"] == 3
     with pytest.raises(svc.ServiceError):
         svc.create_broadcast(conn, admin, "all", "   ")
@@ -218,6 +218,59 @@ def test_migration_from_first_schema(tmp_path):
     old.commit()
     old.close()
     conn = connect(str(path))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    from app.db import MIGRATIONS
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
     assert conn.execute("SELECT notify_reminders FROM users").fetchone()[0] == 1
     connect(str(path))  # idempotent
+
+
+def test_broadcast_audience_toggles_union(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")  # admin, not working
+    worker = make_user()
+    idle = make_user("Ваня", "Бургер", None, working=False)
+    helper = make_user("Мария", "Админова", "m")  # working
+    svc.set_role(conn, owner, helper["id"], "admin", svc.new_key())
+    ids = lambda groups: {u["id"] for u in svc.broadcast_recipients(conn, groups)}
+    assert ids(["working"]) == {worker["id"], helper["id"]}
+    assert ids(["not_working"]) == {owner["id"], idle["id"]}
+    assert ids(["admins"]) == {owner["id"], helper["id"]}
+    assert ids(["working", "admins"]) == {worker["id"], helper["id"], owner["id"]}  # helper counted once
+    with pytest.raises(svc.ServiceError):
+        svc.broadcast_recipients(conn, [])
+    row, rec = svc.create_broadcast(conn, owner, ["working", "admins"], "<b>Важно</b>: завтра <i>сбор</i> в 9:00", signed=False)
+    assert row["html"] == "<b>Важно</b>: завтра <i>сбор</i> в 9:00" and row["text"].startswith("Важно")
+    assert row["signed"] == 0 and len(rec) == 3
+
+
+def test_sanitizer_keeps_telegram_tags_and_drops_the_rest():
+    from app.richtext import sanitize
+
+    html, text = sanitize(
+        '<div><strong>Жирный</strong> <em>курсив</em> <u>под</u> <strike>зач</strike></div>'
+        '<div><span class="tg-spoiler">секрет</span> <code>код <b>без</b> формата</code></div>'
+        '<blockquote>цитата <blockquote>вложенная</blockquote></blockquote>'
+        '<a href="https://t.me/x">ссылка</a> <a href="javascript:alert(1)">плохая</a>'
+        '<script>alert(1)</script><img src=x onerror=alert(1)><span style="color:red">цвет</span> 5 < 6 & 7'
+    )
+    assert "<b>Жирный</b>" in html and "<i>курсив</i>" in html and "<u>под</u>" in html and "<s>зач</s>" in html
+    assert "<tg-spoiler>секрет</tg-spoiler>" in html
+    assert "<code>код без формата</code>" in html
+    assert html.count("<blockquote>") == 1
+    assert '<a href="https://t.me/x">ссылка</a>' in html and "javascript" not in html and "плохая" in html
+    assert "<script" not in html and "<img" not in html and "style" not in html
+    assert "5 &lt; 6 &amp; 7" in html
+    assert "Жирный" in text and "<" not in text.replace("5 < 6", "")
+
+
+def test_sanitizer_closes_open_tags_and_rejects_empty():
+    from app.richtext import sanitize
+
+    html, _ = sanitize("<b>начало <i>середина")
+    assert html == "<b>начало <i>середина</i></b>"
+    html, _ = sanitize("<b>a<i>b</b>c</i>")
+    assert html == "<b>a<i>b</i></b>c"
+    with pytest.raises(svc.ServiceError):
+        svc.prepare_message("<b> </b><br>")
+    with pytest.raises(svc.ServiceError):
+        svc.prepare_message("x" * 4001)

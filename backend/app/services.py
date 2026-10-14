@@ -1067,35 +1067,49 @@ def set_notify(conn, user: dict, enabled: bool) -> dict:
 
 
 AUDIENCES = {
-    "working": "Работающим сейчас",
-    "all": "Всем сотрудникам",
-    "admins": "Администраторам",
+    "working": "Работают",
+    "not_working": "Не работают",
+    "admins": "Администраторы",
 }
 
 
-def broadcast_recipients(conn, audience: str) -> list[dict]:
-    if audience == "working":
-        sql = "SELECT * FROM users WHERE status = 'approved' AND work_status = 'working'"
-    elif audience == "all":
-        sql = "SELECT * FROM users WHERE status = 'approved'"
-    elif audience == "admins":
-        sql = "SELECT * FROM users WHERE status = 'approved' AND role = 'admin'"
-    else:
-        raise ServiceError("Неизвестная аудитория", 422, "bad_audience")
-    return [dict(r) for r in conn.execute(sql)]
+def broadcast_recipients(conn, audiences: list[str] | str) -> list[dict]:
+    """Union of the chosen groups among people with access; each person once."""
+    if isinstance(audiences, str):
+        audiences = ["working", "not_working"] if audiences == "all" else [audiences]
+    if not audiences or any(a not in AUDIENCES for a in audiences):
+        raise ServiceError("Выберите, кому отправить", 422, "bad_audience")
+    rules = {
+        "working": "work_status = 'working'",
+        "not_working": "work_status = 'not_working'",
+        "admins": "role = 'admin'",
+    }
+    where = " OR ".join(f"({rules[a]})" for a in dict.fromkeys(audiences))
+    return [dict(r) for r in conn.execute(f"SELECT * FROM users WHERE status = 'approved' AND ({where}) ORDER BY id")]
 
 
-def create_broadcast(conn, admin: dict, audience: str, text: str) -> tuple[dict, list[dict]]:
-    text = (text or "").strip()
-    if not text:
+def prepare_message(html: str) -> tuple[str, str]:
+    from .richtext import MAX_TEXT, sanitize
+
+    clean, text = sanitize(html)
+    if not text.strip():
         raise ServiceError("Напишите текст сообщения", 422, "empty")
-    if len(text) > 3000:
-        raise ServiceError("Сообщение длиннее 3000 символов", 422, "too_long")
-    recipients = broadcast_recipients(conn, audience)
+    if len(text) > MAX_TEXT:
+        raise ServiceError(f"Сообщение длиннее {MAX_TEXT} символов", 422, "too_long")
+    return clean, text
+
+
+def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True) -> tuple[dict, list[dict]]:
+    clean, text = prepare_message(html)
+    recipients = broadcast_recipients(conn, audiences)
+    if not recipients:
+        raise ServiceError("В выбранных группах никого нет", 422, "no_recipients")
+    audience = ",".join(audiences) if isinstance(audiences, list) else audiences
     with transaction(conn):
         cur = conn.execute(
-            "INSERT INTO broadcasts (author_id, audience, text, recipients, created_at) VALUES (?, ?, ?, ?, ?)",
-            (admin["telegram_id"], audience, text, len(recipients), now_iso()),
+            """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (admin["telegram_id"], audience, text, clean, int(signed), len(recipients), now_iso()),
         )
     return dict(conn.execute("SELECT * FROM broadcasts WHERE id = ?", (cur.lastrowid,)).fetchone()), recipients
 

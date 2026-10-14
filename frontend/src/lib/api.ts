@@ -181,6 +181,8 @@ export interface Broadcast {
   id: number;
   audience: string;
   text: string;
+  html: string | null;
+  signed: number;
   recipients: number;
   delivered: number;
   created_at: string;
@@ -273,8 +275,12 @@ export const api = {
     saveSettings: (body: Partial<ScheduleSettings>) =>
       patch<{ settings: ScheduleSettings; timezone: string }>("/api/admin/settings", body),
     broadcasts: () =>
-      request<{ items: Broadcast[]; audiences: Record<string, string>; counts: Record<string, number> }>("/api/admin/broadcasts"),
-    broadcast: (audience: string, text: string) => post<{ broadcast: Broadcast }>("/api/admin/broadcasts", { audience, text }),
+      request<{ items: Broadcast[]; audiences: Record<string, string>; people: { id: number; working: boolean; admin: boolean }[] }>(
+        "/api/admin/broadcasts",
+      ),
+    broadcast: (audiences: string[], html: string, signed: boolean) =>
+      post<{ broadcast: Broadcast }>("/api/admin/broadcasts", { audiences, html, signed }),
+    broadcastTest: (html: string, signed: boolean) => post<{ ok: boolean }>("/api/admin/broadcasts/test", { html, signed }),
     exportXlsx: (date_from: string, date_to: string, user_id?: number) =>
       post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
     team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),

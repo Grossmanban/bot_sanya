@@ -268,3 +268,56 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .no-scrollbar {
   scrollbar-width: none;
 }
+
+/* ---------- Telegram-style rich text (broadcast editor and history) ---------- */
+.tg-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+.tg-rich b,
+.tg-editor b,
+.tg-rich strong,
+.tg-editor strong {
+  font-weight: 700;
+}
+.tg-rich a,
+.tg-editor a {
+  color: var(--st-go);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.tg-rich code,
+.tg-editor code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  border-radius: 6px;
+  padding: 0.05em 0.35em;
+}
+.tg-rich blockquote,
+.tg-editor blockquote {
+  display: block;
+  margin: 0.35em 0;
+  padding: 0.25em 0 0.25em 0.75em;
+  border-left: 3px solid var(--st-go);
+  background: color-mix(in oklab, var(--st-go) 8%, transparent);
+  border-radius: 0 8px 8px 0;
+}
+.tg-rich .tg-spoiler,
+.tg-editor .tg-spoiler {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--foreground) 22%, transparent) 0 2px,
+    color-mix(in oklab, var(--foreground) 10%, transparent) 2px 5px
+  );
+  border-radius: 4px;
+}
+.tg-rich .tg-spoiler {
+  color: transparent;
+  transition: color 0.2s;
+}
+.tg-rich .tg-spoiler:hover,
+.tg-rich .tg-spoiler:active {
+  color: inherit;
+}
