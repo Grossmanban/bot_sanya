@@ -21,6 +21,7 @@ import { readLocal, useAction, writeLocal } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { DayLanes, type Lane } from "../day-line";
 import { initialForm, prefillFrom, ShiftForm, validateForm, type FormState } from "./shift-form";
+import { PlanFactBar } from "../admin/shortfall";
 
 type Mode = "view" | "create" | "edit" | "restore";
 
@@ -181,7 +182,9 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
         shift && <ShiftView shift={shift} />
       )}
 
-      {!formMode && shift?.can_set_fact && <FactBlock shift={shift} pricing={pricing} onChanged={onChanged} />}
+      {!formMode && shift && (shift.can_set_fact || shift.fact_volume != null) && (
+        <FactBlock shift={shift} pricing={pricing} onChanged={onChanged} />
+      )}
 
       <div className="space-y-2.5">
         {formMode && (
@@ -378,19 +381,36 @@ function FactBlock({ shift, pricing, onChanged }: { shift: Shift; pricing: Prici
     }
   }
 
-  if (!editing && shift.fact_volume != null) {
+  if ((!editing || !shift.can_set_fact) && shift.fact_volume != null) {
+    const short = shift.shortfall > 0;
     return (
-      <div className="flex items-center justify-between gap-3 rounded-2xl bg-go-soft px-4 py-3">
-        <div>
-          <p className="text-xs text-muted-foreground">Сделано по факту</p>
-          <p className="font-display text-xl font-semibold">
-            {shift.fact_volume} шт.
-            {shift.fact_pay != null && <span className="ml-2 text-base font-medium text-muted-foreground">{rub(shift.fact_pay)}</span>}
-          </p>
+      <div className={cn("space-y-3 rounded-2xl px-4 py-3.5", short ? "bg-cancel-soft" : "bg-go-soft")}>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className={cn("text-xs", short ? "font-semibold text-cancel" : "text-muted-foreground")}>
+              {short ? "Не по норме" : "Норма выполнена"}
+            </p>
+            <p className="font-display text-xl font-semibold whitespace-nowrap">
+              {shift.fact_volume} из {shift.volume} шт.
+            </p>
+            {shift.fact_pay != null && <p className="text-sm text-muted-foreground">заработок по факту {rub(shift.fact_pay)}</p>}
+          </div>
+          {shift.can_set_fact && (
+            <Button variant="ghost" className="rounded-xl" onClick={() => setEditing(true)}>
+              Изменить
+            </Button>
+          )}
         </div>
-        <Button variant="ghost" className="rounded-xl" onClick={() => setEditing(true)}>
-          Изменить
-        </Button>
+        {short && shift.volume != null && <PlanFactBar plan={shift.volume} fact={shift.fact_volume} />}
+        {short && (
+          <p className="text-sm">
+            {shift.shortfall_status === "fined"
+              ? `Назначен штраф ${rub(shift.shortfall_penalty ?? 0)} за недобор ${shift.shortfall} шт.`
+              : shift.shortfall_status === "waived"
+                ? "Администратор учёл недобор без штрафа."
+                : `Недобор ${shift.shortfall} шт. Администраторы это видят и могут назначить штраф.`}
+          </p>
+        )}
       </div>
     );
   }
@@ -414,6 +434,11 @@ function FactBlock({ shift, pricing, onChanged }: { shift: Shift; pricing: Prici
         </button>
       </div>
       {n > 0 && <p className="text-sm text-muted-foreground">{n} × {rate} ₽ = {rub(n * rate)}</p>}
+      {shift.volume != null && value !== "" && n < shift.volume && (
+        <p className="rounded-xl bg-cancel-soft px-3 py-2 text-sm text-cancel">
+          Это меньше плана на {shift.volume - n} шт. Администраторы получат уведомление о недоборе.
+        </p>
+      )}
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} Сохранить факт
       </Button>

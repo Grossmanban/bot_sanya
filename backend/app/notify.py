@@ -188,6 +188,20 @@ def svc_status_ru(status: str) -> str:
 # ---------------------------------------------------------------- sender
 
 
+def shortfall_keyboard(shift_id: int) -> InlineKeyboardMarkup:
+    presets = [InlineKeyboardButton(text=f"{a} ₽", callback_data=f"sf:{shift_id}:{a}") for a in PENALTY_PRESETS]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        presets,
+        [InlineKeyboardButton(text="Своя сумма…", callback_data=f"sf:{shift_id}:custom"),
+         InlineKeyboardButton(text="Без штрафа", callback_data=f"sf:{shift_id}:0")],
+    ])
+
+
+def _shortfall_line(shift: dict) -> str:
+    short = svc.shortfall(shift)
+    return f"План {shift['volume']}, факт {shift['fact_volume']} шт. — {svc.shortfall_percent(shift)}% (−{short} шт.)"
+
+
 class Notifier:
     def __init__(self, bot: Bot | None, conn: sqlite3.Connection):
         self.bot = bot
@@ -311,3 +325,34 @@ class Notifier:
             )
         else:
             await self.send(user["telegram_id"], "Права администратора сняты.", ReplyKeyboardRemove())
+
+    async def fact_result(self, shift: dict, actor_tg: int | None = None) -> None:
+        """After a fact is saved: warn the employee and ask admins for a decision if the plan was missed."""
+        if not svc.shortfall(shift) or shift["shortfall_status"]:
+            return
+        user = svc.get_user(self.conn, shift["user_id"])
+        day = _day(shift)
+        place = f"{ddmm_wd(day)} {shift['start_time']}–{shift['end_time']}, «{escape(shift['location'] or '')}»"
+        await self.send(
+            user["telegram_id"],
+            f"⚠️ <b>Не по норме</b>\n{place}\n{_shortfall_line(shift)}\n\nАдминистраторы это видят и могут назначить штраф.",
+        )
+        await self.to_admins(
+            f"📉 <b>Не по норме</b>\n{who(user)}\n{place}\n{_shortfall_line(shift)}\n\nНазначить штраф?",
+            shortfall_keyboard(shift["id"]),
+            exclude=actor_tg,
+        )
+
+
+    async def shortfall_decided(self, shift: dict, admin_name: str, admin_tg: int) -> None:
+        user = svc.get_user(self.conn, shift["user_id"])
+        day = ddmm(_day(shift))
+        if shift["shortfall_status"] == "fined":
+            await self.send(user["telegram_id"],
+                            f"💸 Штраф {shift['shortfall_penalty']} ₽: не выполнена норма {day} "
+                            f"(план {shift['volume']}, факт {shift['fact_volume']} шт.).")
+            verdict = f"штраф {shift['shortfall_penalty']} ₽"
+        else:
+            await self.send(user["telegram_id"], f"По смене {day} недобор учтён без штрафа.")
+            verdict = "без штрафа"
+        await self.to_admins(f"Решено по недобору {who(user)} за {day}: {verdict} — {escape(admin_name)}", exclude=admin_tg)

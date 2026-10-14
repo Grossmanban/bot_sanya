@@ -41,6 +41,10 @@ class FactInput(StatesGroup):
     amount = State()
 
 
+class ShortfallInput(StatesGroup):
+    amount = State()
+
+
 def open_app_keyboard() -> InlineKeyboardMarkup | None:
     if not settings.webapp_url.startswith("https://"):
         return None
@@ -252,9 +256,11 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         if user is None or user["status"] != "approved":
             return "Нет доступа"
         try:
-            svc.set_fact(conn, user, shift_id, value, svc.new_key())
+            result = svc.set_fact(conn, user, shift_id, value, svc.new_key())
         except svc.ServiceError as exc:
             return exc.message
+        if result.changed:
+            await notifier.fact_result(result.shift)
         return f"Записал: {value} шт. Спасибо!"
 
     @router.callback_query(F.data.startswith("fact:"))
@@ -281,6 +287,50 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         data = await state.get_data()
         await state.clear()
         await message.answer(await save_fact(message.from_user.id, data["shift_id"], int(raw)))
+
+    # ------------------------------------------------------------ shortfall decisions
+
+    async def decide_shortfall(tg, admin_name: str, shift_id: int, amount: int | None) -> tuple[bool, str]:
+        admin = svc.get_user_by_tg(conn, tg.id) or {"telegram_id": tg.id, "id": None}
+        try:
+            result = svc.decide_shortfall(conn, admin, shift_id, amount)
+        except svc.ServiceError as exc:
+            return False, exc.message
+        if not result.changed:
+            done = result.shift
+            already = f"штраф {done['shortfall_penalty']} ₽" if done["shortfall_status"] == "fined" else "без штрафа"
+            return False, f"Уже решено: {already}"
+        await notifier.shortfall_decided(result.shift, admin_name, tg.id)
+        return True, f"Штраф {amount} ₽ назначен" if amount else "Решено без штрафа"
+
+    @router.callback_query(F.data.startswith("sf:"))
+    async def shortfall_pick(call: CallbackQuery, state: FSMContext):
+        if not is_admin(call.from_user.id):
+            await call.answer("Только для администраторов", show_alert=True)
+            return
+        _, shift_id, amount = call.data.split(":")
+        if amount == "custom":
+            await state.set_state(ShortfallInput.amount)
+            await state.update_data(shift_id=int(shift_id))
+            await call.message.answer("Введите сумму штрафа за недобор в рублях (целое число):")
+            await call.answer()
+            return
+        ok, text = await decide_shortfall(call.from_user, call.from_user.full_name, int(shift_id), int(amount) or None)
+        if ok:
+            await call.message.edit_text(f"{call.message.html_text}\n\n<b>{escape(text)}</b> — {escape(call.from_user.full_name)}",
+                                         parse_mode="HTML")
+        await call.answer(text, show_alert=not ok)
+
+    @router.message(StateFilter(ShortfallInput.amount), F.text)
+    async def shortfall_custom(message: Message, state: FSMContext):
+        raw = message.text.strip().replace(" ", "").replace("₽", "")
+        if not raw.isdigit() or not 0 < int(raw) <= svc.MAX_PENALTY:
+            await message.answer("Нужно целое число больше нуля, например 700.")
+            return
+        data = await state.get_data()
+        await state.clear()
+        _, text = await decide_shortfall(message.from_user, message.from_user.full_name, data["shift_id"], int(raw))
+        await message.answer(text)
 
     # ------------------------------------------------------------ admin: raspred
 

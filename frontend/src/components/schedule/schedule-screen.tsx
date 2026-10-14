@@ -276,6 +276,7 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
   const { d, weekday } = parseDay(day.date);
   const withTime = mine?.start_time && state !== "pre_declared_off";
   const names = day.colleagues.map((c) => c.first_name);
+  const short = (mine?.shortfall ?? 0) > 0;
   const needsFact =
     !!mine?.can_set_fact && mine.fact_volume == null && (day.is_past || (day.is_today && !!mine.end_time && mine.end_time <= moscowTime()));
 
@@ -289,7 +290,7 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
         "row-in grid w-full grid-cols-[3rem_1fr] gap-4 px-4 py-3.5 text-left transition-colors md:px-5",
         (!day.is_past || mine) && "hover:bg-muted/60 active:bg-muted",
         selected && "bg-muted",
-        day.is_past && !needsFact && "opacity-45",
+        day.is_past && !needsFact && !short && "opacity-45",
       )}
     >
       <span className="flex flex-col items-center gap-0.5 pt-0.5">
@@ -306,9 +307,9 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
 
       <span className="min-w-0">
         <span className="flex items-baseline justify-between gap-3">
-          <span className={cn("flex items-center gap-2 text-sm font-semibold", meta.text)}>
-            <span className={cn("size-2 rounded-full", meta.dot)} />
-            {meta.label}
+          <span className={cn("flex items-center gap-2 text-sm font-semibold", short ? "text-cancel" : meta.text)}>
+            <span className={cn("size-2 rounded-full", short ? "bg-cancel" : meta.dot)} />
+            {short ? "Не по норме" : meta.label}
           </span>
           {withTime && (
             <span className={cn("text-sm font-semibold tabular", state === "cancelled" || state === "finally_cancelled" ? "text-muted-foreground line-through" : "")}>
@@ -328,7 +329,14 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
             {needsFact ? (
               <span className="font-semibold text-wait">Внеси факт: сколько сделал</span>
             ) : mine?.fact_volume != null ? (
-              `${mine.location}, план ${mine.volume}, факт ${mine.fact_volume} шт.`
+              mine.shortfall > 0 ? (
+                <span className="font-semibold text-cancel">
+                  {mine.fact_volume} из {mine.volume} шт. (−{mine.shortfall})
+                  {mine.shortfall_status === "fined" ? `, штраф ${rub(mine.shortfall_penalty ?? 0)}` : ""}
+                </span>
+              ) : (
+                `${mine.location}, план ${mine.volume}, факт ${mine.fact_volume} шт.`
+              )
             ) : isGoing(mine) || state === "awaiting_approval"
               ? `${mine!.location}, ${mine!.volume} шт.`
               : names.length
@@ -337,7 +345,7 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
                   ? ""
                   : "Пока никто не выходит"}
           </span>
-          {(isGoing(mine) || state === "awaiting_approval") && names.length > 0 && (
+          {(isGoing(mine) || state === "awaiting_approval") && !short && names.length > 0 && (
             <span className="shrink-0">
               ещё {names.length} {plural(names.length, "человек", "человека", "человек")}
             </span>

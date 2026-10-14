@@ -119,6 +119,13 @@ MIGRATIONS = [
     ALTER TABLE broadcasts ADD COLUMN html TEXT;
     ALTER TABLE broadcasts ADD COLUMN signed INTEGER NOT NULL DEFAULT 1;
     """,
+    # 3: plan/fact shortfall decisions and fines
+    """
+    ALTER TABLE shifts ADD COLUMN shortfall_status TEXT CHECK (shortfall_status IS NULL OR shortfall_status IN ('fined','waived'));
+    ALTER TABLE shifts ADD COLUMN shortfall_penalty INTEGER;
+    ALTER TABLE shifts ADD COLUMN shortfall_decided_by INTEGER;
+    ALTER TABLE shifts ADD COLUMN shortfall_decided_at TEXT;
+    """,
 ]
 
 

@@ -194,6 +194,8 @@ def weekly_summary(conn, today: date) -> tuple[str, date, date]:
         line = f"{escape(st['user']['name'])}: {t['active_shifts']} {notify.plural(t['active_shifts'], 'выход', 'выхода', 'выходов')}, план {t['active_volume']}, факт {t['fact_volume']} шт."
         if t["fact_missing"]:
             line += f" (без факта: {t['fact_missing']})"
+        if t["shortfall_shifts"]:
+            line += f", ⚠️ не по норме: {t['shortfall_shifts']} (−{t['shortfall_volume']} шт.)"
         if t["penalties"]:
             line += f", штрафы {t['penalties']} ₽"
         lines.append(line)

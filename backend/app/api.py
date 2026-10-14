@@ -101,6 +101,11 @@ class ExportBody(BaseModel):
     user_id: int | None = None
 
 
+class ShortfallBody(BaseModel):
+    amount: int | None = None  # None = no fine
+    override: bool = True
+
+
 class AdminDelete(BaseModel):
     idempotency_key: str
     reason: str
@@ -228,6 +233,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/shifts/{shift_id}/fact")
     async def fact(shift_id: int, body: FactBody, user: dict = Depends(current_user)):
         result = svc.set_fact(conn, user, shift_id, body.fact_volume, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.fact_result(result.shift))
         return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
 
     @api.post("/shifts/pre-declare-off")
@@ -374,9 +381,22 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                       body.idempotency_key)
         if result.changed:
             notifier.spawn(notifier.admin_edit(admin, result.shift, body.reason))
+            if before and result.shift["fact_volume"] != before["fact_volume"]:
+                notifier.spawn(notifier.fact_result(result.shift, admin["telegram_id"]))
             if (before and result.shift["penalty_amount"] is not None
                     and result.shift["penalty_amount"] != before["penalty_amount"]):
                 notifier.spawn(notifier.penalty_assigned(result.shift))
+        return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
+
+    @api.get("/admin/shortfalls")
+    async def admin_shortfalls(pending: bool = True, _: dict = Depends(admin_user)):
+        return {"items": svc.shortfalls(conn, pending_only=pending)}
+
+    @api.post("/admin/shifts/{shift_id}/shortfall")
+    async def admin_shortfall(shift_id: int, body: ShortfallBody, admin: dict = Depends(admin_user)):
+        result = svc.decide_shortfall(conn, admin, shift_id, body.amount, override=body.override)
+        if result.changed:
+            notifier.spawn(notifier.shortfall_decided(result.shift, svc.full_name(admin), admin["telegram_id"]))
         return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
 
     @api.post("/admin/shifts/{shift_id}/delete")
