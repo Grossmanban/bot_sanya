@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { LoaderCircle, MapPin } from "lucide-react";
+import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,51 +14,65 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
+import { Drawer, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
 import { api, ApiError, type Day, type Pricing, type Shift, type User } from "@/lib/api";
-import { STATUS_META, dayState, longDate, rub, timeRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS, dayMonth, dayState, parseDay, rub, timeRange } from "@/lib/format";
 import { readLocal, useAction, writeLocal } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
-import { toast } from "sonner";
+import { DayLanes, type Lane } from "../day-line";
 import { initialForm, prefillFrom, ShiftForm, validateForm, type FormState } from "./shift-form";
 
 type Mode = "view" | "create" | "edit" | "restore";
 
-export function DaySheet({
-  day,
-  user,
-  pricing,
-  locations,
-  onClose,
-  onChanged,
-  onOpenProfile,
-}: {
-  day: Day | null;
+export interface DetailProps {
   user: User;
   pricing: Pricing;
   locations: string[];
-  onClose: () => void;
   onChanged: () => Promise<void> | void;
   onOpenProfile: () => void;
-}) {
-  const shift = day?.my_shift ?? null;
-  const [mode, setMode] = useState<Mode>("view");
-  const [form, setForm] = useState<FormState>(initialForm());
+}
+
+/** Phones and iPad portrait: the day opens in a bottom sheet. */
+export function DaySheet({ day, onClose, ...props }: DetailProps & { day: Day | null; onClose: () => void }) {
+  return (
+    <Drawer open={!!day} onOpenChange={(o) => !o && onClose()} repositionInputs={false}>
+      <DrawerContent className="mx-auto max-h-[92dvh] max-w-2xl rounded-t-[1.75rem] border-0 bg-card">
+        {day && (
+          <>
+            <DrawerTitle className="sr-only">{WEEKDAYS[parseDay(day.date).weekday]}</DrawerTitle>
+            <DrawerDescription className="sr-only">{dayMonth(day.date)}</DrawerDescription>
+            <div className="pb-safe overflow-y-auto px-5 pt-2">
+              <DayDetail day={day} {...props} />
+            </div>
+          </>
+        )}
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+/** Everything about one day: who works when, my shift and its actions. */
+export function DayDetail({ day, user, pricing, locations, onChanged, onOpenProfile }: DetailProps & { day: Day }) {
+  const shift = day.my_shift;
+  const [mode, setMode] = useState<Mode>(shift ? "view" : "create");
+  const [form, setForm] = useState<FormState>(() => initialForm(null, readLocal("last-location") ?? undefined));
   const [confirm, setConfirm] = useState<null | "cancel" | "final">(null);
   const { busy, run } = useAction();
 
-  // reset when another day is opened or the shift changes state
-  const stateKey = `${day?.date}:${shift?.id ?? "none"}:${shift?.status ?? "none"}`;
+  // reset when the shift changes state underneath (after an action or a poll)
+  const stateKey = `${day.date}:${shift?.id ?? "none"}:${shift?.status ?? "none"}`;
   useEffect(() => {
     setMode(shift ? "view" : "create");
     setForm(initialForm(null, readLocal("last-location") ?? undefined));
     setConfirm(null);
   }, [stateKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!day) return <Drawer open={false} />;
-
   const working = user.work_status === "working";
-  const meta = STATUS_META[dayState(shift)];
+  const state = dayState(shift);
+  const meta = STATUS_META[state];
+  const formMode = mode !== "view";
+  const blocked = !working && mode !== "edit";
+  const { weekday } = parseDay(day.date);
 
   async function submit() {
     const payload = validateForm(form);
@@ -68,9 +83,9 @@ export function DaySheet({
     writeLocal("last-location", payload.location);
     try {
       if (mode === "create") {
-        const res = await run("create", (k) => api.create(day!.date, payload, k));
-        if (res?.shift?.status === "awaiting_approval") toast.info("Заявка на сегодня отправлена админу");
-        else toast.success("Записал! Админ уведомлён");
+        const res = await run("create", (k) => api.create(day.date, payload, k));
+        if (res?.shift?.status === "awaiting_approval") toast("Заявка на сегодня у администратора");
+        else toast.success("Ты в графике");
       } else if (mode === "edit" && shift) {
         await run("edit", (k) => api.edit(shift.id, payload, k), "Смена изменена");
       } else if (mode === "restore" && shift) {
@@ -91,275 +106,260 @@ export function DaySheet({
     }
   }
 
+  // the day at a glance: me first, then colleagues
+  const lanes: Lane[] = [];
+  if (formMode) {
+    lanes.push({ key: "me", name: "Ты", start_time: form.start_time, end_time: form.end_time, state: "none", highlight: true });
+  } else if (shift) {
+    lanes.push({ key: "me", name: "Ты", start_time: shift.start_time, end_time: shift.end_time, state, highlight: true });
+  }
+  day.colleagues.forEach((c, i) =>
+    lanes.push({ key: `c${i}`, name: c.name, start_time: c.start_time, end_time: c.end_time, state: "active", caption: c.location }),
+  );
+  day.colleagues_off.forEach((c, i) => lanes.push({ key: `o${i}`, name: c.name, start_time: null, end_time: null, state: "pre_declared_off" }));
+
   const submitLabel = () => {
     const range = form.start_time && form.end_time ? ` ${form.start_time}–${form.end_time}` : "";
     if (mode === "edit") return "Сохранить изменения";
-    if (mode === "restore") return `Выйду${range}`;
+    if (mode === "restore") return `Вернуться в график${range}`;
     return day.is_today ? `Попроситься на сегодня${range}` : `Выйду${range}`;
   };
 
-  const formMode = mode !== "view";
-
   return (
-    <>
-      <Drawer open={!!day} onOpenChange={(o) => !o && onClose()} repositionInputs={false}>
-        <DrawerContent className="mx-auto max-w-xl rounded-t-3xl">
-          <DrawerHeader className="flex-row items-start justify-between gap-2 pb-2 text-left group-data-[vaul-drawer-direction=bottom]/drawer-content:text-left">
-            <div>
-              <DrawerTitle className="text-xl">{longDate(day.date).split(",")[0]}</DrawerTitle>
-              <DrawerDescription>{longDate(day.date).split(", ")[1]}</DrawerDescription>
-            </div>
-            {shift && (
-              <span className={cn("pt-1 text-sm font-semibold", meta.className)}>
-                {meta.emoji} {meta.label}
-              </span>
+    <div className="space-y-6">
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="font-display text-2xl font-semibold">{WEEKDAYS[weekday]}</h2>
+          <p className="mt-0.5 text-muted-foreground">
+            {dayMonth(day.date)}
+            {day.is_today ? ", сегодня" : ""}
+          </p>
+        </div>
+        {shift && (
+          <span key={state} className={cn("pop mt-1 flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-semibold", meta.soft, meta.text)}>
+            <span className={cn("size-1.5 rounded-full", meta.dot)} />
+            {meta.label}
+          </span>
+        )}
+      </header>
+
+      {lanes.length > 0 && (
+        <div className="rounded-2xl bg-muted/60 p-3.5">
+          <DayLanes lanes={lanes} />
+        </div>
+      )}
+
+      {formMode ? (
+        <div className="space-y-4">
+          {mode === "restore" && (
+            <Notice tone="wait">Вернуться можно один раз. Если потом снова отменишь, это будет окончательно и со штрафом.</Notice>
+          )}
+          {mode === "create" && day.is_today && (
+            <Notice tone="wait">Запись на сегодня срочная: администратор подтвердит её в боте.</Notice>
+          )}
+          {blocked && (
+            <Notice tone="cancel">
+              Сначала включи статус «Работаю».{" "}
+              <button className="font-semibold underline underline-offset-2" onClick={onOpenProfile}>
+                Открыть профиль
+              </button>
+            </Notice>
+          )}
+          <ShiftForm form={form} onChange={setForm} pricing={pricing} locations={locations} disabled={blocked} />
+        </div>
+      ) : (
+        shift && <ShiftView shift={shift} />
+      )}
+
+      <div className="space-y-2.5">
+        {formMode && (
+          <>
+            <Button size="lg" className="press h-14 w-full rounded-2xl text-base font-semibold" onClick={submit} disabled={!!busy || blocked}>
+              {busy && busy !== "off" && <LoaderCircle className="animate-spin" />}
+              {submitLabel()}
+            </Button>
+            {mode === "create" && (
+              <Button
+                size="lg"
+                variant="secondary"
+                className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
+                disabled={!!busy || !working}
+                onClick={() => act("off", (k) => api.preDeclareOff(day.date, k), "Отмечен выходной")}
+              >
+                {busy === "off" && <LoaderCircle className="animate-spin" />}
+                Отметить выходной
+              </Button>
             )}
-          </DrawerHeader>
-
-          <div className="overflow-y-auto px-4 pb-6">
-            {formMode ? (
-              <div className="space-y-4">
-                {mode === "restore" && (
-                  <Notice tone="wait">
-                    Восстановить смену можно один раз. Если потом снова отменишь — это будет окончательная отмена со штрафом.
-                  </Notice>
-                )}
-                {mode === "create" && day.is_today && (
-                  <Notice tone="wait">Запись на сегодня — срочная: заявка уйдёт администратору на одобрение.</Notice>
-                )}
-                {!working && mode !== "edit" ? (
-                  <Notice tone="cancel">
-                    Сначала включите статус «Работаю» в профиле.{" "}
-                    <button className="font-semibold underline" onClick={onOpenProfile}>
-                      Открыть профиль
-                    </button>
-                  </Notice>
-                ) : null}
-                <ShiftForm form={form} onChange={setForm} pricing={pricing} locations={locations}
-                           disabled={!working && mode !== "edit"} />
-              </div>
-            ) : (
-              shift && <ShiftView shift={shift} />
+            {(mode === "edit" || mode === "restore") && (
+              <Button variant="ghost" className="h-11 w-full rounded-2xl" onClick={() => setMode("view")}>
+                Назад
+              </Button>
             )}
+          </>
+        )}
 
-            <Colleagues day={day} />
-
-            <div className="mt-5 space-y-2.5">
-              {formMode && (
-                <>
-                  <Button size="lg" className="h-12 w-full text-base font-semibold" onClick={submit}
-                          disabled={!!busy || (!working && mode !== "edit")}>
-                    {busy && busy !== "off" ? <LoaderCircle className="animate-spin" /> : null}
-                    {submitLabel()}
-                  </Button>
-                  {mode === "create" && (
-                    <Button size="lg" variant="outline"
-                            className="h-12 w-full border-cancel/30 bg-cancel-soft text-base font-semibold text-cancel hover:bg-cancel-soft/80 hover:text-cancel"
-                            disabled={!!busy || !working}
-                            onClick={() => act("off", (k) => api.preDeclareOff(day.date, k), "Отметил выходной")}>
-                      {busy === "off" && <LoaderCircle className="animate-spin" />}
-                      Не выхожу в этот день
-                    </Button>
-                  )}
-                  {(mode === "edit" || mode === "restore") && (
-                    <Button variant="ghost" className="w-full" onClick={() => setMode("view")}>
-                      Назад
-                    </Button>
-                  )}
-                </>
-              )}
-
-              {!formMode && shift && (
-                <ShiftActions
-                  shift={shift}
-                  busy={busy}
-                  onEdit={() => {
-                    setForm(initialForm(prefillFrom(shift)));
-                    setMode("edit");
-                  }}
-                  onCancel={() => setConfirm(shift.can_final_cancel ? "final" : "cancel")}
-                  onRestore={() => {
-                    setForm(initialForm(prefillFrom(shift)));
-                    setMode("restore");
-                  }}
-                  onClearOff={() => act("clear", (k) => api.clearOff(shift.id, k), "Отметка снята")}
-                />
-              )}
-            </div>
-          </div>
-        </DrawerContent>
-      </Drawer>
+        {!formMode && shift && (
+          <>
+            {shift.can_restore && (
+              <Button
+                size="lg"
+                className="press h-14 w-full rounded-2xl text-base font-semibold"
+                onClick={() => {
+                  setForm(initialForm(prefillFrom(shift)));
+                  setMode("restore");
+                }}
+              >
+                Передумал, выйду
+              </Button>
+            )}
+            {shift.can_clear_off && (
+              <Button
+                size="lg"
+                className="press h-14 w-full rounded-2xl text-base font-semibold"
+                disabled={!!busy}
+                onClick={() => act("clear", (k) => api.clearOff(shift.id, k), "Выходной снят")}
+              >
+                {busy === "clear" && <LoaderCircle className="animate-spin" />}
+                Передумал, выйду
+              </Button>
+            )}
+            {shift.can_edit && (
+              <Button
+                size="lg"
+                variant="secondary"
+                className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
+                onClick={() => {
+                  setForm(initialForm(prefillFrom(shift)));
+                  setMode("edit");
+                }}
+              >
+                Изменить время, точку или объём
+              </Button>
+            )}
+            {(shift.can_cancel || shift.can_final_cancel) && (
+              <Button
+                size="lg"
+                variant="ghost"
+                disabled={!!busy}
+                onClick={() => setConfirm(shift.can_final_cancel ? "final" : "cancel")}
+                className="press h-12 w-full rounded-2xl text-[15px] font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
+              >
+                {(busy === "cancel" || busy === "final") && <LoaderCircle className="animate-spin" />}
+                Не выйду
+              </Button>
+            )}
+          </>
+        )}
+      </div>
 
       <AlertDialog open={confirm === "cancel"} onOpenChange={(o) => !o && setConfirm(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle>Отменить смену?</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Отменить выход?</AlertDialogTitle>
             <AlertDialogDescription>
-              Админы получат уведомление. После отмены ты сможешь один раз восстановить эту смену.
+              Администраторы получат уведомление. Потом можно один раз вернуться в график на этот день.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Нет, оставить</AlertDialogCancel>
-            <AlertDialogAction variant="destructive"
-                               onClick={() => shift && act("cancel", (k) => api.cancel(shift.id, k), "Смена отменена")}>
-              Да, отменить
+            <AlertDialogCancel className="rounded-xl">Оставить</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              className="rounded-xl"
+              onClick={() => shift && act("cancel", (k) => api.cancel(shift.id, k), "Выход отменён")}
+            >
+              Отменить выход
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       <AlertDialog open={confirm === "final"} onOpenChange={(o) => !o && setConfirm(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle>⚠️ Окончательная отмена</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Отменить окончательно?</AlertDialogTitle>
             <AlertDialogDescription>
-              Это окончательная отмена. Восстановить смену больше не получится. Будет начислен штраф — его размер
-              определит администратор.
+              Вернуться на этот день будет нельзя, и начислится штраф. Сумму назначит администратор.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Нет, оставить смену</AlertDialogCancel>
-            <AlertDialogAction variant="destructive"
-                               onClick={() => shift && act("final", (k) => api.finalCancel(shift.id, k), "Смена окончательно отменена")}>
-              Да, отменить и принять штраф
+            <AlertDialogCancel className="rounded-xl">Оставить смену</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              className="rounded-xl"
+              onClick={() => shift && act("final", (k) => api.finalCancel(shift.id, k), "Смена отменена окончательно")}
+            >
+              Отменить со штрафом
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </>
+    </div>
   );
 }
 
 function ShiftView({ shift }: { shift: Shift }) {
   const status = shift.status;
   if (status === "pre_declared_off") {
-    return <Notice tone="off">Вы отметили этот день как нерабочий.</Notice>;
+    return <Notice tone="muted">Ты отметил этот день как выходной. Коллеги это видят.</Notice>;
   }
   const struck = status === "cancelled" || status === "finally_cancelled" || status === "rejected_by_admin";
   return (
-    <div className="space-y-3">
-      <dl className={cn("grid grid-cols-2 gap-2 rounded-2xl bg-muted/70 p-4 text-sm", struck && "opacity-60")}>
-        <Item label="Время" value={timeRange(shift)} strong />
-        <Item label="Точка" value={shift.location ?? "—"} strong />
-        <Item label="Объём" value={`${shift.volume ?? "—"} шт.`} />
-        <Item label="Ставка" value={shift.rate ? `${shift.rate} ₽/шт.${shift.lazy ? " (налог на лень)" : ""}` : "—"} />
-        {!struck && shift.expected_pay != null && (
-          <div className="col-span-2 mt-1 flex items-center justify-between border-t pt-2">
-            <span className="text-muted-foreground">Планируемый заработок</span>
-            <b className="text-base">{rub(shift.expected_pay)}</b>
-          </div>
-        )}
-      </dl>
+    <div className="space-y-4">
+      <div className={cn(struck && "opacity-55")}>
+        <p className={cn("font-display text-[2rem] leading-none font-semibold tabular", struck && "line-through decoration-2")}>
+          {timeRange(shift)}
+        </p>
+        <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-[15px]">
+          <Fact label="Точка">
+            <span className="inline-flex items-center gap-1.5">
+              <MapPin className="size-4 text-muted-foreground" />
+              {shift.location}
+            </span>
+          </Fact>
+          <Fact label="Объём">{shift.volume} шт.</Fact>
+          <Fact label="Ставка">
+            {shift.rate} ₽ за шт.
+            {shift.lazy && <span className="block text-xs text-wait">налог на лень</span>}
+          </Fact>
+          {!struck && shift.expected_pay != null && <Fact label="План заработка">{rub(shift.expected_pay)}</Fact>}
+        </dl>
+      </div>
       {status === "awaiting_approval" && (
-        <Notice tone="wait">Заявка на сегодняшнюю смену отправлена администратору. Ждите решения — статус обновится сам.</Notice>
+        <Notice tone="wait">Администратор ещё не ответил на срочную заявку. Статус обновится сам.</Notice>
       )}
-      {status === "restored" && (
-        <Notice tone="wait">Смена восстановлена. Следующая отмена будет окончательной — со штрафом.</Notice>
-      )}
+      {status === "restored" && <Notice tone="wait">Смена восстановлена. Следующая отмена будет окончательной и со штрафом.</Notice>}
       {status === "cancelled" && !shift.can_restore && (
-        <Notice tone="cancel">Смена отменена. Восстановить её можно только через администратора.</Notice>
+        <Notice tone="cancel">Выход отменён. Вернуться на этот день можно только через администратора.</Notice>
       )}
       {status === "finally_cancelled" && (
         <Notice tone="cancel">
-          🔒 Смена окончательно отменена.{" "}
-          {shift.penalty_amount != null ? `Штраф: ${rub(shift.penalty_amount)}.` : "Сумму штрафа определит администратор."}{" "}
-          Изменения — только через администратора.
+          {shift.penalty_amount != null ? `Штраф ${rub(shift.penalty_amount)}. ` : "Сумму штрафа назначит администратор. "}
+          Изменить этот день можно только через администратора.
         </Notice>
       )}
-      {status === "rejected_by_admin" && <Notice tone="cancel">Администратор отклонил заявку на этот день.</Notice>}
+      {status === "rejected_by_admin" && <Notice tone="muted">Администратор не подтвердил выход на этот день.</Notice>}
       {(status === "active" || status === "restored") && !shift.can_edit && (
-        <p className="text-xs text-muted-foreground">Изменить смену можно один раз — дальше через администратора.</p>
+        <p className="text-sm text-muted-foreground">Изменение уже использовано. Дальше через администратора.</p>
       )}
     </div>
   );
 }
 
-function ShiftActions({
-  shift,
-  busy,
-  onEdit,
-  onCancel,
-  onRestore,
-  onClearOff,
-}: {
-  shift: Shift;
-  busy: string | null;
-  onEdit: () => void;
-  onCancel: () => void;
-  onRestore: () => void;
-  onClearOff: () => void;
-}) {
-  return (
-    <>
-      {shift.can_restore && (
-        <Button size="lg" className="h-12 w-full text-base font-semibold" onClick={onRestore}>
-          Передумал, выйду на эту смену
-        </Button>
-      )}
-      {shift.can_clear_off && (
-        <Button size="lg" className="h-12 w-full text-base font-semibold" onClick={onClearOff} disabled={!!busy}>
-          {busy === "clear" && <LoaderCircle className="animate-spin" />}
-          Передумал, выйду
-        </Button>
-      )}
-      {shift.can_edit && (
-        <Button size="lg" variant="outline" className="h-12 w-full text-base" onClick={onEdit}>
-          Изменить
-        </Button>
-      )}
-      {(shift.can_cancel || shift.can_final_cancel) && (
-        <Button size="lg" variant="outline" onClick={onCancel} disabled={!!busy}
-                className="h-12 w-full border-cancel/30 bg-cancel-soft text-base font-semibold text-cancel hover:bg-cancel-soft/80 hover:text-cancel">
-          {(busy === "cancel" || busy === "final") && <LoaderCircle className="animate-spin" />}
-          Не выхожу
-        </Button>
-      )}
-    </>
-  );
-}
-
-function Colleagues({ day }: { day: Day }) {
-  if (!day.colleagues.length && !day.colleagues_off.length) return null;
-  return (
-    <div className="mt-5">
-      <p className="mb-2 text-sm text-muted-foreground">Выходят</p>
-      <ul className="space-y-2">
-        {day.colleagues.map((c, i) => (
-          <li key={i} className="rounded-xl border bg-card px-3 py-2">
-            <div className="flex items-center justify-between">
-              <span className="font-medium">{c.name}</span>
-              <span className="font-semibold text-go">{timeRange(c)}</span>
-            </div>
-            <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-go-soft px-2 py-0.5 text-xs font-medium text-go">
-              <MapPin className="size-3" /> {c.location}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {day.colleagues_off.length > 0 && (
-        <p className="mt-2 text-xs text-muted-foreground">
-          🚫 Не выходят: {day.colleagues_off.map((c) => c.name).join(", ")}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function Item({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
       <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className={cn(strong && "text-base font-semibold")}>{value}</dd>
+      <dd className="mt-0.5 font-semibold">{children}</dd>
     </div>
   );
 }
 
 const TONES = {
-  wait: "border-wait/30 bg-wait/10",
-  cancel: "border-cancel/30 bg-cancel-soft",
-  off: "border-off/30 bg-off/10",
+  wait: "bg-wait-soft",
+  cancel: "bg-cancel-soft",
+  muted: "bg-muted",
 };
 
-function Notice({ tone, children }: { tone: keyof typeof TONES; children: React.ReactNode }) {
-  return <div className={cn("rounded-xl border px-3 py-2.5 text-sm", TONES[tone])}>{children}</div>;
+export function Notice({ tone, children }: { tone: keyof typeof TONES; children: React.ReactNode }) {
+  return <div className={cn("rounded-2xl px-4 py-3 text-sm leading-relaxed", TONES[tone])}>{children}</div>;
 }

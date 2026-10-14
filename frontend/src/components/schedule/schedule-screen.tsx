@@ -1,33 +1,38 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { CalendarClock, ChevronLeft, ChevronRight, TriangleAlert, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type Day, type Pricing, type User } from "@/lib/api";
-import { STATUS_META, dayState, ddmm, parseDay, shortDate, timeRange, WEEKDAYS } from "@/lib/format";
-import { readLocal, useLoad, writeLocal } from "@/lib/hooks";
+import { Switch } from "@/components/ui/switch";
+import { api, type Day, type Pricing, type User, type Week } from "@/lib/api";
+import { STATUS_META, WEEKDAYS_SHORT, dayState, isGoing, parseDay, plural, rub, timeRange, weekRange } from "@/lib/format";
+import { readLocal, useAction, useLoad, writeLocal } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
+import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
-import { DaySheet } from "./day-sheet";
+import { DayTrack, HourAxis } from "../day-line";
+import { DayDetail, DaySheet } from "./day-sheet";
 
-const ONBOARDING_KEY = "onboarding-dismissed";
+const HINT_KEY = "hint-dismissed";
 
 export function ScheduleScreen({
   user,
   pricing,
   onOpenProfile,
+  onUserChange,
 }: {
   user: User;
   pricing: Pricing;
   onOpenProfile: () => void;
+  onUserChange: (u: User) => void;
 }) {
+  const wide = useWide();
   const [offset, setOffset] = useState(0);
   const { data: week, loading, error, reload } = useLoad(() => api.week(offset), [offset]);
   const [openDate, setOpenDate] = useState<string | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showHint, setShowHint] = useState(false);
 
-  useEffect(() => setShowOnboarding(readLocal(ONBOARDING_KEY) !== "1"), []);
+  useEffect(() => setShowHint(readLocal(HINT_KEY) !== "1"), []);
 
   // urgent requests wait for an admin decision in the bot: poll while one is pending
   const waiting = week?.days.some((d) => d.my_shift?.status === "awaiting_approval");
@@ -43,6 +48,13 @@ export function ScheduleScreen({
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [reload]);
 
+  // on wide screens a day is always selected in the side panel
+  const firstOpen = week?.days.find((d) => !d.is_past)?.date ?? null;
+  const selected = week?.days.find((d) => d.date === openDate) ?? null;
+  useEffect(() => {
+    if (wide && week && (!openDate || !week.days.some((d) => d.date === openDate))) setOpenDate(firstOpen);
+  }, [wide, week, openDate, firstOpen]);
+
   const locations = useMemo(() => {
     const set = new Set<string>();
     const last = readLocal("last-location");
@@ -54,170 +66,276 @@ export function ScheduleScreen({
     return [...set].slice(0, 6);
   }, [week]);
 
-  const openDay = week?.days.find((d) => d.date === openDate) ?? null;
+  const open = (day: Day) => {
+    if (day.is_past) return;
+    tapHaptic();
+    setOpenDate(day.date);
+  };
+
+  const detailProps = {
+    user,
+    pricing,
+    locations,
+    onChanged: reload,
+    onOpenProfile,
+  };
 
   return (
-    <div className="space-y-4">
-      <section className="flex items-center gap-3 rounded-2xl border bg-card p-4 shadow-sm">
-        <div className="flex size-11 items-center justify-center rounded-xl bg-accent text-accent-foreground">
-          <CalendarClock className="size-5" />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-lg leading-tight font-bold">{offset === 0 ? "Моя неделя" : "Следующая неделя"}</h1>
-          <p className="text-sm text-muted-foreground">
-            {week ? `${ddmm(week.start)} – ${ddmm(week.end)}` : " "}
-          </p>
-        </div>
-        <div className="flex gap-1">
-          <Button size="icon-sm" variant="outline" disabled={offset === 0} onClick={() => setOffset(0)} aria-label="Текущая неделя">
-            <ChevronLeft />
-          </Button>
-          <Button size="icon-sm" variant="outline" disabled={offset === 1} onClick={() => setOffset(1)} aria-label="Следующая неделя">
-            <ChevronRight />
-          </Button>
-        </div>
-      </section>
+    <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_26rem] lg:items-start lg:gap-8 xl:grid-cols-[minmax(0,1fr)_28rem]">
+      <div className="space-y-4">
+        <WeekHero week={week} offset={offset} setOffset={setOffset} selected={wide ? openDate : null} onPick={open} />
 
-      {user.work_status !== "working" && (
-        <section className="flex items-start gap-3 rounded-2xl border border-wait/30 bg-card p-4 text-sm shadow-sm">
-          <TriangleAlert className="mt-0.5 size-5 shrink-0 text-wait" />
-          <div className="flex-1">
-            <p className="font-semibold">Сейчас стоит «Не работаю»</p>
-            <p className="text-muted-foreground">Чтобы встать в график, включите статус «Работаю» в профиле.</p>
-            <Button size="sm" variant="outline" className="mt-2" onClick={onOpenProfile}>
-              Открыть профиль
-            </Button>
+        {user.work_status !== "working" && <WorkToggle onUserChange={onUserChange} />}
+
+        {showHint && (
+          <div className="flex items-start gap-3 px-1 text-sm text-muted-foreground">
+            <p className="flex-1">Нажми на день, чтобы выбрать время, точку и объём. Если не выходишь — отметь выходной.</p>
+            <button
+              className="rounded-full p-1 hover:bg-muted"
+              aria-label="Скрыть подсказку"
+              onClick={() => {
+                writeLocal(HINT_KEY, "1");
+                setShowHint(false);
+              }}
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        )}
+
+        {error && !week && (
+          <div className="rounded-3xl bg-card p-5 text-sm shadow-lift">
+            {error.message}{" "}
+            <button className="font-semibold underline" onClick={reload}>
+              Повторить
+            </button>
+          </div>
+        )}
+
+        <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
+          <div className="grid grid-cols-[3rem_1fr] gap-4 px-4 pt-4 pb-1 md:px-5">
+            <span />
+            <HourAxis />
+          </div>
+          <div className="divide-y divide-border/70">
+            {!week && loading
+              ? Array.from({ length: 7 }, (_, i) => (
+                  <div key={i} className="px-4 py-4">
+                    <Skeleton className="h-12 rounded-xl" />
+                  </div>
+                ))
+              : week?.days.map((day, i) => (
+                  <DayRow key={`${week.start}-${day.date}`} day={day} index={i} selected={wide && openDate === day.date} onOpen={() => open(day)} />
+                ))}
           </div>
         </section>
-      )}
-
-      {showOnboarding && (
-        <section className="relative rounded-2xl border bg-card p-5 shadow-sm">
-          <button
-            className="absolute top-3 right-3 rounded-full p-1 text-muted-foreground hover:bg-muted"
-            onClick={() => {
-              writeLocal(ONBOARDING_KEY, "1");
-              setShowOnboarding(false);
-            }}
-            aria-label="Скрыть"
-          >
-            <X className="size-4" />
-          </button>
-          <h2 className="mb-3 font-semibold">Как поставить график</h2>
-          <ol className="space-y-3">
-            {[
-              ["Нажми день", "Открой нужный день недели"],
-              ["Выбери время, точку и объём", "Со скольки до скольки, куда идёшь и сколько штук"],
-              ["Или нажми «Не выхожу»", "Так всем видно, что ты отметил выходной"],
-            ].map(([title, text], i) => (
-              <li key={title} className="flex gap-3">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent text-sm font-bold text-accent-foreground">
-                  {i + 1}
-                </span>
-                <div>
-                  <p className="leading-tight font-semibold">{title}</p>
-                  <p className="text-sm text-muted-foreground">{text}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
-
-      {error && !week && (
-        <div className="rounded-2xl border bg-card p-4 text-sm">
-          {error.message}{" "}
-          <Button size="sm" variant="link" onClick={reload}>
-            Повторить
-          </Button>
-        </div>
-      )}
-
-      <div className="space-y-3">
-        {!week && loading
-          ? Array.from({ length: 7 }, (_, i) => <Skeleton key={i} className="h-20 rounded-2xl bg-card" />)
-          : week?.days.map((day) => (
-              <DayCard
-                key={day.date}
-                day={day}
-                onOpen={() => {
-                  tapHaptic();
-                  setOpenDate(day.date);
-                }}
-              />
-            ))}
       </div>
 
-      <DaySheet
-        day={openDay}
-        user={user}
-        pricing={pricing}
-        locations={locations}
-        onClose={() => setOpenDate(null)}
-        onChanged={reload}
-        onOpenProfile={() => {
-          setOpenDate(null);
-          onOpenProfile();
-        }}
-      />
+      {wide ? (
+        <aside className="sticky top-10 hidden max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-3xl bg-card p-6 shadow-lift lg:block">
+          {selected ? (
+            <DayDetail key={selected.date} day={selected} {...detailProps} />
+          ) : (
+            <p className="text-sm text-muted-foreground">Выберите день слева.</p>
+          )}
+        </aside>
+      ) : (
+        <DaySheet day={selected} onClose={() => setOpenDate(null)} {...detailProps} />
+      )}
     </div>
   );
 }
 
-function DayCard({ day, onOpen }: { day: Day; onOpen: () => void }) {
+function WeekHero({
+  week,
+  offset,
+  setOffset,
+  selected,
+  onPick,
+}: {
+  week: Week | null;
+  offset: number;
+  setOffset: (n: number) => void;
+  selected: string | null;
+  onPick: (d: Day) => void;
+}) {
+  const going = week?.days.filter((d) => isGoing(d.my_shift)) ?? [];
+  const volume = going.reduce((s, d) => s + (d.my_shift?.volume ?? 0), 0);
+  const pay = going.reduce((s, d) => s + (d.my_shift?.expected_pay ?? 0), 0);
+  const summary = !week
+    ? " "
+    : going.length
+      ? `Выходишь ${going.length} ${plural(going.length, "день", "дня", "дней")}, план ${volume} шт., около ${rub(pay)}`
+      : offset === 0
+        ? "На этой неделе выходов пока нет"
+        : "На следующей неделе выходов пока нет";
+
+  return (
+    <section className="relative overflow-hidden rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm text-hero-muted">{offset === 0 ? "Эта неделя" : "Следующая неделя"}</p>
+          <h1 className="mt-1 font-display text-[1.75rem] leading-tight font-semibold md:text-[2rem]">
+            {week ? weekRange(week.start, week.end) : " "}
+          </h1>
+        </div>
+        <div className="flex gap-1.5">
+          <HeroButton label="Эта неделя" disabled={offset === 0} onClick={() => setOffset(0)}>
+            <ChevronLeft className="size-5" />
+          </HeroButton>
+          <HeroButton label="Следующая неделя" disabled={offset === 1} onClick={() => setOffset(1)}>
+            <ChevronRight className="size-5" />
+          </HeroButton>
+        </div>
+      </div>
+      <p className="mt-2 text-[15px] text-hero-muted">{summary}</p>
+
+      <div className="mt-5 grid grid-cols-7 gap-1.5">
+        {(week?.days ?? Array.from({ length: 7 }, () => null)).map((day, i) => {
+          if (!day) return <span key={i} className="h-[4.25rem] rounded-2xl bg-white/5" />;
+          const meta = STATUS_META[dayState(day.my_shift)];
+          const { d } = parseDay(day.date);
+          return (
+            <button
+              key={day.date}
+              disabled={day.is_past}
+              onClick={() => onPick(day)}
+              className={cn(
+                "press flex h-[4.25rem] flex-col items-center justify-center gap-0.5 rounded-2xl text-xs",
+                day.is_today ? "bg-white text-hero" : "bg-white/[0.07] hover:bg-white/[0.12]",
+                selected === day.date && !day.is_today && "ring-2 ring-white/50",
+                selected === day.date && day.is_today && "ring-2 ring-white/50 ring-offset-2 ring-offset-hero",
+                day.is_past && "opacity-35",
+              )}
+            >
+              <span className={day.is_today ? "text-hero/60" : "text-hero-muted"}>{WEEKDAYS_SHORT[i]}</span>
+              <span className="font-display text-lg leading-none font-semibold">{d}</span>
+              <span className={cn("mt-1 size-1.5 rounded-full", dayState(day.my_shift) === "none" ? "bg-current opacity-25" : meta.dot)} />
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function HeroButton({
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="press grid size-10 place-items-center rounded-full bg-white/10 hover:bg-white/15 disabled:opacity-30"
+    >
+      {children}
+    </button>
+  );
+}
+
+function WorkToggle({ onUserChange }: { onUserChange: (u: User) => void }) {
+  const { busy, run } = useAction();
+  return (
+    <label className="flex cursor-pointer items-center gap-4 rounded-3xl bg-card p-4 shadow-lift md:px-5">
+      <span className="flex-1">
+        <span className="block font-semibold">Сейчас стоит «Не работаю»</span>
+        <span className="block text-sm text-muted-foreground">Включи, чтобы записываться на выходы</span>
+      </span>
+      <Switch
+        checked={false}
+        disabled={!!busy}
+        aria-label="Работаю"
+        onCheckedChange={async () => {
+          try {
+            const res = await run("work", () => api.setWorkStatus("working"), "Статус: работаю");
+            if (res) onUserChange(res.user);
+          } catch {
+            /* toast shown */
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; selected: boolean; onOpen: () => void }) {
   const state = dayState(day.my_shift);
   const meta = STATUS_META[state];
   const mine = day.my_shift;
-  const going = mine && (mine.status === "active" || mine.status === "restored" || mine.status === "awaiting_approval");
+  const { d, weekday } = parseDay(day.date);
+  const withTime = mine?.start_time && state !== "pre_declared_off";
+  const names = day.colleagues.map((c) => c.first_name);
+
   return (
     <button
       type="button"
       disabled={day.is_past}
       onClick={onOpen}
+      style={{ "--i": index } as CSSProperties}
       className={cn(
-        "w-full rounded-2xl border bg-card px-4 py-3.5 text-left shadow-sm transition active:scale-[0.99]",
-        state === "none" && !day.is_past && "border-dashed border-primary/30 bg-card/70 shadow-none",
-        day.is_past && "opacity-55",
-        day.is_today && "ring-2 ring-primary/30",
+        "row-in grid w-full grid-cols-[3rem_1fr] gap-4 px-4 py-3.5 text-left transition-colors md:px-5",
+        !day.is_past && "hover:bg-muted/60 active:bg-muted",
+        selected && "bg-muted",
+        day.is_past && "opacity-45",
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="flex items-center gap-2 text-[17px] leading-tight font-bold">
-            {WEEKDAYS[parseDay(day.date).weekday]}
-            {day.is_today && (
-              <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold tracking-wide text-primary-foreground uppercase">
-                сегодня
-              </span>
-            )}
-          </p>
-          <p className="text-sm text-muted-foreground">{shortDate(day.date)}</p>
-        </div>
-        <span className={cn("shrink-0 text-sm font-semibold", meta.className)}>
-          {meta.emoji} {meta.label}
+      <span className="flex flex-col items-center gap-0.5 pt-0.5">
+        <span className="text-xs text-muted-foreground">{WEEKDAYS_SHORT[weekday]}</span>
+        <span
+          className={cn(
+            "grid size-9 place-items-center rounded-xl font-display text-lg leading-none font-semibold",
+            day.is_today && "bg-primary text-primary-foreground",
+          )}
+        >
+          {d}
         </span>
-      </div>
-      {going && mine && (
-        <p className="mt-1.5 text-sm font-medium">
-          {timeRange(mine)} · {mine.location} · {mine.volume} шт.
-        </p>
-      )}
-      {day.colleagues.length > 0 && (
-        <p className="mt-1.5 text-sm text-muted-foreground">
-          Ещё выходят:{" "}
-          {day.colleagues.map((c, i) => (
-            <span key={i}>
-              {i > 0 && " · "}
-              {c.first_name} {timeRange(c)}
+      </span>
+
+      <span className="min-w-0">
+        <span className="flex items-baseline justify-between gap-3">
+          <span className={cn("flex items-center gap-2 text-sm font-semibold", meta.text)}>
+            <span className={cn("size-2 rounded-full", meta.dot)} />
+            {meta.label}
+          </span>
+          {withTime && (
+            <span className={cn("text-sm font-semibold tabular", state === "cancelled" || state === "finally_cancelled" ? "text-muted-foreground line-through" : "")}>
+              {timeRange(mine)}
             </span>
-          ))}
-        </p>
-      )}
-      {day.colleagues_off.length > 0 && (
-        <p className="mt-0.5 text-xs text-muted-foreground/80">
-          Не выходят: {day.colleagues_off.map((c) => c.first_name).join(", ")}
-        </p>
-      )}
+          )}
+        </span>
+        <DayTrack
+          className="mt-2.5"
+          state={state}
+          mine={withTime ? mine : null}
+          others={day.colleagues}
+          index={index}
+        />
+        <span className="mt-2 flex justify-between gap-3 text-xs text-muted-foreground">
+          <span className="truncate">
+            {isGoing(mine) || state === "awaiting_approval"
+              ? `${mine!.location}, ${mine!.volume} шт.`
+              : names.length
+                ? `Выходят: ${names.join(", ")}`
+                : day.is_past
+                  ? ""
+                  : "Пока никто не выходит"}
+          </span>
+          {(isGoing(mine) || state === "awaiting_approval") && names.length > 0 && (
+            <span className="shrink-0">
+              ещё {names.length} {plural(names.length, "человек", "человека", "человек")}
+            </span>
+          )}
+        </span>
+      </span>
     </button>
   );
 }

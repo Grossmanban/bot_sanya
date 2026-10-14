@@ -8,6 +8,9 @@ interface TelegramWebApp {
   initDataUnsafe: { user?: { id: number; first_name?: string; last_name?: string; username?: string } };
   colorScheme: "light" | "dark";
   version: string;
+  platform: string;
+  isFullscreen?: boolean;
+  requestFullscreen?: () => void;
   ready(): void;
   expand(): void;
   isVersionAtLeast(version: string): boolean;
@@ -68,10 +71,14 @@ export function setupWebApp(onScheme: (scheme: "light" | "dark") => void): () =>
   tg.expand();
   try {
     tg.disableVerticalSwipes?.();
+    // phones get true fullscreen (Bot API 8.0+); content is padded by Telegram's safe-area CSS vars
+    if (["ios", "android"].includes(tg.platform) && tg.isVersionAtLeast("8.0")) tg.requestFullscreen?.();
   } catch {
     /* not supported */
   }
   const apply = () => {
+    // switch the class first so the colours read below belong to the new scheme
+    document.documentElement.classList.toggle("dark", tg.colorScheme === "dark");
     onScheme(tg.colorScheme);
     const bg = getComputedStyle(document.documentElement).getPropertyValue("--background").trim();
     if (bg && tg.isVersionAtLeast("6.1")) {

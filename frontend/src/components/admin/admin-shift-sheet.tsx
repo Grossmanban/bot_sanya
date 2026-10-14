@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { LoaderCircle, Trash2 } from "lucide-react";
+import { LoaderCircle, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -14,13 +14,11 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
 import { api, type AdminAction, type ShiftStatus } from "@/lib/api";
 import { STATUS_META, longDate } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
+import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 
 export interface EditableShift {
@@ -37,6 +35,7 @@ export interface EditableShift {
 }
 
 const PENALTY_PRESETS = [500, 1000, 2000];
+const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
 export function AdminShiftSheet({
   shift,
@@ -47,6 +46,7 @@ export function AdminShiftSheet({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const wide = useWide();
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [volume, setVolume] = useState("");
@@ -66,39 +66,37 @@ export function AdminShiftSheet({
     setReason(shift.status === "finally_cancelled" ? "Окончательная отмена смены" : "");
   }, [shift]);
 
-  if (!shift) return <Drawer open={false} />;
-
-  const meta = STATUS_META[shift.status];
-  const hasTimes = shift.status !== "pre_declared_off";
-  const urgent = shift.status === "awaiting_approval";
-  const canForceCancel = ["active", "restored"].includes(shift.status);
-  const canForceRestore = ["cancelled", "finally_cancelled", "rejected_by_admin"].includes(shift.status) && hasTimes;
-  const isFinal = shift.status === "finally_cancelled";
+  const meta = shift ? STATUS_META[shift.status] : null;
+  const hasTimes = shift?.status !== "pre_declared_off";
+  const urgent = shift?.status === "awaiting_approval";
+  const canForceCancel = !!shift && ["active", "restored"].includes(shift.status);
+  const canForceRestore = !!shift && ["cancelled", "finally_cancelled", "rejected_by_admin"].includes(shift.status) && hasTimes;
+  const isFinal = shift?.status === "finally_cancelled";
 
   function needReason() {
     if (!reason.trim()) {
-      toast.error("Укажите причину — она попадёт в журнал");
+      toast.error("Укажи причину: она попадёт в журнал");
       return true;
     }
     return false;
   }
 
   async function save() {
-    if (needReason()) return;
+    if (!shift || needReason()) return;
     const body: Parameters<typeof api.admin.editShift>[1] = { reason: reason.trim() };
     if (hasTimes) {
-      if (start !== shift!.start_time) body.start_time = start;
-      if (end !== shift!.end_time) body.end_time = end;
-      if (location.trim() !== shift!.location) body.location = location.trim();
-      if (volume && Number(volume) !== shift!.volume) body.volume = Number(volume);
+      if (start !== shift.start_time) body.start_time = start;
+      if (end !== shift.end_time) body.end_time = end;
+      if (location.trim() !== shift.location) body.location = location.trim();
+      if (volume && Number(volume) !== shift.volume) body.volume = Number(volume);
     }
-    if (isFinal && penalty !== "" && Number(penalty) !== shift!.penalty_amount) body.penalty_amount = Number(penalty);
+    if (isFinal && penalty !== "" && Number(penalty) !== shift.penalty_amount) body.penalty_amount = Number(penalty);
     if (Object.keys(body).length === 1) {
-      toast.error("Нет изменений");
+      toast.error("Ничего не изменилось");
       return;
     }
     try {
-      await run("save", (k) => api.admin.editShift(shift!.id, body, k), "Сохранено");
+      await run("save", (k) => api.admin.editShift(shift.id, body, k), "Сохранено");
       onChanged();
     } catch {
       /* toast shown */
@@ -106,10 +104,11 @@ export function AdminShiftSheet({
   }
 
   async function action(name: AdminAction, success: string) {
+    if (!shift) return;
     const isUrgent = name === "approve_urgent" || name === "reject_urgent";
     if (!isUrgent && needReason()) return;
     try {
-      await run(name, (k) => api.admin.editShift(shift!.id, { reason: reason.trim() || "Срочная заявка", action: name }, k), success);
+      await run(name, (k) => api.admin.editShift(shift.id, { reason: reason.trim() || "Срочная заявка", action: name }, k), success);
       onChanged();
     } catch {
       /* toast shown */
@@ -117,116 +116,133 @@ export function AdminShiftSheet({
   }
 
   async function remove() {
+    if (!shift) return;
     try {
-      await run("delete", (k) => api.admin.deleteShift(shift!.id, reason.trim(), k), "Запись удалена");
+      await run("delete", (k) => api.admin.deleteShift(shift.id, reason.trim(), k), "Запись удалена");
       onChanged();
     } catch {
       /* toast shown */
     }
   }
 
+  const spin = (name: string) => busy === name && <LoaderCircle className="animate-spin" />;
+
   return (
     <>
-      <Drawer open onOpenChange={(o) => !o && onClose()} repositionInputs={false}>
-        <DrawerContent className="mx-auto max-w-xl rounded-t-3xl">
-          <DrawerHeader className="flex-row items-start justify-between gap-2 pb-2 text-left group-data-[vaul-drawer-direction=bottom]/drawer-content:text-left">
-            <div>
-              <DrawerTitle className="text-xl">{shift.name}</DrawerTitle>
-              <DrawerDescription>
-                {longDate(shift.date)}
-                {shift.username ? ` · @${shift.username}` : ""}
-              </DrawerDescription>
-            </div>
-            <span className={cn("pt-1 text-sm font-semibold", meta.className)}>
-              {meta.emoji} {meta.label}
-            </span>
-          </DrawerHeader>
+      <Drawer open={!!shift} onOpenChange={(o) => !o && onClose()} direction={wide ? "right" : "bottom"} repositionInputs={false}>
+        <DrawerContent
+          className={cn(
+            "border-0 bg-card",
+            wide ? "w-[28rem] max-w-[28rem] sm:max-w-[28rem]" : "mx-auto max-h-[92dvh] max-w-2xl rounded-t-[1.75rem]",
+          )}
+        >
+          {shift && meta && (
+            <div className={cn("overflow-y-auto px-5", wide ? "h-full py-8" : "pb-safe pt-2")}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <DrawerTitle className="truncate font-display text-xl font-semibold">{shift.name}</DrawerTitle>
+                  <DrawerDescription>
+                    {longDate(shift.date)}
+                    {shift.username ? `, @${shift.username}` : ""}
+                  </DrawerDescription>
+                </div>
+                {wide && (
+                  <DrawerClose className="grid size-9 place-items-center rounded-full bg-muted" aria-label="Закрыть">
+                    <X className="size-4" />
+                  </DrawerClose>
+                )}
+              </div>
+              <span className={cn("mt-3 inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-semibold", meta.soft, meta.text)}>
+                <span className={cn("size-1.5 rounded-full", meta.dot)} />
+                {meta.label}
+              </span>
 
-          <div className="space-y-4 overflow-y-auto px-4 pb-6">
-            {hasTimes && (
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="С"><Input type="time" className="h-11" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
-                <Field label="До"><Input type="time" className="h-11" value={end} onChange={(e) => setEnd(e.target.value)} /></Field>
-                <Field label="Точка"><Input className="h-11" value={location} onChange={(e) => setLocation(e.target.value)} /></Field>
-                <Field label="Объём, шт.">
-                  <Input inputMode="numeric" className="h-11" value={volume}
-                         onChange={(e) => setVolume(e.target.value.replace(/\D/g, "").slice(0, 5))} />
+              <div className="mt-6 space-y-4">
+                {urgent && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button className="press h-12 rounded-2xl bg-go text-[15px] font-semibold text-white hover:bg-go/90" disabled={!!busy}
+                            onClick={() => action("approve_urgent", "Выход разрешён")}>
+                      {spin("approve_urgent")} Разрешить
+                    </Button>
+                    <Button variant="secondary" className="press h-12 rounded-2xl text-[15px] font-semibold" disabled={!!busy}
+                            onClick={() => action("reject_urgent", "Выход запрещён")}>
+                      {spin("reject_urgent")} Запретить
+                    </Button>
+                  </div>
+                )}
+
+                {hasTimes && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Начало"><input type="time" className={cn(field, "tabular")} value={start} onChange={(e) => setStart(e.target.value)} /></Field>
+                    <Field label="Конец"><input type="time" className={cn(field, "tabular")} value={end} onChange={(e) => setEnd(e.target.value)} /></Field>
+                    <Field label="Точка"><input className={field} value={location} onChange={(e) => setLocation(e.target.value)} /></Field>
+                    <Field label="Объём, шт.">
+                      <input inputMode="numeric" className={cn(field, "tabular")} value={volume}
+                             onChange={(e) => setVolume(e.target.value.replace(/\D/g, "").slice(0, 5))} />
+                    </Field>
+                  </div>
+                )}
+
+                {isFinal && (
+                  <div className="space-y-2 rounded-2xl bg-cancel-soft p-4">
+                    <p className="text-sm font-semibold">Штраф за окончательную отмену</p>
+                    <div className="flex gap-2">
+                      {PENALTY_PRESETS.map((p) => (
+                        <button key={p} onClick={() => setPenalty(String(p))}
+                                className={cn("press rounded-full px-3.5 py-1.5 text-sm font-semibold", penalty === String(p) ? "bg-final text-white" : "bg-card")}>
+                          {p} ₽
+                        </button>
+                      ))}
+                    </div>
+                    <input inputMode="numeric" className={cn(field, "bg-card")} placeholder="Своя сумма, ₽" value={penalty}
+                           onChange={(e) => setPenalty(e.target.value.replace(/\D/g, "").slice(0, 7))} />
+                  </div>
+                )}
+
+                <Field label="Причина изменения">
+                  <textarea rows={2} className="w-full resize-none rounded-2xl border-0 bg-muted px-4 py-3 outline-none focus:ring-2 focus:ring-ring/25"
+                            value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Например, договорились по телефону" />
                 </Field>
-              </div>
-            )}
 
-            {isFinal && (
-              <div className="space-y-2 rounded-xl border border-final/30 bg-cancel-soft p-3">
-                <Label>Штраф за окончательную отмену, ₽</Label>
-                <div className="flex gap-1.5">
-                  {PENALTY_PRESETS.map((p) => (
-                    <button key={p} onClick={() => setPenalty(String(p))}
-                            className={cn("rounded-full border px-3 py-1 text-xs font-semibold",
-                              penalty === String(p) ? "border-final bg-final text-white" : "bg-card")}>
-                      {p} ₽
-                    </button>
-                  ))}
-                </div>
-                <Input inputMode="numeric" className="h-11 bg-card" placeholder="Своя сумма" value={penalty}
-                       onChange={(e) => setPenalty(e.target.value.replace(/\D/g, "").slice(0, 7))} />
-              </div>
-            )}
-
-            <Field label="Причина (обязательно, пишется в журнал)">
-              <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Например: договорились по телефону" />
-            </Field>
-
-            <div className="space-y-2.5">
-              <Button size="lg" className="h-12 w-full text-base font-semibold" onClick={save} disabled={!!busy}>
-                {busy === "save" && <LoaderCircle className="animate-spin" />} Сохранить
-              </Button>
-              {urgent && (
-                <div className="grid grid-cols-2 gap-2">
-                  <Button size="lg" variant="outline" className="h-12 text-go" disabled={!!busy}
-                          onClick={() => action("approve_urgent", "Срочная заявка одобрена")}>
-                    {busy === "approve_urgent" && <LoaderCircle className="animate-spin" />} ✅ Разрешить
+                <div className="space-y-2.5 pt-1">
+                  <Button className="press h-14 w-full rounded-2xl text-base font-semibold" onClick={save} disabled={!!busy}>
+                    {spin("save")} Сохранить
                   </Button>
-                  <Button size="lg" variant="outline" className="h-12 text-cancel" disabled={!!busy}
-                          onClick={() => action("reject_urgent", "Срочная заявка отклонена")}>
-                    {busy === "reject_urgent" && <LoaderCircle className="animate-spin" />} ⛔ Запретить
+                  {canForceCancel && (
+                    <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
+                            onClick={() => action("force_cancel", "Выход отменён без штрафа")}>
+                      {spin("force_cancel")} Отменить без штрафа
+                    </Button>
+                  )}
+                  {canForceRestore && (
+                    <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
+                            onClick={() => action("force_restore", "Выход восстановлен")}>
+                      {spin("force_restore")} Вернуть в график
+                    </Button>
+                  )}
+                  <Button variant="ghost" className="h-12 w-full rounded-2xl text-[15px] font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
+                          disabled={!!busy} onClick={() => !needReason() && setConfirmDelete(true)}>
+                    <Trash2 /> Удалить запись
                   </Button>
+                  <p className="text-center text-xs text-muted-foreground">После правки сотрудник сам эту смену уже не изменит.</p>
                 </div>
-              )}
-              {canForceCancel && (
-                <Button size="lg" variant="outline" className="h-12 w-full text-cancel" disabled={!!busy}
-                        onClick={() => action("force_cancel", "Смена отменена без штрафа")}>
-                  {busy === "force_cancel" && <LoaderCircle className="animate-spin" />} Отменить без штрафа
-                </Button>
-              )}
-              {canForceRestore && (
-                <Button size="lg" variant="outline" className="h-12 w-full text-go" disabled={!!busy}
-                        onClick={() => action("force_restore", "Смена восстановлена")}>
-                  {busy === "force_restore" && <LoaderCircle className="animate-spin" />} Восстановить смену
-                </Button>
-              )}
-              <Button variant="ghost" className="w-full text-destructive" disabled={!!busy}
-                      onClick={() => !needReason() && setConfirmDelete(true)}>
-                <Trash2 /> Снять с дня (удалить запись)
-              </Button>
-              <p className="text-center text-xs text-muted-foreground">
-                После ручной правки сотрудник больше не сможет сам изменить эту смену.
-              </p>
+              </div>
             </div>
-          </div>
+          )}
         </DrawerContent>
       </Drawer>
 
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle>Удалить запись?</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Удалить запись?</AlertDialogTitle>
             <AlertDialogDescription>
-              Запись пропадёт из графика, но останется в журнале событий. День у сотрудника станет «Не отметился».
+              Запись исчезнет из графика, но останется в журнале. У сотрудника день станет «Не отмечен».
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Отмена</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={remove}>Удалить</AlertDialogAction>
+            <AlertDialogCancel className="rounded-xl">Оставить</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" className="rounded-xl" onClick={remove}>Удалить</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -236,9 +252,9 @@ export function AdminShiftSheet({
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1.5">
-      <Label>{label}</Label>
+    <label className="block space-y-1.5">
+      <span className="text-sm text-muted-foreground">{label}</span>
       {children}
-    </div>
+    </label>
   );
 }

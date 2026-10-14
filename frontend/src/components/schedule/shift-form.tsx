@@ -1,11 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { Clock, MapPin, Package } from "lucide-react";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Minus, Plus } from "lucide-react";
 import type { Pricing, Shift, ShiftPayload } from "@/lib/api";
 import { rub } from "@/lib/format";
+import { tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 
 export interface FormState {
@@ -36,13 +34,15 @@ export function prefillFrom(shift: Shift): Partial<ShiftPayload> {
 /** Returns the payload or an error message. Mirrors the server-side checks. */
 export function validateForm(f: FormState): ShiftPayload | string {
   const time = /^([01]\d|2[0-3]):[0-5]\d$/;
-  if (!time.test(f.start_time)) return "Укажите время начала";
-  if (!time.test(f.end_time)) return "Укажите время окончания";
-  if (f.end_time <= f.start_time) return "Время «До» должно быть позже «С»";
-  if (!f.location.trim()) return "Укажите точку";
+  if (!time.test(f.start_time)) return "Укажи время начала";
+  if (!time.test(f.end_time)) return "Укажи время окончания";
+  if (f.end_time <= f.start_time) return "Конец должен быть позже начала";
+  if (!f.location.trim()) return "Укажи точку";
   if (!/^\d+$/.test(f.volume.trim()) || Number(f.volume) <= 0) return "Объём — целое число больше нуля";
   return { start_time: f.start_time, end_time: f.end_time, location: f.location.trim(), volume: Number(f.volume) };
 }
+
+const STEP = 5;
 
 export function ShiftForm({
   form,
@@ -57,76 +57,74 @@ export function ShiftForm({
   locations: string[];
   disabled?: boolean;
 }) {
-  const [touched, setTouched] = useState(false);
-  const set = (patch: Partial<FormState>) => {
-    setTouched(true);
-    onChange({ ...form, ...patch });
-  };
-  const volume = Number(form.volume);
-  const hasVolume = /^\d+$/.test(form.volume) && volume > 0;
+  const set = (patch: Partial<FormState>) => onChange({ ...form, ...patch });
+  const volume = Number(form.volume) || 0;
+  const hasVolume = volume > 0;
   const lazy = hasVolume && volume < pricing.lazy_threshold;
   const rate = lazy ? pricing.lazy_rate : pricing.base_rate;
-  const badRange = touched && form.start_time && form.end_time && form.end_time <= form.start_time;
+  const badRange = !!form.start_time && !!form.end_time && form.end_time <= form.start_time;
+  const field = "w-full rounded-2xl border-0 bg-muted px-4 outline-none transition-shadow focus:ring-2 focus:ring-ring/25";
+
+  const step = (delta: number) => {
+    tapHaptic();
+    set({ volume: String(Math.max(0, volume + delta) || "") });
+  };
 
   return (
-    <fieldset disabled={disabled} className="space-y-4 disabled:opacity-60">
-      <p className="flex items-center gap-2 text-sm">
-        <Clock className="size-4 text-primary" />
-        Если выходишь — выбери время, точку и объём
-      </p>
+    <fieldset disabled={disabled} className="space-y-5 disabled:opacity-50">
       <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="start">С</Label>
-          <Input id="start" type="time" className="h-12 text-base" value={form.start_time}
+        <label className="space-y-1.5">
+          <span className="text-sm text-muted-foreground">Начало</span>
+          <input type="time" className={cn(field, "h-14 font-display text-lg font-semibold tabular")} value={form.start_time}
                  onChange={(e) => set({ start_time: e.target.value })} />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="end">До</Label>
-          <Input id="end" type="time" className={cn("h-12 text-base", badRange && "border-destructive")}
+        </label>
+        <label className="space-y-1.5">
+          <span className="text-sm text-muted-foreground">Конец</span>
+          <input type="time" className={cn(field, "h-14 font-display text-lg font-semibold tabular", badRange && "ring-2 ring-cancel/50")}
                  value={form.end_time} onChange={(e) => set({ end_time: e.target.value })} />
-        </div>
+        </label>
       </div>
-      {badRange && <p className="-mt-2 text-xs text-destructive">«До» должно быть позже «С»</p>}
+      {badRange && <p className="-mt-3 text-sm text-cancel">Конец должен быть позже начала</p>}
 
-      <div className="space-y-1.5">
-        <Label htmlFor="location" className="flex items-center gap-1.5">
-          <MapPin className="size-3.5" /> Точка
-        </Label>
-        <Input id="location" className="h-12 text-base" placeholder="Например: Европа, Центр" maxLength={100}
+      <label className="block space-y-1.5">
+        <span className="text-sm text-muted-foreground">Точка</span>
+        <input className={cn(field, "h-13 text-base")} placeholder="Например, Европа" maxLength={100}
                value={form.location} onChange={(e) => set({ location: e.target.value })} />
-        {locations.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            {locations.map((l) => (
-              <button key={l} type="button" onClick={() => set({ location: l })}
-                      className={cn("rounded-full border px-3 py-1 text-xs font-medium",
-                        form.location === l ? "border-primary bg-accent text-accent-foreground" : "bg-muted text-muted-foreground")}>
-                {l}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      </label>
+      {locations.length > 0 && (
+        <div className="-mt-2 flex flex-wrap gap-2">
+          {locations.map((l) => (
+            <button key={l} type="button" onClick={() => set({ location: l })}
+                    className={cn("press rounded-full px-3.5 py-1.5 text-sm font-medium",
+                      form.location === l ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground")}>
+              {l}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="space-y-1.5">
-        <Label htmlFor="volume" className="flex items-center gap-1.5">
-          <Package className="size-3.5" /> Объём, шт.
-        </Label>
-        <Input id="volume" inputMode="numeric" pattern="[0-9]*" className="h-12 text-base" placeholder="Например: 25"
-               value={form.volume} onChange={(e) => set({ volume: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
-        {lazy ? (
-          <p className="rounded-lg bg-wait/10 px-3 py-2 text-xs text-wait">
-            ⚠️ «Налог на лень»: меньше {pricing.lazy_threshold} шт. за день — ставка снижается до {pricing.lazy_rate} ₽/шт.
-          </p>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            Ставка {pricing.base_rate} ₽/шт. При объёме меньше {pricing.lazy_threshold} шт. — {pricing.lazy_rate} ₽/шт.
-          </p>
-        )}
-        {hasVolume && (
-          <p className="text-xs text-muted-foreground">
-            План: {volume} × {rate} ₽ = <b className="text-foreground">{rub(volume * rate)}</b>
-          </p>
-        )}
+        <span className="text-sm text-muted-foreground">Объём, шт.</span>
+        <div className="flex items-center gap-2">
+          <button type="button" aria-label={`Минус ${STEP}`} onClick={() => step(-STEP)}
+                  className="press grid size-14 shrink-0 place-items-center rounded-2xl bg-muted hover:bg-secondary">
+            <Minus className="size-5" />
+          </button>
+          <input inputMode="numeric" pattern="[0-9]*" aria-label="Объём" placeholder="0"
+                 className={cn(field, "h-14 text-center font-display text-2xl font-semibold tabular")}
+                 value={form.volume} onChange={(e) => set({ volume: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
+          <button type="button" aria-label={`Плюс ${STEP}`} onClick={() => step(STEP)}
+                  className="press grid size-14 shrink-0 place-items-center rounded-2xl bg-muted hover:bg-secondary">
+            <Plus className="size-5" />
+          </button>
+        </div>
+        <p className={cn("pt-1 text-sm", lazy ? "text-wait" : "text-muted-foreground")}>
+          {!hasVolume
+            ? `${pricing.base_rate} ₽ за штуку. Меньше ${pricing.lazy_threshold} шт. за день — ${pricing.lazy_rate} ₽.`
+            : lazy
+              ? `Налог на лень: меньше ${pricing.lazy_threshold} шт., ставка ${pricing.lazy_rate} ₽. План ${rub(volume * rate)}.`
+              : `${volume} × ${rate} ₽, план ${rub(volume * rate)}`}
+        </p>
       </div>
     </fieldset>
   );
