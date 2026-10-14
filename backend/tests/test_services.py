@@ -241,3 +241,49 @@ def test_stats_totals(conn, make_user):
     assert t["shifts"] == 3 and t["active_volume"] == 40 and t["cancelled_volume"] == 20
     assert t["expected_pay"] == 30 * 120 + 10 * 100
     assert "Налог на лень" in s["items"][2]["notes"]
+
+
+def test_only_owner_grants_admin_and_owner_is_protected(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    worker = make_user()
+    helper = make_user("Мария", "Админова", "maria")
+    user, changed = svc.set_role(conn, owner, helper["id"], "admin", svc.new_key())
+    assert changed and user["role"] == "admin"
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_role(conn, user, worker["id"], "admin", svc.new_key())
+    assert e.value.code == "owner_only"
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_role(conn, owner, owner["id"], "employee", svc.new_key())
+    assert e.value.code == "owner"
+    assert svc.admin_telegram_ids(conn) == sorted([999, helper["telegram_id"]])
+
+
+def test_close_and_reopen_access(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    helper = make_user("Мария", "Админова", "maria")
+    helper, _ = svc.set_role(conn, owner, helper["id"], "admin", svc.new_key())
+    worker = make_user()
+
+    # a regular admin may close access for employees, but not for admins or themselves
+    closed, changed = svc.set_access(conn, helper, worker["id"], False, svc.new_key())
+    assert changed and closed["status"] == "rejected" and closed["work_status"] == "not_working"
+    with pytest.raises(svc.ServiceError):
+        svc.set_access(conn, helper, helper["id"], False, svc.new_key())
+    with pytest.raises(svc.ServiceError):
+        svc.set_access(conn, helper, owner["id"], False, svc.new_key())
+
+    # closing an admin's access demotes them; reopening keeps them an employee
+    closed_admin, _ = svc.set_access(conn, owner, helper["id"], False, svc.new_key())
+    assert closed_admin["role"] == "employee"
+    reopened, changed = svc.set_access(conn, owner, worker["id"], True, svc.new_key())
+    assert changed and reopened["status"] == "approved"
+    with pytest.raises(svc.ServiceError):
+        create(conn, reopened)  # back in, but must switch on "working" again
+
+
+def test_pending_request_decided_from_team(conn):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    newbie, _ = svc.create_registration(conn, 77, None, "Новый", "Человек")
+    user, changed = svc.set_access(conn, owner, newbie["id"], True, svc.new_key())
+    assert changed and user["status"] == "approved"
+    assert svc.claim_welcome(conn, user["id"])

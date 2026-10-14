@@ -125,3 +125,22 @@ def test_admin_decides_urgent_from_panel(client, conn):
     r = client.patch(f"/api/admin/shifts/{sid}", json={"action": "reject_urgent", "reason": "", "idempotency_key": key()},
                      headers=admin)
     assert r.status_code == 409
+
+
+def test_team_endpoints(client, conn):
+    owner_h = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner_h)
+    newbie, _ = svc.create_registration(conn, 50, "new", "Новый", "Человек")
+    team = client.get("/api/admin/team", headers=owner_h).json()["items"]
+    assert team[0]["status"] == "pending" and any(u["is_owner"] for u in team)
+    r = client.post(f"/api/admin/team/{newbie['id']}/access", json={"allow": True, "idempotency_key": key()}, headers=owner_h)
+    assert r.json()["user"]["status"] == "approved"
+    r = client.post(f"/api/admin/team/{newbie['id']}/role", json={"role": "admin", "idempotency_key": key()}, headers=owner_h)
+    assert r.json()["user"]["role"] == "admin"
+    # the new admin sees the team but cannot hand out admin rights
+    h = headers(50, "Новый", "Человек", "new")
+    assert client.get("/api/admin/team", headers=h).status_code == 200
+    other, _ = svc.create_registration(conn, 51, None, "Ещё", "Один")
+    svc.decide_registration(conn, other["id"], True, 999)
+    r = client.post(f"/api/admin/team/{other['id']}/role", json={"role": "admin", "idempotency_key": key()}, headers=h)
+    assert r.status_code == 403 and r.json()["code"] == "owner_only"

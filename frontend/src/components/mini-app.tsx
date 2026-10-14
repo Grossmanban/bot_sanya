@@ -131,7 +131,7 @@ export function MiniApp() {
               <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => go("profile")} onUserChange={updateUser} />
             )}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} />}
-            {tab === "admin" && user.role === "admin" && <AdminScreen />}
+            {tab === "admin" && user.role === "admin" && <AdminScreen me={user} />}
           </main>
         </div>
 

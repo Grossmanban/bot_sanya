@@ -18,6 +18,8 @@ export interface User {
   status: "pending" | "approved" | "rejected";
   role: "employee" | "admin";
   work_status: "working" | "not_working";
+  is_owner?: boolean;
+  created_at?: string;
 }
 
 export interface Pricing {
@@ -216,6 +218,11 @@ export const api = {
 
   admin: {
     users: () => request<{ items: User[] }>("/api/admin/users"),
+    team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),
+    setRole: (userId: number, role: User["role"], key: string) =>
+      post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/role`, { role, idempotency_key: key }),
+    setAccess: (userId: number, allow: boolean, key: string) =>
+      post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/access`, { allow, idempotency_key: key }),
     raspred: () => request<Raspred>("/api/admin/raspred/tomorrow"),
     day: (day: string) =>
       request<{ date: string; items: AdminShift[]; total_count: number; total_volume: number }>(`/api/admin/day?day=${day}`),

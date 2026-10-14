@@ -11,6 +11,7 @@ from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
 from .notify import Notifier
+from .bot import open_app_keyboard
 from .timeutil import today_local
 
 
@@ -51,6 +52,16 @@ class AdminEdit(BaseModel):
     penalty_amount: int | None = None
 
 
+class RoleBody(BaseModel):
+    role: str
+    idempotency_key: str
+
+
+class AccessBody(BaseModel):
+    allow: bool
+    idempotency_key: str
+
+
 class AdminDelete(BaseModel):
     idempotency_key: str
     reason: str
@@ -70,6 +81,8 @@ def public_user(user: dict) -> dict:
         "status": user["status"],
         "role": user["role"],
         "work_status": user["work_status"],
+        "is_owner": svc.is_owner(user),
+        "created_at": user["created_at"],
     }
 
 
@@ -177,6 +190,25 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.get("/admin/users")
     async def admin_users(_: dict = Depends(admin_user)):
         return {"items": [public_user(u) for u in svc.list_users(conn)]}
+
+    @api.get("/admin/team")
+    async def admin_team(_: dict = Depends(admin_user)):
+        return {"items": [public_user(u) for u in svc.team(conn)], "bot_username": app.state.bot_username}
+
+    @api.post("/admin/team/{user_id}/role")
+    async def admin_set_role(user_id: int, body: RoleBody, admin: dict = Depends(admin_user)):
+        user, changed = svc.set_role(conn, admin, user_id, body.role, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.role_changed(user))
+        return {"user": public_user(user), "changed": changed}
+
+    @api.post("/admin/team/{user_id}/access")
+    async def admin_set_access(user_id: int, body: AccessBody, admin: dict = Depends(admin_user)):
+        before = svc.get_user(conn, user_id)
+        user, changed = svc.set_access(conn, admin, user_id, body.allow, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.access_changed(user, before["status"], open_app_keyboard()))
+        return {"user": public_user(user), "changed": changed}
 
     @api.get("/admin/raspred/tomorrow")
     async def admin_raspred(_: dict = Depends(admin_user)):
