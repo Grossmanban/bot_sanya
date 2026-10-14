@@ -144,3 +144,36 @@ def test_team_endpoints(client, conn):
     svc.decide_registration(conn, other["id"], True, 999)
     r = client.post(f"/api/admin/team/{other['id']}/role", json={"role": "admin", "idempotency_key": key()}, headers=h)
     assert r.status_code == 403 and r.json()["code"] == "owner_only"
+
+
+def test_points_settings_and_fact_endpoints(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    r = client.post("/api/admin/points", json={"name": "Европа", "capacity": 1}, headers=owner)
+    assert r.status_code == 200
+    pid = r.json()["point"]["id"]
+    assert client.patch(f"/api/admin/points/{pid}", json={"clear_capacity": True}, headers=owner).json()["point"]["capacity"] is None
+
+    s = client.get("/api/admin/settings", headers=owner).json()["settings"]
+    assert s["eve_reminder_time"] == "20:00"
+    r = client.patch("/api/admin/settings", json={"eve_reminder_time": "19:30", "backup_enabled": False}, headers=owner)
+    assert r.json()["settings"]["eve_reminder_time"] == "19:30" and r.json()["settings"]["backup_enabled"] is False
+    assert client.patch("/api/admin/settings", json={"eve_reminder_time": "99:00"}, headers=owner).status_code == 422
+
+    # without a running bot, sending files and broadcasts reports it clearly
+    assert client.post("/api/admin/broadcasts", json={"audience": "all", "text": "hi"}, headers=owner).status_code == 503
+    r = client.post("/api/admin/export", json={"date_from": "2026-10-12", "date_to": "2026-10-18"}, headers=owner)
+    assert r.status_code == 503
+
+    user, _ = svc.create_registration(conn, 60, "w", "Иван", "Петров")
+    svc.decide_registration(conn, user["id"], True, 999)
+    h = headers(60)
+    assert client.patch("/api/me/notifications", json={"enabled": False}, headers=h).json()["user"]["notify_reminders"] is False
+    assert client.get("/api/points", headers=h).json()["items"][0]["name"] == "Европа"
+    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
+    today = today_local().isoformat()
+    sid = client.post("/api/shifts/create", json={"shift_date": today, "start_time": "08:00", "end_time": "09:00", "volume": 10,
+                                                  "location": "европа", "idempotency_key": key()}, headers=h).json()["shift"]["id"]
+    client.patch(f"/api/admin/shifts/{sid}", json={"action": "approve_urgent", "reason": "", "idempotency_key": key()}, headers=owner)
+    r = client.post(f"/api/shifts/{sid}/fact", json={"fact_volume": 12, "idempotency_key": key()}, headers=h)
+    assert r.status_code == 200 and r.json()["shift"]["fact_volume"] == 12 and r.json()["shift"]["location"] == "Европа"

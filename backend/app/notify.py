@@ -8,7 +8,14 @@ from html import escape
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 from . import services as svc
 from .timeutil import ddmm, ddmm_wd
@@ -210,6 +217,31 @@ class Notifier:
         except Exception:  # network errors must not kill the caller
             log.exception("send to %s failed", chat_id)
             return False
+
+    async def send_document(self, chat_id: int, data: bytes, filename: str, caption: str | None = None) -> bool:
+        if self.bot is None:
+            log.info("[document → %s] %s (%d bytes)", chat_id, filename, len(data))
+            return False
+        try:
+            await self.bot.send_document(chat_id, BufferedInputFile(data, filename), caption=caption, parse_mode="HTML")
+            return True
+        except TelegramAPIError as exc:
+            log.warning("document to %s failed: %s", chat_id, exc)
+            return False
+        except Exception:
+            log.exception("document to %s failed", chat_id)
+            return False
+
+    async def broadcast(self, broadcast_id: int, recipients: list[dict], text: str) -> int:
+        body = f"📣 <b>Сообщение от администратора</b>\n\n{escape(text)}"
+        delivered = 0
+        for i, user in enumerate(recipients):
+            delivered += await self.send(user["telegram_id"], body)
+            if i % 10 == 9:
+                self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
+            await asyncio.sleep(0.05)  # stay well under Telegram's ~30 msg/s limit
+        self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
+        return delivered
 
     async def to_admins(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None):
         for admin_id in svc.admin_telegram_ids(self.conn):

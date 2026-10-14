@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { ChevronLeft, ChevronRight, History, LoaderCircle, Wallet } from "lucide-react";
+import { Bell, ChevronLeft, ChevronRight, History, LoaderCircle, Wallet } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Pricing, type User } from "@/lib/api";
 import { STATUS_META, WEEKDAYS_SHORT, dayMonth, parseDay, rub, timeRange, weekRange } from "@/lib/format";
@@ -63,7 +64,7 @@ export function ProfileScreen({
         <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
           <div className="flex items-center justify-between">
             <h2 className="font-semibold">Статус</h2>
-            {busy && <LoaderCircle className="size-4 animate-spin text-muted-foreground" />}
+            {busy === "work" && <LoaderCircle className="size-4 animate-spin text-muted-foreground" />}
           </div>
           <div role="radiogroup" className="relative mt-3 grid grid-cols-2 rounded-2xl bg-muted p-1">
             <span
@@ -95,6 +96,28 @@ export function ProfileScreen({
       </div>
 
       <div className="space-y-4">
+        <label className="flex cursor-pointer items-center gap-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">
+          <span className="grid size-10 place-items-center rounded-xl bg-muted">
+            <Bell className="size-5" strokeWidth={1.8} />
+          </span>
+          <span className="flex-1">
+            <span className="block font-medium">Напоминания в боте</span>
+            <span className="block text-sm text-muted-foreground">Накануне смены и про график на следующую неделю</span>
+          </span>
+          <Switch
+            checked={user.notify_reminders !== false}
+            disabled={busy === "notify"}
+            onCheckedChange={async (on) => {
+              try {
+                const res = await run("notify", () => api.setNotify(on), on ? "Напоминания включены" : "Напоминания выключены");
+                if (res) onUserChange(res.user);
+              } catch {
+                /* toast shown */
+              }
+            }}
+          />
+        </label>
+
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <MenuRow icon={History} label="История выходов" onClick={() => setView("history")} />
           <MenuRow
@@ -191,7 +214,8 @@ function HistoryView({ onBack }: { onBack: () => void }) {
                       </span>
                       <DayTrack className="mt-2.5" state={s.status} mine={s.start_time ? s : null} others={[]} index={i} />
                       <span className="mt-2 block text-xs text-muted-foreground">
-                        {s.location ? `${s.location}, ${s.volume} шт.` : ""}
+                        {s.location ? `${s.location}, план ${s.volume} шт.` : ""}
+                        {s.fact_volume != null ? `, факт ${s.fact_volume} шт.` : ""}
                         {s.lazy ? ", налог на лень" : ""}
                         {s.status === "finally_cancelled" &&
                           (s.penalty_amount != null ? `, штраф ${rub(s.penalty_amount)}` : ", штраф ещё не назначен")}

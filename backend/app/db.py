@@ -73,6 +73,64 @@ CREATE INDEX IF NOT EXISTS ix_event_logs_user ON event_logs (user_id, created_at
 """
 
 
+# Incremental migrations, applied in order and tracked with PRAGMA user_version.
+MIGRATIONS = [
+    # 1: fact volume, reminders, points, settings, scheduled jobs, broadcasts
+    """
+    ALTER TABLE shifts ADD COLUMN fact_volume INTEGER CHECK (fact_volume IS NULL OR fact_volume >= 0);
+    ALTER TABLE shifts ADD COLUMN fact_set_at TEXT;
+    ALTER TABLE shifts ADD COLUMN fact_set_by INTEGER;
+    ALTER TABLE shifts ADD COLUMN reminded_at TEXT;
+    ALTER TABLE shifts ADD COLUMN fact_asked_at TEXT;
+    ALTER TABLE users ADD COLUMN notify_reminders INTEGER NOT NULL DEFAULT 1;
+
+    CREATE TABLE IF NOT EXISTS points (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        capacity   INTEGER CHECK (capacity IS NULL OR capacity > 0),
+        active     INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS job_runs (
+        job      TEXT NOT NULL,
+        run_date TEXT NOT NULL,
+        ran_at   TEXT NOT NULL,
+        PRIMARY KEY (job, run_date)
+    );
+
+    CREATE TABLE IF NOT EXISTS broadcasts (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        author_id  INTEGER NOT NULL,
+        audience   TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        recipients INTEGER NOT NULL DEFAULT 0,
+        delivered  INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    """,
+]
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in filter(None, (s.strip() for s in script.split(";"))):
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {number}")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+
+
 def connect(path: str) -> sqlite3.Connection:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +142,7 @@ def connect(path: str) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
 
 

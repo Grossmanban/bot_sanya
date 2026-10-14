@@ -20,6 +20,7 @@ export interface User {
   work_status: "working" | "not_working";
   is_owner?: boolean;
   created_at?: string;
+  notify_reminders?: boolean;
 }
 
 export interface Pricing {
@@ -55,6 +56,16 @@ export interface Shift {
   rate?: number;
   expected_pay?: number;
   lazy?: boolean;
+  fact_volume: number | null;
+  fact_pay?: number;
+  can_set_fact: boolean;
+}
+
+export interface Point {
+  id: number;
+  name: string;
+  capacity: number | null;
+  active: number;
 }
 
 export interface Colleague {
@@ -73,6 +84,7 @@ export interface Day {
   my_shift: Shift | null;
   colleagues: Colleague[];
   colleagues_off: { name: string; first_name: string }[];
+  points_load: Record<string, number>;
 }
 
 export interface Week {
@@ -115,6 +127,7 @@ export interface StatsItem {
   rate: number | null;
   expected_pay: number | null;
   penalty_amount: number | null;
+  fact_volume: number | null;
   notes: string;
 }
 
@@ -130,6 +143,9 @@ export interface Stats {
     cancelled_volume: number;
     penalties: number;
     expected_pay: number;
+    fact_volume: number;
+    fact_pay: number;
+    fact_missing: number;
   };
 }
 
@@ -143,6 +159,33 @@ export interface PenaltyRow {
   amount: number | null;
   set_by: string | null;
   set_at: string | null;
+}
+
+export interface ScheduleSettings {
+  eve_reminder_enabled: boolean;
+  eve_reminder_time: string;
+  auto_raspred_enabled: boolean;
+  auto_raspred_time: string;
+  week_reminder_enabled: boolean;
+  week_reminder_weekday: number;
+  week_reminder_time: string;
+  fact_request_enabled: boolean;
+  fact_request_delay: number;
+  weekly_report_enabled: boolean;
+  weekly_report_time: string;
+  backup_enabled: boolean;
+  backup_time: string;
+}
+
+export interface Broadcast {
+  id: number;
+  audience: string;
+  text: string;
+  recipients: number;
+  delivered: number;
+  created_at: string;
+  first_name: string | null;
+  last_name: string | null;
 }
 
 export type AdminAction = "force_cancel" | "force_restore" | "approve_urgent" | "reject_urgent";
@@ -193,6 +236,10 @@ export const api = {
   me: () => request<Me>("/api/me"),
   setWorkStatus: (work_status: User["work_status"]) =>
     patch<{ user: User }>("/api/me/work-status", { work_status, idempotency_key: newKey() }),
+  setNotify: (enabled: boolean) => patch<{ user: User }>("/api/me/notifications", { enabled }),
+  points: () => request<{ items: Point[] }>("/api/points"),
+  setFact: (id: number, fact_volume: number, key: string) =>
+    post<ShiftResponse>(`/api/shifts/${id}/fact`, { fact_volume, idempotency_key: key }),
   myPenalties: () =>
     request<{ items: { id: number; shift_date: string; penalty_amount: number | null; penalty_set_at: string | null }[] }>(
       "/api/me/penalties",
@@ -218,6 +265,18 @@ export const api = {
 
   admin: {
     users: () => request<{ items: User[] }>("/api/admin/users"),
+    points: () => request<{ items: Point[] }>("/api/admin/points"),
+    createPoint: (name: string, capacity: number | null) => post<{ point: Point }>("/api/admin/points", { name, capacity }),
+    updatePoint: (id: number, body: { name?: string; capacity?: number; clear_capacity?: boolean; active?: boolean }) =>
+      patch<{ point: Point }>(`/api/admin/points/${id}`, body),
+    settings: () => request<{ settings: ScheduleSettings; timezone: string }>("/api/admin/settings"),
+    saveSettings: (body: Partial<ScheduleSettings>) =>
+      patch<{ settings: ScheduleSettings; timezone: string }>("/api/admin/settings", body),
+    broadcasts: () =>
+      request<{ items: Broadcast[]; audiences: Record<string, string>; counts: Record<string, number> }>("/api/admin/broadcasts"),
+    broadcast: (audience: string, text: string) => post<{ broadcast: Broadcast }>("/api/admin/broadcasts", { audience, text }),
+    exportXlsx: (date_from: string, date_to: string, user_id?: number) =>
+      post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
     team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),
     setRole: (userId: number, role: User["role"], key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/role`, { role, idempotency_key: key }),
@@ -237,7 +296,7 @@ export const api = {
     },
     editShift: (
       id: number,
-      body: Partial<ShiftPayload> & { reason: string; action?: AdminAction; penalty_amount?: number },
+      body: Partial<ShiftPayload> & { reason: string; action?: AdminAction; penalty_amount?: number; fact_volume?: number },
       key: string,
     ) => patch<ShiftResponse>(`/api/admin/shifts/${id}`, { ...body, idempotency_key: key }),
     deleteShift: (id: number, reason: string, key: string) =>

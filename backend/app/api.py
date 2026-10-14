@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import pricing
+from . import app_settings, export, pricing
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -50,6 +50,7 @@ class AdminEdit(BaseModel):
     location: str | None = None
     action: str | None = None
     penalty_amount: int | None = None
+    fact_volume: int | None = None
 
 
 class RoleBody(BaseModel):
@@ -60,6 +61,38 @@ class RoleBody(BaseModel):
 class AccessBody(BaseModel):
     allow: bool
     idempotency_key: str
+
+
+class FactBody(BaseModel):
+    fact_volume: int
+    idempotency_key: str
+
+
+class NotifyBody(BaseModel):
+    enabled: bool
+
+
+class PointBody(BaseModel):
+    name: str
+    capacity: int | None = None
+
+
+class PointPatch(BaseModel):
+    name: str | None = None
+    capacity: int | None = None
+    clear_capacity: bool = False
+    active: bool | None = None
+
+
+class BroadcastBody(BaseModel):
+    audience: str
+    text: str
+
+
+class ExportBody(BaseModel):
+    date_from: str
+    date_to: str
+    user_id: int | None = None
 
 
 class AdminDelete(BaseModel):
@@ -82,6 +115,7 @@ def public_user(user: dict) -> dict:
         "role": user["role"],
         "work_status": user["work_status"],
         "is_owner": svc.is_owner(user),
+        "notify_reminders": bool(user.get("notify_reminders", 1)),
         "created_at": user["created_at"],
     }
 
@@ -141,6 +175,14 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def work_status(body: WorkStatus, user: dict = Depends(current_user)):
         return {"user": public_user(svc.set_work_status(conn, user, body.work_status, body.idempotency_key))}
 
+    @api.patch("/me/notifications")
+    async def my_notifications(body: NotifyBody, user: dict = Depends(current_user)):
+        return {"user": public_user(svc.set_notify(conn, user, body.enabled))}
+
+    @api.get("/points")
+    async def points(_: dict = Depends(current_user)):
+        return {"items": svc.list_points(conn)}
+
     @api.get("/me/penalties")
     async def my_penalties(user: dict = Depends(current_user)):
         return {"items": svc.user_penalties(conn, user["id"])}
@@ -177,6 +219,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def final_cancel(shift_id: int, body: KeyOnly, user: dict = Depends(current_user)):
         return respond(svc.final_cancel_shift(conn, user, shift_id, body.idempotency_key))
 
+    @api.post("/shifts/{shift_id}/fact")
+    async def fact(shift_id: int, body: FactBody, user: dict = Depends(current_user)):
+        result = svc.set_fact(conn, user, shift_id, body.fact_volume, body.idempotency_key)
+        return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
+
     @api.post("/shifts/pre-declare-off")
     async def pre_declare(body: DateKey, user: dict = Depends(current_user)):
         return respond(svc.pre_declare_off(conn, user, svc.parse_date(body.shift_date), body.idempotency_key))
@@ -209,6 +256,56 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if changed:
             notifier.spawn(notifier.access_changed(user, before["status"], open_app_keyboard()))
         return {"user": public_user(user), "changed": changed}
+
+    @api.get("/admin/points")
+    async def admin_points(_: dict = Depends(admin_user)):
+        return {"items": svc.list_points(conn, include_inactive=True)}
+
+    @api.post("/admin/points")
+    async def admin_point_create(body: PointBody, admin: dict = Depends(admin_user)):
+        return {"point": svc.create_point(conn, admin, body.name, body.capacity)}
+
+    @api.patch("/admin/points/{point_id}")
+    async def admin_point_update(point_id: int, body: PointPatch, admin: dict = Depends(admin_user)):
+        changes = body.model_dump(exclude_unset=True, exclude={"clear_capacity"})
+        if body.clear_capacity:
+            changes["capacity"] = None
+        return {"point": svc.update_point(conn, admin, point_id, changes)}
+
+    @api.get("/admin/settings")
+    async def admin_settings_get(_: dict = Depends(admin_user)):
+        return {"settings": app_settings.get_all(conn), "timezone": settings.timezone}
+
+    @api.patch("/admin/settings")
+    async def admin_settings_set(body: dict, _: dict = Depends(admin_user)):
+        return {"settings": app_settings.update(conn, body), "timezone": settings.timezone}
+
+    @api.get("/admin/broadcasts")
+    async def admin_broadcasts(_: dict = Depends(admin_user)):
+        return {"items": svc.list_broadcasts(conn), "audiences": svc.AUDIENCES,
+                "counts": {a: len(svc.broadcast_recipients(conn, a)) for a in svc.AUDIENCES}}
+
+    @api.post("/admin/broadcasts")
+    async def admin_broadcast(body: BroadcastBody, admin: dict = Depends(admin_user)):
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен: рассылка недоступна", 503, "no_bot")
+        row, recipients = svc.create_broadcast(conn, admin, body.audience, body.text)
+        notifier.spawn(notifier.broadcast(row["id"], recipients, row["text"]))
+        return {"broadcast": row}
+
+    @api.post("/admin/export")
+    async def admin_export(body: ExportBody, admin: dict = Depends(admin_user)):
+        date_from, date_to = svc.parse_date(body.date_from), svc.parse_date(body.date_to)
+        if date_to < date_from or (date_to - date_from).days > 370:
+            raise svc.ServiceError("Период от 1 дня до года", 422, "bad_range")
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен: файл некуда отправить", 503, "no_bot")
+        data = export.build_xlsx(conn, date_from, date_to, body.user_id)
+        ok = await notifier.send_document(admin["telegram_id"], data, export.export_filename(date_from, date_to),
+                                          "Выгрузка графика: итоги, смены и штрафы")
+        if not ok:
+            raise svc.ServiceError("Не удалось отправить файл. Напишите боту /start и попробуйте снова", 502, "send_failed")
+        return {"ok": True}
 
     @api.get("/admin/raspred/tomorrow")
     async def admin_raspred(_: dict = Depends(admin_user)):

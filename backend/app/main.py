@@ -14,6 +14,7 @@ from .api import create_app
 from .bot import build_router, setup_menu_button
 from .config import settings
 from .db import connect
+from .jobs import run_scheduler
 from .notify import Notifier
 
 log = logging.getLogger("app")
@@ -45,6 +46,7 @@ async def main() -> None:
         dp.include_router(build_router(conn, notifier))
         await setup_menu_button(bot)
         tasks.append(asyncio.create_task(dp.start_polling(bot, handle_signals=False)))
+        tasks.append(asyncio.create_task(run_scheduler(conn, notifier)))
 
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

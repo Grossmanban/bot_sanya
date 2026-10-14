@@ -6,7 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Day, type Pricing, type User, type Week } from "@/lib/api";
 import { STATUS_META, WEEKDAYS_SHORT, dayState, isGoing, parseDay, plural, rub, timeRange, weekRange } from "@/lib/format";
-import { readLocal, useAction, useLoad, writeLocal } from "@/lib/hooks";
+import { moscowTime, readLocal, useAction, useLoad, writeLocal } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
@@ -29,6 +29,7 @@ export function ScheduleScreen({
   const wide = useWide();
   const [offset, setOffset] = useState(0);
   const { data: week, loading, error, reload } = useLoad(() => api.week(offset), [offset]);
+  const pointsList = useLoad(() => api.points(), []);
   const [openDate, setOpenDate] = useState<string | null>(null);
   const [showHint, setShowHint] = useState(false);
 
@@ -49,7 +50,7 @@ export function ScheduleScreen({
   }, [reload]);
 
   // on wide screens a day is always selected in the side panel
-  const firstOpen = week?.days.find((d) => !d.is_past)?.date ?? null;
+  const firstOpen = week?.days.find((d) => !d.is_past || d.my_shift?.can_set_fact)?.date ?? null;
   const selected = week?.days.find((d) => d.date === openDate) ?? null;
   useEffect(() => {
     if (wide && week && (!openDate || !week.days.some((d) => d.date === openDate))) setOpenDate(firstOpen);
@@ -67,7 +68,7 @@ export function ScheduleScreen({
   }, [week]);
 
   const open = (day: Day) => {
-    if (day.is_past) return;
+    if (day.is_past && !day.my_shift) return;
     tapHaptic();
     setOpenDate(day.date);
   };
@@ -76,6 +77,7 @@ export function ScheduleScreen({
     user,
     pricing,
     locations,
+    points: pointsList.data?.items ?? [],
     onChanged: reload,
     onOpenProfile,
   };
@@ -274,18 +276,20 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
   const { d, weekday } = parseDay(day.date);
   const withTime = mine?.start_time && state !== "pre_declared_off";
   const names = day.colleagues.map((c) => c.first_name);
+  const needsFact =
+    !!mine?.can_set_fact && mine.fact_volume == null && (day.is_past || (day.is_today && !!mine.end_time && mine.end_time <= moscowTime()));
 
   return (
     <button
       type="button"
-      disabled={day.is_past}
+      disabled={day.is_past && !mine}
       onClick={onOpen}
       style={{ "--i": index } as CSSProperties}
       className={cn(
         "row-in grid w-full grid-cols-[3rem_1fr] gap-4 px-4 py-3.5 text-left transition-colors md:px-5",
-        !day.is_past && "hover:bg-muted/60 active:bg-muted",
+        (!day.is_past || mine) && "hover:bg-muted/60 active:bg-muted",
         selected && "bg-muted",
-        day.is_past && "opacity-45",
+        day.is_past && !needsFact && "opacity-45",
       )}
     >
       <span className="flex flex-col items-center gap-0.5 pt-0.5">
@@ -321,7 +325,11 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
         />
         <span className="mt-2 flex justify-between gap-3 text-xs text-muted-foreground">
           <span className="truncate">
-            {isGoing(mine) || state === "awaiting_approval"
+            {needsFact ? (
+              <span className="font-semibold text-wait">Внеси факт: сколько сделал</span>
+            ) : mine?.fact_volume != null ? (
+              `${mine.location}, план ${mine.volume}, факт ${mine.fact_volume} шт.`
+            ) : isGoing(mine) || state === "awaiting_approval"
               ? `${mine!.location}, ${mine!.volume} шт.`
               : names.length
                 ? `Выходят: ${names.join(", ")}`
