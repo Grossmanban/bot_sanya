@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Point, type ScheduleSettings, type User } from "@/lib/api";
-import { WEEKDAYS, ddmm, plural } from "@/lib/format";
+import { WEEKDAYS } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
@@ -155,80 +155,6 @@ function PointRow({ point, onChanged }: { point: Point; onChanged: () => Promise
         )}
       </div>
     </li>
-  );
-}
-
-/* ---------------------------------------------------------------- broadcast */
-
-export function BroadcastSection() {
-  const { data, reload } = useLoad(() => api.admin.broadcasts(), []);
-  const [audience, setAudience] = useState("working");
-  const [text, setText] = useState("");
-  const { busy, run } = useAction();
-
-  // the delivery counter updates while messages go out
-  const sending = data?.items.some((b) => b.delivered < b.recipients && Date.now() - Date.parse(b.created_at) < 120_000);
-  useEffect(() => {
-    if (!sending) return;
-    const t = setInterval(reload, 2500);
-    return () => clearInterval(t);
-  }, [sending, reload]);
-
-  async function send() {
-    try {
-      await run("send", () => api.admin.broadcast(audience, text), "Рассылка запущена");
-      setText("");
-      await reload();
-    } catch {
-      /* toast shown */
-    }
-  }
-
-  if (!data) return <Skeleton className="h-72 rounded-3xl" />;
-  const count = data.counts[audience] ?? 0;
-
-  return (
-    <div className="space-y-4">
-      <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
-        <div>
-          <h2 className="font-semibold">Сообщение от бота</h2>
-          <p className="text-sm text-muted-foreground">Придёт каждому в личные сообщения от бота.</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(data.audiences).map(([key, label]) => (
-            <button key={key} onClick={() => setAudience(key)}
-                    className={cn("press rounded-full px-4 py-2 text-sm font-semibold",
-                      audience === key ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
-              {label} <span className="opacity-60">{data.counts[key]}</span>
-            </button>
-          ))}
-        </div>
-        <textarea rows={5} maxLength={3000} value={text} onChange={(e) => setText(e.target.value)}
-                  placeholder="Например: завтра на Европе новая выкладка, приходите на 10 минут раньше."
-                  className="w-full resize-none rounded-2xl border-0 bg-muted px-4 py-3 outline-none focus:ring-2 focus:ring-ring/25" />
-        <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy || !text.trim() || !count} onClick={send}>
-          {busy ? <LoaderCircle className="animate-spin" /> : <Send />}
-          Отправить {count} {plural(count, "человеку", "людям", "людям")}
-        </Button>
-      </section>
-
-      {data.items.length > 0 && (
-        <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
-          <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">Отправленные</h2>
-          <ul className="divide-y">
-            {data.items.map((b) => (
-              <li key={b.id} className="px-5 py-3.5 md:px-6">
-                <p className="line-clamp-3 text-[15px] whitespace-pre-wrap">{b.text}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {data.audiences[b.audience] ?? b.audience}, доставлено {b.delivered} из {b.recipients}
-                  {b.first_name ? `, ${b.first_name}` : ""}, {ddmm(b.created_at.slice(0, 10))} в {b.created_at.slice(11, 16)}
-                </p>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </div>
   );
 }
 

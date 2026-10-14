@@ -114,6 +114,11 @@ MIGRATIONS = [
         created_at TEXT NOT NULL
     );
     """,
+    # 2: formatted broadcasts
+    """
+    ALTER TABLE broadcasts ADD COLUMN html TEXT;
+    ALTER TABLE broadcasts ADD COLUMN signed INTEGER NOT NULL DEFAULT 1;
+    """,
 ]
 
 

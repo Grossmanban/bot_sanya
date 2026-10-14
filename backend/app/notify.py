@@ -232,8 +232,13 @@ class Notifier:
             log.exception("document to %s failed", chat_id)
             return False
 
-    async def broadcast(self, broadcast_id: int, recipients: list[dict], text: str) -> int:
-        body = f"📣 <b>Сообщение от администратора</b>\n\n{escape(text)}"
+    @staticmethod
+    def broadcast_body(html: str, signed: bool) -> str:
+        return f"📣 <b>Сообщение от администратора</b>\n\n{html}" if signed else html
+
+    async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signed: bool = True) -> int:
+        """html must already be sanitized (richtext.sanitize)."""
+        body = self.broadcast_body(html, signed)
         delivered = 0
         for i, user in enumerate(recipients):
             delivered += await self.send(user["telegram_id"], body)

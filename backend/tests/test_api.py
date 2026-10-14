@@ -161,7 +161,10 @@ def test_points_settings_and_fact_endpoints(client, conn):
     assert client.patch("/api/admin/settings", json={"eve_reminder_time": "99:00"}, headers=owner).status_code == 422
 
     # without a running bot, sending files and broadcasts reports it clearly
-    assert client.post("/api/admin/broadcasts", json={"audience": "all", "text": "hi"}, headers=owner).status_code == 503
+    assert client.post("/api/admin/broadcasts", json={"audiences": ["working"], "html": "<b>hi</b>"}, headers=owner).status_code == 503
+    assert client.post("/api/admin/broadcasts/test", json={"html": "<b>hi</b>"}, headers=owner).status_code == 503
+    people = client.get("/api/admin/broadcasts", headers=owner).json()["people"]
+    assert people and {"id", "working", "admin"} <= set(people[0])
     r = client.post("/api/admin/export", json={"date_from": "2026-10-12", "date_to": "2026-10-18"}, headers=owner)
     assert r.status_code == 503
 
