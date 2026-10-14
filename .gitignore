@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+frontend/node_modules/
+frontend/out/
+frontend/.next/
+frontend/next-env.d.ts
