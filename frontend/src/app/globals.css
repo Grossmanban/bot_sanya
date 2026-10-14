@@ -1,0 +1,137 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-grid: var(--grid);
+  --color-go: var(--st-go);
+  --color-go-soft: var(--st-go-soft);
+  --color-wait: var(--st-wait);
+  --color-off: var(--st-off);
+  --color-cancel: var(--st-cancel);
+  --color-cancel-soft: var(--st-cancel-soft);
+  --color-final: var(--st-final);
+  --color-pending: var(--st-pending);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+}
+
+/* QuZe-like palette: mint paper with a grid, white cards, teal accent */
+:root {
+  --radius: 0.875rem;
+  --background: oklch(0.975 0.008 185);
+  --foreground: oklch(0.2 0.01 200);
+  --grid: oklch(0.9 0.025 185 / 0.55);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.01 200);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.01 200);
+  --primary: oklch(0.52 0.09 182);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.95 0.015 185);
+  --secondary-foreground: oklch(0.3 0.04 185);
+  --muted: oklch(0.955 0.008 185);
+  --muted-foreground: oklch(0.5 0.015 200);
+  --accent: oklch(0.93 0.035 182);
+  --accent-foreground: oklch(0.4 0.08 182);
+  --destructive: oklch(0.58 0.2 25);
+  --border: oklch(0.91 0.01 190);
+  --input: oklch(0.89 0.012 190);
+  --ring: oklch(0.6 0.09 182);
+  --st-go: oklch(0.55 0.11 165);
+  --st-go-soft: oklch(0.94 0.04 170);
+  --st-wait: oklch(0.68 0.15 65);
+  --st-off: oklch(0.55 0.15 300);
+  --st-cancel: oklch(0.6 0.19 25);
+  --st-cancel-soft: oklch(0.95 0.03 20);
+  --st-final: oklch(0.45 0.16 25);
+  --st-pending: oklch(0.75 0.14 90);
+}
+
+.dark {
+  --background: oklch(0.18 0.01 200);
+  --foreground: oklch(0.96 0.005 190);
+  --grid: oklch(0.32 0.02 190 / 0.45);
+  --card: oklch(0.23 0.012 200);
+  --card-foreground: oklch(0.96 0.005 190);
+  --popover: oklch(0.23 0.012 200);
+  --popover-foreground: oklch(0.96 0.005 190);
+  --primary: oklch(0.66 0.1 180);
+  --primary-foreground: oklch(0.16 0.02 190);
+  --secondary: oklch(0.28 0.015 195);
+  --secondary-foreground: oklch(0.92 0.01 190);
+  --muted: oklch(0.27 0.012 200);
+  --muted-foreground: oklch(0.7 0.012 200);
+  --accent: oklch(0.32 0.04 182);
+  --accent-foreground: oklch(0.85 0.07 180);
+  --destructive: oklch(0.68 0.18 22);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.6 0.09 182);
+  --st-go: oklch(0.74 0.12 165);
+  --st-go-soft: oklch(0.32 0.05 170);
+  --st-wait: oklch(0.78 0.14 70);
+  --st-off: oklch(0.74 0.13 300);
+  --st-cancel: oklch(0.7 0.17 25);
+  --st-cancel-soft: oklch(0.3 0.06 20);
+  --st-final: oklch(0.62 0.17 25);
+  --st-pending: oklch(0.82 0.13 90);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    @apply bg-background text-foreground;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+  body {
+    font-family: var(--font-sans);
+  }
+}
+
+.grid-paper {
+  background-color: var(--background);
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 2.25rem 2.25rem;
+  background-position: -1px -1px;
+}
+
+/* native time picker: keep the field compact and readable */
+input[type="time"]::-webkit-calendar-picker-indicator {
+  opacity: 0.5;
+}
+
+.pb-safe {
+  padding-bottom: max(env(safe-area-inset-bottom), 0.75rem);
+}
