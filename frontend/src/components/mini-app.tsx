@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarClock, CircleUser, ShieldCheck } from "lucide-react";
+import { CalendarDays, ShieldCheck, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, type Me, type User } from "@/lib/api";
 import { initData, setupWebApp, tapHaptic } from "@/lib/telegram";
@@ -10,18 +10,25 @@ import { AccessScreen, LoadingScreen } from "./access-screens";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
+import { Avatar } from "./avatar";
 
 type Tab = "schedule" | "profile" | "admin";
+
+const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
+  { id: "schedule", label: "График", icon: CalendarDays },
+  { id: "profile", label: "Профиль", icon: UserRound },
+  { id: "admin", label: "Админ", icon: ShieldCheck },
+];
+
+export function Wordmark({ className }: { className?: string }) {
+  return <span className={cn("font-display font-semibold tracking-tight lowercase", className)}>выход</span>;
+}
 
 export function MiniApp() {
   const [scheme, setScheme] = useState<"light" | "dark">("light");
   const [me, setMe] = useState<Me | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("schedule");
-
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", scheme === "dark");
-  }, [scheme]);
 
   const loadMe = useCallback(async () => {
     try {
@@ -45,6 +52,12 @@ export function MiniApp() {
 
   const updateUser = useCallback((user: User) => setMe((m) => (m ? { ...m, user } : m)), []);
 
+  const go = (id: Tab) => {
+    tapHaptic();
+    setTab(id);
+    window.scrollTo({ top: 0 });
+  };
+
   let body: React.ReactNode;
   if (fatal === "outside") {
     body = <AccessScreen kind="outside" />;
@@ -58,71 +71,101 @@ export function MiniApp() {
     body = <AccessScreen kind={me.user.status} botUsername={me.bot_username} />;
   } else {
     const user = me.user;
-    const isAdmin = user.role === "admin";
-    const tabs: { id: Tab; label: string; icon: typeof CalendarClock }[] = [
-      { id: "schedule", label: "График", icon: CalendarClock },
-      { id: "profile", label: "Профиль", icon: CircleUser },
-      ...(isAdmin ? [{ id: "admin" as const, label: "Админ", icon: ShieldCheck }] : []),
-    ];
+    const tabs = TABS.filter((t) => t.id !== "admin" || user.role === "admin");
+    const working = user.work_status === "working";
+    const activeIndex = tabs.findIndex((t) => t.id === tab);
+
     body = (
-      <>
-        <header className="sticky top-0 z-30 flex items-center justify-between border-b bg-card/90 px-4 py-3 backdrop-blur">
-          <div className="flex items-center gap-2.5">
-            <span className="text-xl font-extrabold tracking-tight">
-              Сме<span className="text-primary">ны</span>
-            </span>
-            <button
-              onClick={() => setTab("profile")}
-              className={cn(
-                "flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold",
-                user.work_status === "working"
-                  ? "border-go/30 bg-go-soft text-go"
-                  : "border-border bg-muted text-muted-foreground",
-              )}
-            >
-              <span className={cn("size-1.5 rounded-full", user.work_status === "working" ? "bg-go" : "bg-muted-foreground")} />
-              {user.work_status === "working" ? "Работаю" : "Не работаю"}
-            </button>
-          </div>
-          {isAdmin && (
-            <span className="rounded-full bg-off/10 px-2.5 py-0.5 text-xs font-semibold text-off">Админ</span>
-          )}
-        </header>
-
-        <main className="mx-auto w-full max-w-xl flex-1 px-4 pt-4 pb-32">
-          {tab === "schedule" && <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => setTab("profile")} />}
-          {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} />}
-          {tab === "admin" && isAdmin && <AdminScreen />}
-        </main>
-
-        <nav className="pb-safe fixed inset-x-0 bottom-0 z-40 px-4">
-          <div className="mx-auto flex max-w-xl gap-1 rounded-2xl border bg-card/95 p-1.5 shadow-lg shadow-black/5 backdrop-blur">
+      <div className="lg:grid lg:min-h-dvh lg:grid-cols-[15.5rem_minmax(0,1fr)]">
+        {/* iPad landscape / desktop: side rail */}
+        <aside className="sticky top-0 hidden h-dvh flex-col border-r bg-card/50 px-5 pt-8 pb-6 lg:flex">
+          <Wordmark className="px-3 text-2xl" />
+          <nav className="mt-10 space-y-1">
             {tabs.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
-                onClick={() => {
-                  tapHaptic();
-                  setTab(id);
-                }}
+                onClick={() => go(id)}
                 className={cn(
-                  "flex flex-1 flex-col items-center gap-0.5 rounded-xl border border-transparent py-2 text-[11px] font-medium transition-colors",
-                  tab === id ? "border-primary/25 bg-accent text-accent-foreground" : "text-muted-foreground",
+                  "press flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-[15px] font-medium",
+                  tab === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
-                <Icon className="size-5" strokeWidth={tab === id ? 2.2 : 1.8} />
+                <Icon className="size-5" strokeWidth={1.9} />
+                {label}
+              </button>
+            ))}
+          </nav>
+          <button
+            onClick={() => go("profile")}
+            className="press mt-auto flex items-center gap-3 rounded-2xl p-3 text-left hover:bg-muted"
+          >
+            <Avatar user={user} className="size-10 rounded-xl text-sm" />
+            <span className="min-w-0">
+              <span className="block truncate font-semibold">{user.first_name} {user.last_name}</span>
+              <span className={cn("flex items-center gap-1.5 text-xs", working ? "text-go" : "text-muted-foreground")}>
+                <span className={cn("size-1.5 rounded-full", working ? "bg-go" : "bg-idle")} />
+                {working ? "Работаю" : "Не работаю"}
+              </span>
+            </span>
+          </button>
+        </aside>
+
+        <div className="flex min-h-dvh min-w-0 flex-col">
+          {/* phone / iPad portrait: compact top bar under Telegram's controls */}
+          <header className="pt-safe flex items-center justify-between px-5 pb-3 lg:hidden">
+            <Wordmark className="text-xl" />
+            <button
+              onClick={() => go("profile")}
+              className={cn(
+                "press flex items-center gap-2 rounded-full py-1 pr-1 pl-3 text-xs font-semibold",
+                working ? "bg-go-soft text-go" : "bg-muted text-muted-foreground",
+              )}
+            >
+              {working ? "Работаю" : "Не работаю"}
+              <Avatar user={user} className="size-7 rounded-full text-[11px]" />
+            </button>
+          </header>
+
+          <main key={tab} className="screen-in mx-auto w-full max-w-2xl flex-1 px-4 pb-36 md:px-6 lg:max-w-6xl lg:px-10 lg:pt-10 lg:pb-12">
+            {tab === "schedule" && (
+              <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => go("profile")} onUserChange={updateUser} />
+            )}
+            {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} />}
+            {tab === "admin" && user.role === "admin" && <AdminScreen />}
+          </main>
+        </div>
+
+        {/* bottom bar with a sliding selection */}
+        <nav className="pb-safe fixed inset-x-0 bottom-0 z-40 px-4 lg:hidden">
+          <div className="relative mx-auto flex max-w-md rounded-[1.6rem] border bg-card/80 p-1.5 shadow-lift-strong backdrop-blur-xl backdrop-saturate-150">
+            <span
+              aria-hidden
+              className="absolute inset-y-1.5 left-1.5 rounded-[1.2rem] bg-primary transition-transform duration-300 ease-[cubic-bezier(.2,.8,.2,1)]"
+              style={{ width: `calc((100% - 0.75rem) / ${tabs.length})`, transform: `translateX(${Math.max(activeIndex, 0) * 100}%)` }}
+            />
+            {tabs.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => go(id)}
+                className={cn(
+                  "relative z-10 flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] font-semibold transition-colors duration-300",
+                  tab === id ? "text-primary-foreground" : "text-muted-foreground",
+                )}
+              >
+                <Icon className="size-[22px]" strokeWidth={tab === id ? 2.1 : 1.8} />
                 {label}
               </button>
             ))}
           </div>
         </nav>
-      </>
+      </div>
     );
   }
 
   return (
-    <div className="grid-paper flex min-h-dvh flex-col">
+    <div className="min-h-dvh">
       {body}
-      <Toaster position="top-center" theme={scheme} richColors />
+      <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }} />
     </div>
   );
 }

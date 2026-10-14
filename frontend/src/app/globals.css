@@ -1,14 +1,16 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "@fontsource-variable/onest/index.css";
+@import "@fontsource-variable/unbounded/index.css";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: "Onest Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Unbounded Variable", "Onest Variable", sans-serif;
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -25,113 +27,244 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  --color-grid: var(--grid);
+  --color-hero: var(--hero);
+  --color-hero-foreground: var(--hero-foreground);
+  --color-hero-muted: var(--hero-muted);
   --color-go: var(--st-go);
   --color-go-soft: var(--st-go-soft);
   --color-wait: var(--st-wait);
-  --color-off: var(--st-off);
+  --color-wait-soft: var(--st-wait-soft);
   --color-cancel: var(--st-cancel);
   --color-cancel-soft: var(--st-cancel-soft);
   --color-final: var(--st-final);
-  --color-pending: var(--st-pending);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  --color-off: var(--st-off);
+  --color-idle: var(--st-idle);
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 4px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-2xl: calc(var(--radius) + 10px);
+  --radius-3xl: calc(var(--radius) + 16px);
 }
 
-/* QuZe-like palette: mint paper with a grid, white cards, teal accent */
+/*
+ * «Выход»: monochrome ink interface, colour reserved for shift states.
+ *   mist #F2F3F7 · paper #FFFFFF · ink #161A33 · ink-soft #6B7090
+ *   go #0E9F6E · wait #D9820B · cancel #E5484D · final #A3282C · off #7C7F99
+ */
 :root {
   --radius: 0.875rem;
-  --background: oklch(0.975 0.008 185);
-  --foreground: oklch(0.2 0.01 200);
-  --grid: oklch(0.9 0.025 185 / 0.55);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.01 200);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2 0.01 200);
-  --primary: oklch(0.52 0.09 182);
-  --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.95 0.015 185);
-  --secondary-foreground: oklch(0.3 0.04 185);
-  --muted: oklch(0.955 0.008 185);
-  --muted-foreground: oklch(0.5 0.015 200);
-  --accent: oklch(0.93 0.035 182);
-  --accent-foreground: oklch(0.4 0.08 182);
-  --destructive: oklch(0.58 0.2 25);
-  --border: oklch(0.91 0.01 190);
-  --input: oklch(0.89 0.012 190);
-  --ring: oklch(0.6 0.09 182);
-  --st-go: oklch(0.55 0.11 165);
-  --st-go-soft: oklch(0.94 0.04 170);
-  --st-wait: oklch(0.68 0.15 65);
-  --st-off: oklch(0.55 0.15 300);
-  --st-cancel: oklch(0.6 0.19 25);
-  --st-cancel-soft: oklch(0.95 0.03 20);
-  --st-final: oklch(0.45 0.16 25);
-  --st-pending: oklch(0.75 0.14 90);
+  --background: #f2f3f7;
+  --foreground: #161a33;
+  --card: #ffffff;
+  --card-foreground: #161a33;
+  --popover: #ffffff;
+  --popover-foreground: #161a33;
+  --primary: #161a33;
+  --primary-foreground: #ffffff;
+  --secondary: #e9ebf2;
+  --secondary-foreground: #161a33;
+  --muted: #eef0f5;
+  --muted-foreground: #6b7090;
+  --accent: #e9ebf2;
+  --accent-foreground: #161a33;
+  --destructive: #e5484d;
+  --border: #e3e5ee;
+  --input: #dcdfea;
+  --ring: #161a33;
+  --hero: #161a33;
+  --hero-foreground: #ffffff;
+  --hero-muted: rgba(255, 255, 255, 0.62);
+  --st-go: #0e9f6e;
+  --st-go-soft: #e2f5ec;
+  --st-wait: #d9820b;
+  --st-wait-soft: #fcf0dc;
+  --st-cancel: #e5484d;
+  --st-cancel-soft: #fdeced;
+  --st-final: #a3282c;
+  --st-off: #7c7f99;
+  --st-idle: #b4b8cc;
+  --track: #e7e9f1;
+  --lift: 0 1px 2px rgba(22, 26, 51, 0.05), 0 8px 24px -12px rgba(22, 26, 51, 0.18);
+  --lift-strong: 0 2px 4px rgba(22, 26, 51, 0.06), 0 24px 48px -20px rgba(22, 26, 51, 0.35);
 }
 
 .dark {
-  --background: oklch(0.18 0.01 200);
-  --foreground: oklch(0.96 0.005 190);
-  --grid: oklch(0.32 0.02 190 / 0.45);
-  --card: oklch(0.23 0.012 200);
-  --card-foreground: oklch(0.96 0.005 190);
-  --popover: oklch(0.23 0.012 200);
-  --popover-foreground: oklch(0.96 0.005 190);
-  --primary: oklch(0.66 0.1 180);
-  --primary-foreground: oklch(0.16 0.02 190);
-  --secondary: oklch(0.28 0.015 195);
-  --secondary-foreground: oklch(0.92 0.01 190);
-  --muted: oklch(0.27 0.012 200);
-  --muted-foreground: oklch(0.7 0.012 200);
-  --accent: oklch(0.32 0.04 182);
-  --accent-foreground: oklch(0.85 0.07 180);
-  --destructive: oklch(0.68 0.18 22);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.6 0.09 182);
-  --st-go: oklch(0.74 0.12 165);
-  --st-go-soft: oklch(0.32 0.05 170);
-  --st-wait: oklch(0.78 0.14 70);
-  --st-off: oklch(0.74 0.13 300);
-  --st-cancel: oklch(0.7 0.17 25);
-  --st-cancel-soft: oklch(0.3 0.06 20);
-  --st-final: oklch(0.62 0.17 25);
-  --st-pending: oklch(0.82 0.13 90);
+  --background: #0d1024;
+  --foreground: #eceef8;
+  --card: #161a33;
+  --card-foreground: #eceef8;
+  --popover: #1a1e3a;
+  --popover-foreground: #eceef8;
+  --primary: #eceef8;
+  --primary-foreground: #161a33;
+  --secondary: #222749;
+  --secondary-foreground: #eceef8;
+  --muted: #1d2140;
+  --muted-foreground: #9196b4;
+  --accent: #262b50;
+  --accent-foreground: #eceef8;
+  --destructive: #ff6369;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.14);
+  --ring: #eceef8;
+  --hero: #1d2246;
+  --hero-foreground: #ffffff;
+  --hero-muted: rgba(255, 255, 255, 0.6);
+  --st-go: #3dd68c;
+  --st-go-soft: rgba(61, 214, 140, 0.14);
+  --st-wait: #f5a524;
+  --st-wait-soft: rgba(245, 165, 36, 0.14);
+  --st-cancel: #ff6369;
+  --st-cancel-soft: rgba(255, 99, 105, 0.14);
+  --st-final: #ff8a8e;
+  --st-off: #9296b3;
+  --st-idle: #4a4f75;
+  --track: #232849;
+  --lift: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 12px 32px -16px rgba(0, 0, 0, 0.6);
+  --lift-strong: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 28px 56px -24px rgba(0, 0, 0, 0.75);
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring/40;
   }
   html,
   body {
     @apply bg-background text-foreground;
     -webkit-tap-highlight-color: transparent;
     overscroll-behavior-y: none;
-  }
-  body {
     font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 16px inputs keep iOS from zooming on focus */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
 }
 
-.grid-paper {
-  background-color: var(--background);
-  background-image:
-    linear-gradient(var(--grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 2.25rem 2.25rem;
-  background-position: -1px -1px;
+/* safe areas: device notch + Telegram fullscreen controls */
+:root {
+  --safe-top: max(env(safe-area-inset-top), calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)));
+  --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px));
 }
-
-/* native time picker: keep the field compact and readable */
-input[type="time"]::-webkit-calendar-picker-indicator {
-  opacity: 0.5;
+.pt-safe {
+  padding-top: calc(var(--safe-top) + 0.75rem);
 }
-
 .pb-safe {
-  padding-bottom: max(env(safe-area-inset-bottom), 0.75rem);
+  padding-bottom: max(var(--safe-bottom), 0.75rem);
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-feature-settings: "tnum";
+  letter-spacing: -0.02em;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+.shadow-lift {
+  box-shadow: var(--lift);
+}
+.shadow-lift-strong {
+  box-shadow: var(--lift-strong);
+}
+.bg-track {
+  background-color: var(--track);
+}
+
+/* day off: hatched track */
+.hatch {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--st-off) 45%, transparent) 0 2px,
+    transparent 2px 6px
+  );
+}
+
+/* ---------- motion ---------- */
+
+/* the one orchestrated moment: shift bars draw in along the day */
+@keyframes bar-draw {
+  from {
+    transform: scaleX(0);
+  }
+}
+.bar-draw {
+  transform-origin: left center;
+  animation: bar-draw 0.75s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 45ms + 120ms);
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.row-in {
+  animation: row-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 35ms);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+.screen-in {
+  animation: fade-in 0.25s ease-out both;
+}
+
+@keyframes pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.12);
+  }
+}
+.pop {
+  animation: pop 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.press {
+  transition: transform 0.15s ease, background-color 0.2s ease, opacity 0.2s ease;
+}
+.press:active {
+  transform: scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator,
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.45;
+}
+.dark input[type="time"]::-webkit-calendar-picker-indicator,
+.dark input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
 }

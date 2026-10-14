@@ -1,171 +1,256 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Copy, RefreshCw, Search } from "lucide-react";
+import { useMemo, useState, type CSSProperties } from "react";
+import { Check, Copy, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, type AdminShift, type Shift, type User } from "@/lib/api";
-import { STATUS_META, addDays, ddmm, parseDay, plural, rub, shortDate, timeRange, WEEKDAYS_SHORT } from "@/lib/format";
+import { api, type AdminShift, type StatsItem, type User } from "@/lib/api";
+import {
+  STATUS_META,
+  WEEKDAYS_SHORT,
+  addDays,
+  dayMonth,
+  parseDay,
+  plural,
+  rub,
+  timeRange,
+  WEEKDAYS,
+} from "@/lib/format";
 import { moscowToday, useLoad } from "@/lib/hooks";
-import { haptic } from "@/lib/telegram";
+import { haptic, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
+import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
 
+type Section = "raspred" | "day" | "stats" | "penalties";
+const SECTIONS: { id: Section; label: string }[] = [
+  { id: "raspred", label: "Распред" },
+  { id: "day", label: "День" },
+  { id: "stats", label: "Статистика" },
+  { id: "penalties", label: "Штрафы" },
+];
+
+const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
+
 export function AdminScreen() {
+  const [section, setSection] = useState<Section>("raspred");
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
-  const bump = () => setVersion((v) => v + 1);
+  const index = SECTIONS.findIndex((s) => s.id === section);
 
   return (
-    <div className="space-y-4">
-      <Tabs defaultValue="raspred">
-        <TabsList className="grid h-11 w-full grid-cols-4 rounded-xl bg-card shadow-sm">
-          <TabsTrigger value="raspred" className="rounded-lg">Распред</TabsTrigger>
-          <TabsTrigger value="day" className="rounded-lg">День</TabsTrigger>
-          <TabsTrigger value="stats" className="rounded-lg">Стата</TabsTrigger>
-          <TabsTrigger value="penalties" className="rounded-lg">Штрафы</TabsTrigger>
-        </TabsList>
-        <TabsContent value="raspred" className="mt-4">
-          <RaspredTab version={version} />
-        </TabsContent>
-        <TabsContent value="day" className="mt-4">
-          <DayTab version={version} onEdit={setEditing} />
-        </TabsContent>
-        <TabsContent value="stats" className="mt-4">
-          <StatsTab version={version} onEdit={setEditing} />
-        </TabsContent>
-        <TabsContent value="penalties" className="mt-4">
-          <PenaltiesTab version={version} onEdit={setEditing} />
-        </TabsContent>
-      </Tabs>
-      <AdminShiftSheet shift={editing} onClose={() => setEditing(null)} onChanged={() => { setEditing(null); bump(); }} />
+    <div className="mx-auto max-w-3xl space-y-5">
+      <div className="relative grid grid-cols-4 rounded-2xl bg-card p-1 shadow-lift">
+        <span
+          aria-hidden
+          className="absolute inset-y-1 left-1 rounded-xl bg-primary transition-transform duration-300 ease-[cubic-bezier(.2,.8,.2,1)]"
+          style={{ width: "calc((100% - 0.5rem) / 4)", transform: `translateX(${index * 100}%)` }}
+        />
+        {SECTIONS.map((s) => (
+          <button
+            key={s.id}
+            onClick={() => {
+              tapHaptic();
+              setSection(s.id);
+            }}
+            className={cn(
+              "relative z-10 h-10 truncate rounded-xl px-1 text-[13px] font-semibold transition-colors duration-300 md:text-sm",
+              section === s.id ? "text-primary-foreground" : "text-muted-foreground",
+            )}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <div key={section} className="screen-in">
+        {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
+        {section === "day" && <DaySection version={version} onEdit={setEditing} />}
+        {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
+        {section === "penalties" && <PenaltiesSection version={version} onEdit={setEditing} />}
+      </div>
+
+      <AdminShiftSheet
+        shift={editing}
+        onClose={() => setEditing(null)}
+        onChanged={() => {
+          setEditing(null);
+          setVersion((v) => v + 1);
+        }}
+      />
     </div>
   );
 }
 
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    ta.remove();
-  }
-  haptic("success");
-  toast.success("Скопировано");
-}
+type EditFn = (s: EditableShift) => void;
 
-function RaspredTab({ version }: { version: number }) {
+const lanesFrom = (rows: { name: string; start_time: string | null; end_time: string | null; location?: string | null; status?: AdminShift["status"] }[]): Lane[] =>
+  rows.map((r, i) => ({
+    key: String(i),
+    name: r.name.split(" ")[0],
+    start_time: r.start_time,
+    end_time: r.end_time,
+    state: r.status ?? "active",
+    highlight: true,
+    caption: r.location ?? undefined,
+  }));
+
+function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
   const { data, loading, reload } = useLoad(() => api.admin.raspred(), [version]);
-  if (!data) return <Skeleton className="h-48 rounded-2xl bg-card" />;
+  const [copied, setCopied] = useState(false);
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    haptic("success");
+    setCopied(true);
+    toast.success("Распред скопирован");
+    setTimeout(() => setCopied(false), 1800);
+  }
+
+  if (!data) return <Skeleton className="h-72 rounded-3xl" />;
   return (
-    <section className="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-bold">Распред на завтра</h2>
-          <p className="text-sm text-muted-foreground">{shortDate(data.date)}</p>
+    <div className="space-y-4">
+      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm text-muted-foreground">Завтра</p>
+            <h2 className="font-display text-2xl font-semibold">{dayMonth(data.date)}</h2>
+            <p className="mt-1 text-[15px] text-muted-foreground">
+              {data.total_count
+                ? `${data.total_count} ${plural(data.total_count, "человек", "человека", "человек")}, ${data.total_volume} шт.`
+                : "Пока никто не выходит"}
+            </p>
+          </div>
+          <button onClick={reload} aria-label="Обновить" className="press grid size-10 place-items-center rounded-full bg-muted">
+            <RefreshCw className={cn("size-4", loading && "animate-spin")} />
+          </button>
         </div>
-        <Button size="icon-sm" variant="ghost" onClick={reload} aria-label="Обновить">
-          <RefreshCw className={cn(loading && "animate-spin")} />
+        {data.rows.length > 0 && (
+          <div className="mt-5">
+            <DayLanes lanes={lanesFrom(data.rows)} />
+          </div>
+        )}
+        {data.rows.length > 0 && (
+          <ul className="mt-5 divide-y border-t">
+            {data.rows.map((r) => (
+              <li key={r.shift_id}>
+                <button
+                  className="press flex w-full items-center justify-between gap-3 py-3 text-left"
+                  onClick={async () => {
+                    const day = await api.admin.day(data.date);
+                    const s = day.items.find((x) => x.id === r.shift_id);
+                    if (s) onEdit({ ...s });
+                  }}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">
+                      {r.name}
+                      {r.username && <span className="font-normal text-muted-foreground"> @{r.username}</span>}
+                    </span>
+                    <span className="text-sm text-muted-foreground">{r.location}</span>
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className="block text-sm font-semibold tabular">{r.start_time}–{r.end_time}</span>
+                    <span className="text-sm text-muted-foreground">{r.volume} шт.</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <h3 className="font-semibold">Сообщение для рабочего чата</h3>
+        <div className="mt-3 max-w-md rounded-3xl rounded-bl-lg bg-muted px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap">
+          {data.text}
+        </div>
+        <Button className="press mt-4 h-12 w-full rounded-2xl text-[15px] font-semibold md:w-auto md:px-6" onClick={() => copy(data.text)}>
+          {copied ? <Check key="ok" className="pop" /> : <Copy />}
+          {copied ? "Скопировано" : "Скопировать"}
         </Button>
-      </div>
-      {data.rows.length === 0 ? (
-        <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">На завтра нет сотрудников в графике.</p>
-      ) : (
-        <ul className="divide-y rounded-xl border">
-          {data.rows.map((r) => (
-            <li key={r.shift_id} className="flex items-center justify-between gap-2 px-3 py-2.5 text-sm">
-              <div className="min-w-0">
-                <p className="font-semibold">{r.start_time}–{r.end_time}</p>
-                <p className="truncate text-muted-foreground">
-                  {r.name}
-                  {r.username ? ` (@${r.username})` : ""} · {r.location}
-                </p>
-              </div>
-              <span className="shrink-0 font-semibold">{r.volume} шт.</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="grid grid-cols-2 gap-2 text-center">
-        <Stat label={plural(data.total_count, "сотрудник", "сотрудника", "сотрудников")} value={String(data.total_count)} />
-        <Stat label="плановый объём" value={`${data.total_volume} шт.`} />
-      </div>
-      <pre className="max-h-48 overflow-auto rounded-xl bg-muted p-3 text-xs whitespace-pre-wrap">{data.text}</pre>
-      <Button className="h-11 w-full" onClick={() => copyText(data.text)}>
-        <Copy /> Скопировать
-      </Button>
-      <p className="text-center text-xs text-muted-foreground">То же самое в боте: /raspred_zavtra</p>
-    </section>
+        <p className="mt-3 text-sm text-muted-foreground">В боте тот же текст по команде /raspred_zavtra.</p>
+      </section>
+    </div>
   );
 }
 
-function DayTab({ version, onEdit }: { version: number; onEdit: (s: EditableShift) => void }) {
-  const [day, setDay] = useState(() => addDays(moscowToday(), 1));
+function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
+  const today = moscowToday();
+  const [day, setDay] = useState(() => addDays(today, 1));
   const { data, loading } = useLoad(() => api.admin.day(day), [day, version]);
+  const chips = [
+    { label: "Сегодня", value: today },
+    { label: "Завтра", value: addDays(today, 1) },
+    { label: "Послезавтра", value: addDays(today, 2) },
+  ];
+  const { weekday } = parseDay(day);
+  const going = data?.items.filter((s) => s.status === "active" || s.status === "restored") ?? [];
+
   return (
-    <section className="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
-      <div className="space-y-1.5">
-        <Label htmlFor="admin-day">Дата</Label>
-        <Input id="admin-day" type="date" className="h-11" value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
-        <div className="grid grid-cols-2 gap-2 pt-1">
-          <Button variant="outline" onClick={() => setDay(moscowToday())}>Сегодня</Button>
-          <Button variant="outline" onClick={() => setDay(addDays(moscowToday(), 1))}>Завтра</Button>
-        </div>
+    <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <div className="flex flex-wrap gap-2">
+        {chips.map((c) => (
+          <button key={c.label} onClick={() => setDay(c.value)}
+                  className={cn("press rounded-full px-4 py-2 text-sm font-semibold", day === c.value ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+            {c.label}
+          </button>
+        ))}
+        <input type="date" aria-label="Другая дата" className="h-9 rounded-full border-0 bg-muted px-4 text-sm outline-none"
+               value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
       </div>
+      <h2 className="mt-5 font-display text-2xl font-semibold">{WEEKDAYS[weekday]}, {dayMonth(day)}</h2>
+      <p className="mt-1 text-[15px] text-muted-foreground">
+        {data ? `Выходят ${data.total_count} ${plural(data.total_count, "человек", "человека", "человек")}, ${data.total_volume} шт.` : " "}
+      </p>
+
       {loading && !data ? (
-        <Skeleton className="h-32 rounded-xl" />
+        <Skeleton className="mt-5 h-32 rounded-2xl" />
       ) : data && data.items.length === 0 ? (
-        <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">На эту дату записей нет.</p>
+        <p className="mt-5 rounded-2xl bg-muted p-4 text-sm text-muted-foreground">На эту дату записей нет.</p>
       ) : (
-        <ul className="divide-y rounded-xl border">
-          {data?.items.map((s) => (
-            <ShiftRow key={s.id} shift={s} title={s.name} onClick={() => onEdit(toEditable(s, s.name, s.username))} />
-          ))}
-        </ul>
-      )}
-      {data && (
-        <p className="text-sm text-muted-foreground">
-          Выходят: <b className="text-foreground">{data.total_count}</b> · объём <b className="text-foreground">{data.total_volume} шт.</b>
-        </p>
+        <>
+          {going.length > 0 && (
+            <div className="mt-5">
+              <DayLanes lanes={lanesFrom(going)} />
+            </div>
+          )}
+          <ul className="mt-5 divide-y border-t">
+            {data?.items.map((s) => {
+              const meta = STATUS_META[s.status];
+              return (
+                <li key={s.id}>
+                  <button onClick={() => onEdit({ ...s })} className="press flex w-full items-center justify-between gap-3 py-3 text-left">
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium">{s.name}</span>
+                      <span className={cn("flex items-center gap-1.5 text-sm", meta.text)}>
+                        <span className={cn("size-1.5 rounded-full", meta.dot)} />
+                        {meta.label}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-right text-sm">
+                      <span className="block font-semibold tabular">{s.start_time ? timeRange(s) : ""}</span>
+                      <span className="text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
     </section>
   );
-}
-
-function ShiftRow({ shift, title, onClick }: { shift: Shift; title: string; onClick: () => void }) {
-  const meta = STATUS_META[shift.status];
-  return (
-    <li>
-      <button onClick={onClick} className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left text-sm active:bg-muted">
-        <div className="min-w-0">
-          <p className="truncate font-semibold">{title}</p>
-          <p className="truncate text-muted-foreground">
-            {shift.start_time ? `${timeRange(shift)} · ${shift.location} · ${shift.volume} шт.` : "—"}
-          </p>
-        </div>
-        <span className={cn("shrink-0 text-xs font-semibold", meta.className)}>
-          {meta.emoji} {meta.label}
-        </span>
-      </button>
-    </li>
-  );
-}
-
-function toEditable(s: Shift, name: string, username: string | null): EditableShift {
-  return { ...s, name, username };
-}
-
-function useUsers(version: number) {
-  return useLoad(() => api.admin.users(), [version]);
 }
 
 function UserPicker({ users, value, onChange }: { users: User[]; value: User | null; onChange: (u: User | null) => void }) {
@@ -173,38 +258,36 @@ function UserPicker({ users, value, onChange }: { users: User[]; value: User | n
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase().replace(/^@/, "");
     if (!s) return users;
-    return users.filter((u) =>
-      `${u.first_name} ${u.last_name} ${u.last_name} ${u.first_name} ${u.username ?? ""}`.toLowerCase().includes(s),
-    );
+    return users.filter((u) => `${u.first_name} ${u.last_name} ${u.last_name} ${u.first_name} ${u.username ?? ""}`.toLowerCase().includes(s));
   }, [q, users]);
 
   if (value) {
     return (
-      <div className="flex items-center justify-between rounded-xl border bg-accent px-3 py-2.5">
-        <div>
-          <p className="font-semibold">{value.first_name} {value.last_name}</p>
-          {value.username && <p className="text-xs text-muted-foreground">@{value.username}</p>}
+      <div className="flex items-center justify-between rounded-2xl bg-muted px-4 py-3">
+        <div className="min-w-0">
+          <p className="truncate font-semibold">{value.first_name} {value.last_name}</p>
+          {value.username && <p className="text-sm text-muted-foreground">@{value.username}</p>}
         </div>
-        <Button size="sm" variant="ghost" onClick={() => onChange(null)}>Сменить</Button>
+        <button className="text-sm font-semibold" onClick={() => onChange(null)}>Сменить</button>
       </div>
     );
   }
   return (
     <div className="space-y-2">
       <div className="relative">
-        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input className="h-11 pl-9" placeholder="Имя, фамилия или @username" value={q} onChange={(e) => setQ(e.target.value)} />
+        <Search className="absolute top-1/2 left-4 size-4 -translate-y-1/2 text-muted-foreground" />
+        <input className={cn(field, "pl-11")} placeholder="Имя, фамилия или @username" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
-      <ul className="max-h-56 divide-y overflow-y-auto rounded-xl border">
+      <ul className="max-h-60 divide-y overflow-y-auto rounded-2xl border">
         {filtered.map((u) => (
           <li key={u.id}>
-            <button className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm active:bg-muted" onClick={() => onChange(u)}>
+            <button className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-muted/60" onClick={() => onChange(u)}>
               <span className="font-medium">{u.first_name} {u.last_name}</span>
-              <span className="text-xs text-muted-foreground">{u.username ? `@${u.username}` : ""}</span>
+              <span className="text-sm text-muted-foreground">{u.username ? `@${u.username}` : ""}</span>
             </button>
           </li>
         ))}
-        {filtered.length === 0 && <li className="px-3 py-2.5 text-sm text-muted-foreground">Никого не нашли</li>}
+        {filtered.length === 0 && <li className="px-4 py-3 text-sm text-muted-foreground">Никого не нашли</li>}
       </ul>
     </div>
   );
@@ -216,14 +299,14 @@ function presets(today: string) {
   const monthStart = `${y}-${String(m).padStart(2, "0")}-01`;
   const nextMonth = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
   return [
-    { label: "Текущая неделя", from: monday, to: addDays(monday, 6) },
+    { label: "Эта неделя", from: monday, to: addDays(monday, 6) },
     { label: "Прошлая неделя", from: addDays(monday, -7), to: addDays(monday, -1) },
-    { label: "Текущий месяц", from: monthStart, to: addDays(nextMonth, -1) },
+    { label: "Этот месяц", from: monthStart, to: addDays(nextMonth, -1) },
   ];
 }
 
-function StatsTab({ version, onEdit }: { version: number; onEdit: (s: EditableShift) => void }) {
-  const users = useUsers(version);
+function StatsSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
+  const users = useLoad(() => api.admin.users(), [version]);
   const [user, setUser] = useState<User | null>(null);
   const ranges = useMemo(() => presets(moscowToday()), []);
   const [range, setRange] = useState(ranges[0]);
@@ -231,72 +314,53 @@ function StatsTab({ version, onEdit }: { version: number; onEdit: (s: EditableSh
     () => (user ? api.admin.stats(user.id, range.from, range.to) : Promise.resolve(null)),
     [user?.id, range.from, range.to, version],
   );
+  const t = stats.data?.totals;
 
   return (
     <div className="space-y-4">
-      <section className="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
-        <Label>Сотрудник</Label>
-        {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-11 rounded-xl" />}
-        <Label>Период</Label>
-        <div className="flex flex-wrap gap-1.5">
+      <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-12 rounded-2xl" />}
+        <div className="flex flex-wrap gap-2">
           {ranges.map((r) => (
             <button key={r.label} onClick={() => setRange(r)}
-                    className={cn("rounded-full border px-3 py-1 text-xs font-medium",
-                      range.label === r.label ? "border-primary bg-accent text-accent-foreground" : "bg-muted text-muted-foreground")}>
+                    className={cn("press rounded-full px-4 py-2 text-sm font-semibold", range.label === r.label ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
               {r.label}
             </button>
           ))}
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Input type="date" className="h-11" value={range.from}
-                 onChange={(e) => e.target.value && setRange({ label: "custom", from: e.target.value, to: range.to })} />
-          <Input type="date" className="h-11" value={range.to}
-                 onChange={(e) => e.target.value && setRange({ label: "custom", from: range.from, to: e.target.value })} />
+        <div className="grid grid-cols-2 gap-3">
+          <label className="space-y-1.5">
+            <span className="text-sm text-muted-foreground">С</span>
+            <input type="date" className={field} value={range.from} onChange={(e) => e.target.value && setRange({ label: "", from: e.target.value, to: range.to })} />
+          </label>
+          <label className="space-y-1.5">
+            <span className="text-sm text-muted-foreground">По</span>
+            <input type="date" className={field} value={range.to} onChange={(e) => e.target.value && setRange({ label: "", from: range.from, to: e.target.value })} />
+          </label>
         </div>
       </section>
 
       {stats.error && <p className="text-sm text-destructive">{stats.error.message}</p>}
-      {user && stats.data && (
-        <section className="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
-          <div className="grid grid-cols-2 gap-2 text-center">
-            <Stat label="смен (всего)" value={String(stats.data.totals.shifts)} />
-            <Stat label="плановый объём" value={`${stats.data.totals.active_volume} шт.`} />
-            <Stat label="отменено" value={`${stats.data.totals.cancelled_volume} шт.`} />
-            <Stat label="штрафы" value={rub(stats.data.totals.penalties)} />
-            <Stat label="заработок (план)" value={rub(stats.data.totals.expected_pay)} wide />
+      {user && t && stats.data && (
+        <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
+          <div className="p-5 md:p-6">
+            <p className="text-sm text-muted-foreground">План за период</p>
+            <p className="font-display text-3xl font-semibold">{t.active_volume} шт.</p>
+            <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-[15px] md:grid-cols-4">
+              <Fact label="Выходов">{t.active_shifts} из {t.shifts}</Fact>
+              <Fact label="Отменено">{t.cancelled_volume} шт.</Fact>
+              <Fact label="Заработок (план)">{rub(t.expected_pay)}</Fact>
+              <Fact label="Штрафы">{rub(t.penalties)}</Fact>
+            </dl>
           </div>
           {stats.data.items.length === 0 ? (
-            <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">За этот период смен нет.</p>
+            <p className="border-t px-5 py-4 text-sm text-muted-foreground md:px-6">За этот период записей нет.</p>
           ) : (
-            <div className="-mx-4 overflow-x-auto px-4">
-              <Table className="text-xs">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Дата</TableHead>
-                    <TableHead>Время</TableHead>
-                    <TableHead>Точка</TableHead>
-                    <TableHead className="text-right">Объём</TableHead>
-                    <TableHead>Статус</TableHead>
-                    <TableHead>Примечание</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {stats.data.items.map((i) => {
-                    const meta = STATUS_META[i.status];
-                    return (
-                      <TableRow key={i.id} className="cursor-pointer"
-                                onClick={() => onEdit({ ...i, name: stats.data!.user.name, username: stats.data!.user.username })}>
-                        <TableCell className="whitespace-nowrap">{ddmm(i.date)} {WEEKDAYS_SHORT[parseDay(i.date).weekday]}</TableCell>
-                        <TableCell className="whitespace-nowrap">{timeRange(i)}</TableCell>
-                        <TableCell>{i.location ?? "—"}</TableCell>
-                        <TableCell className="text-right">{i.volume ?? "—"}</TableCell>
-                        <TableCell className={cn("whitespace-nowrap font-medium", meta.className)}>{meta.emoji} {meta.label}</TableCell>
-                        <TableCell className="whitespace-nowrap text-muted-foreground">{i.notes}</TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+            <div className="divide-y border-t">
+              {stats.data.items.map((i, idx) => (
+                <StatsRow key={i.id} item={i} index={idx}
+                          onClick={() => onEdit({ ...i, name: stats.data!.user.name, username: stats.data!.user.username })} />
+              ))}
             </div>
           )}
         </section>
@@ -305,68 +369,99 @@ function StatsTab({ version, onEdit }: { version: number; onEdit: (s: EditableSh
   );
 }
 
-function PenaltiesTab({ version, onEdit }: { version: number; onEdit: (s: EditableShift) => void }) {
-  const users = useUsers(version);
+function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; onClick: () => void }) {
+  const meta = STATUS_META[item.status];
+  const { d, weekday } = parseDay(item.date);
+  return (
+    <button onClick={onClick} style={{ "--i": index } as CSSProperties}
+            className="row-in grid w-full grid-cols-[3rem_1fr] gap-4 px-4 py-3.5 text-left hover:bg-muted/60 md:px-5">
+      <span className="flex flex-col items-center">
+        <span className="text-xs text-muted-foreground">{WEEKDAYS_SHORT[weekday]}</span>
+        <span className="font-display text-lg font-semibold">{d}</span>
+      </span>
+      <span className="min-w-0">
+        <span className="flex items-baseline justify-between gap-3">
+          <span className={cn("flex items-center gap-2 text-sm font-semibold", meta.text)}>
+            <span className={cn("size-2 rounded-full", meta.dot)} />
+            {meta.label}
+          </span>
+          {item.start_time && <span className="text-sm font-semibold tabular">{timeRange(item)}</span>}
+        </span>
+        <DayTrack className="mt-2.5" state={item.status} mine={item.start_time ? item : null} others={[]} index={index} />
+        <span className="mt-2 block truncate text-xs text-muted-foreground">
+          {[item.location && `${item.location}, ${item.volume} шт.`, item.notes.toLowerCase()].filter(Boolean).join(", ")}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function PenaltiesSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
+  const users = useLoad(() => api.admin.users(), [version]);
   const [user, setUser] = useState<User | null>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const { data, loading } = useLoad(() => api.admin.penalties({ userId: user?.id, from, to }), [user?.id, from, to, version]);
   const total = data?.items.reduce((s, p) => s + (p.amount ?? 0), 0) ?? 0;
+  const pending = data?.items.filter((p) => p.amount == null).length ?? 0;
 
-  async function openShift(shiftId: number, date: string, name: string, username: string | null) {
+  async function open(shiftId: number, date: string) {
     const day = await api.admin.day(date);
-    const s = day.items.find((x: AdminShift) => x.id === shiftId);
-    if (s) onEdit(toEditable(s, name, username));
+    const s = day.items.find((x) => x.id === shiftId);
+    if (s) onEdit({ ...s });
   }
 
   return (
     <div className="space-y-4">
-      <section className="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
-        <Label>Сотрудник (необязательно)</Label>
-        {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-11 rounded-xl" />}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">С</Label>
-            <Input type="date" className="h-11" value={from} onChange={(e) => setFrom(e.target.value)} />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">По</Label>
-            <Input type="date" className="h-11" value={to} onChange={(e) => setTo(e.target.value)} />
-          </div>
+      <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-12 rounded-2xl" />}
+        <div className="grid grid-cols-2 gap-3">
+          <label className="space-y-1.5">
+            <span className="text-sm text-muted-foreground">С</span>
+            <input type="date" className={field} value={from} onChange={(e) => setFrom(e.target.value)} />
+          </label>
+          <label className="space-y-1.5">
+            <span className="text-sm text-muted-foreground">По</span>
+            <input type="date" className={field} value={to} onChange={(e) => setTo(e.target.value)} />
+          </label>
         </div>
       </section>
-      <section className="rounded-2xl border bg-card p-4 shadow-sm">
+
+      <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
         {loading && !data ? (
-          <Skeleton className="h-24 rounded-xl" />
+          <Skeleton className="m-5 h-24 rounded-2xl" />
         ) : data && data.items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Штрафов нет.</p>
+          <p className="p-5 text-muted-foreground md:p-6">Штрафов нет.</p>
         ) : (
           <>
-            <ul className="divide-y">
+            <div className="p-5 md:p-6">
+              <p className="text-sm text-muted-foreground">Всего начислено</p>
+              <p className="font-display text-3xl font-semibold">{rub(total)}</p>
+              {pending > 0 && (
+                <p className="mt-1 text-sm text-wait">
+                  {pending} {plural(pending, "штраф ждёт", "штрафа ждут", "штрафов ждут")} суммы
+                </p>
+              )}
+            </div>
+            <ul className="divide-y border-t">
               {data?.items.map((p) => (
                 <li key={p.shift_id}>
-                  <button className="flex w-full items-start justify-between gap-2 py-2.5 text-left text-sm active:bg-muted"
-                          onClick={() => openShift(p.shift_id, p.date, p.name, p.username)}>
-                    <div className="min-w-0">
-                      <p className="font-semibold">{p.name}{p.username ? ` · @${p.username}` : ""}</p>
-                      <p className="text-muted-foreground">
-                        Смена {shortDate(p.date)} · {p.reason}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {p.set_by ? `Назначил: ${p.set_by}${p.set_at ? `, ${p.set_at.slice(0, 16).replace("T", " ")}` : ""}` : "Сумма ещё не назначена — нажмите, чтобы указать"}
-                      </p>
-                    </div>
-                    <span className={cn("shrink-0 font-semibold", p.amount != null ? "text-final" : "text-wait")}>
-                      {p.amount != null ? rub(p.amount) : "—"}
+                  <button className="press flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-muted/60 md:px-6"
+                          onClick={() => open(p.shift_id, p.date)}>
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium">{p.name}</span>
+                      <span className="block text-sm text-muted-foreground">
+                        Смена {dayMonth(p.date)}
+                        {p.set_by ? `, назначил ${p.set_by}` : ""}
+                      </span>
+                    </span>
+                    <span className={cn("shrink-0 font-semibold tabular", p.amount == null && "text-wait")}>
+                      {p.amount != null ? rub(p.amount) : "указать"}
                     </span>
                   </button>
                 </li>
               ))}
             </ul>
-            <div className="mt-2 flex justify-between border-t pt-3 font-semibold">
-              <span>Итого</span>
-              <span>{rub(total)}</span>
-            </div>
           </>
         )}
       </section>
@@ -374,11 +469,11 @@ function PenaltiesTab({ version, onEdit }: { version: number; onEdit: (s: Editab
   );
 }
 
-function Stat({ label, value, wide }: { label: string; value: string; wide?: boolean }) {
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className={cn("rounded-xl bg-muted px-3 py-2.5", wide && "col-span-2")}>
-      <p className="text-lg leading-tight font-bold">{value}</p>
-      <p className="text-xs text-muted-foreground">{label}</p>
+    <div>
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 font-semibold">{children}</dd>
     </div>
   );
 }
