@@ -1,7 +1,7 @@
 "use client";
 
 import { Minus, Plus } from "lucide-react";
-import type { Pricing, Shift, ShiftPayload } from "@/lib/api";
+import type { Point, Pricing, Shift, ShiftPayload } from "@/lib/api";
 import { rub } from "@/lib/format";
 import { tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
@@ -49,12 +49,21 @@ export function ShiftForm({
   onChange,
   pricing,
   locations,
+  points = [],
+  load = {},
+  ownLocation,
   disabled,
 }: {
   form: FormState;
   onChange: (f: FormState) => void;
   pricing: Pricing;
   locations: string[];
+  /** admin-defined points; when present the location is picked from them */
+  points?: Point[];
+  /** people already booked per point on this day */
+  load?: Record<string, number>;
+  /** my own booking on this day already counts in `load` */
+  ownLocation?: string | null;
   disabled?: boolean;
 }) {
   const set = (patch: Partial<FormState>) => onChange({ ...form, ...patch });
@@ -86,21 +95,59 @@ export function ShiftForm({
       </div>
       {badRange && <p className="-mt-3 text-sm text-cancel">Конец должен быть позже начала</p>}
 
-      <label className="block space-y-1.5">
-        <span className="text-sm text-muted-foreground">Точка</span>
-        <input className={cn(field, "h-13 text-base")} placeholder="Например, Европа" maxLength={100}
-               value={form.location} onChange={(e) => set({ location: e.target.value })} />
-      </label>
-      {locations.length > 0 && (
-        <div className="-mt-2 flex flex-wrap gap-2">
-          {locations.map((l) => (
-            <button key={l} type="button" onClick={() => set({ location: l })}
-                    className={cn("press rounded-full px-3.5 py-1.5 text-sm font-medium",
-                      form.location === l ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground")}>
-              {l}
-            </button>
-          ))}
+      {points.length > 0 ? (
+        <div className="space-y-1.5">
+          <span className="text-sm text-muted-foreground">Точка</span>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {points.map((p) => {
+              const taken = Object.entries(load).reduce(
+                (n, [name, count]) => (name.toLocaleLowerCase("ru") === p.name.toLocaleLowerCase("ru") ? n + count : n),
+                0,
+              ) - (ownLocation && ownLocation.toLocaleLowerCase("ru") === p.name.toLocaleLowerCase("ru") ? 1 : 0);
+              const full = !!p.capacity && taken >= p.capacity;
+              const picked = form.location.toLocaleLowerCase("ru") === p.name.toLocaleLowerCase("ru");
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  disabled={full && !picked}
+                  onClick={() => {
+                    tapHaptic();
+                    set({ location: p.name });
+                  }}
+                  className={cn(
+                    "press rounded-2xl px-3.5 py-2.5 text-left disabled:opacity-40",
+                    picked ? "bg-primary text-primary-foreground" : "bg-muted",
+                  )}
+                >
+                  <span className="block truncate text-[15px] font-semibold">{p.name}</span>
+                  <span className={cn("block text-xs", picked ? "opacity-70" : "text-muted-foreground")}>
+                    {full ? "мест нет" : p.capacity ? `занято ${taken} из ${p.capacity}` : taken ? `уже ${taken}` : "свободно"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
+      ) : (
+        <>
+          <label className="block space-y-1.5">
+            <span className="text-sm text-muted-foreground">Точка</span>
+            <input className={cn(field, "h-13 text-base")} placeholder="Например, Европа" maxLength={100}
+                   value={form.location} onChange={(e) => set({ location: e.target.value })} />
+          </label>
+          {locations.length > 0 && (
+            <div className="-mt-2 flex flex-wrap gap-2">
+              {locations.map((l) => (
+                <button key={l} type="button" onClick={() => set({ location: l })}
+                        className={cn("press rounded-full px-3.5 py-1.5 text-sm font-medium",
+                          form.location === l ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground")}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <div className="space-y-1.5">

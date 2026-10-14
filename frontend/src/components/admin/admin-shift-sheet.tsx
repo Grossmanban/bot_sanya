@@ -30,6 +30,7 @@ export interface EditableShift {
   volume: number | null;
   location: string | null;
   penalty_amount: number | null;
+  fact_volume?: number | null;
   name: string;
   username: string | null;
 }
@@ -52,6 +53,7 @@ export function AdminShiftSheet({
   const [volume, setVolume] = useState("");
   const [location, setLocation] = useState("");
   const [penalty, setPenalty] = useState("");
+  const [fact, setFact] = useState("");
   const [reason, setReason] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const { busy, run } = useAction();
@@ -63,6 +65,7 @@ export function AdminShiftSheet({
     setVolume(shift.volume ? String(shift.volume) : "");
     setLocation(shift.location ?? "");
     setPenalty(shift.penalty_amount != null ? String(shift.penalty_amount) : "");
+    setFact(shift.fact_volume != null ? String(shift.fact_volume) : "");
     setReason(shift.status === "finally_cancelled" ? "Окончательная отмена смены" : "");
   }, [shift]);
 
@@ -72,6 +75,7 @@ export function AdminShiftSheet({
   const canForceCancel = !!shift && ["active", "restored"].includes(shift.status);
   const canForceRestore = !!shift && ["cancelled", "finally_cancelled", "rejected_by_admin"].includes(shift.status) && hasTimes;
   const isFinal = shift?.status === "finally_cancelled";
+  const going = shift?.status === "active" || shift?.status === "restored";
 
   function needReason() {
     if (!reason.trim()) {
@@ -91,6 +95,7 @@ export function AdminShiftSheet({
       if (volume && Number(volume) !== shift.volume) body.volume = Number(volume);
     }
     if (isFinal && penalty !== "" && Number(penalty) !== shift.penalty_amount) body.penalty_amount = Number(penalty);
+    if (going && fact !== "" && Number(fact) !== (shift.fact_volume ?? null)) body.fact_volume = Number(fact);
     if (Object.keys(body).length === 1) {
       toast.error("Ничего не изменилось");
       return;
@@ -181,6 +186,13 @@ export function AdminShiftSheet({
                              onChange={(e) => setVolume(e.target.value.replace(/\D/g, "").slice(0, 5))} />
                     </Field>
                   </div>
+                )}
+
+                {going && (
+                  <Field label="Факт, шт.">
+                    <input inputMode="numeric" className={cn(field, "tabular")} placeholder="не внесён" value={fact}
+                           onChange={(e) => setFact(e.target.value.replace(/\D/g, "").slice(0, 5))} />
+                  </Field>
                 )}
 
                 {isFinal && (

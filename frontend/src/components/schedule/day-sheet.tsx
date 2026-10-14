@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { LoaderCircle, MapPin } from "lucide-react";
+import { LoaderCircle, MapPin, Minus, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
-import { api, ApiError, type Day, type Pricing, type Shift, type User } from "@/lib/api";
+import { api, ApiError, type Day, type Point, type Pricing, type Shift, type User } from "@/lib/api";
 import { STATUS_META, WEEKDAYS, dayMonth, dayState, parseDay, rub, timeRange } from "@/lib/format";
 import { readLocal, useAction, writeLocal } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,7 @@ export interface DetailProps {
   user: User;
   pricing: Pricing;
   locations: string[];
+  points: Point[];
   onChanged: () => Promise<void> | void;
   onOpenProfile: () => void;
 }
@@ -52,7 +53,7 @@ export function DaySheet({ day, onClose, ...props }: DetailProps & { day: Day | 
 }
 
 /** Everything about one day: who works when, my shift and its actions. */
-export function DayDetail({ day, user, pricing, locations, onChanged, onOpenProfile }: DetailProps & { day: Day }) {
+export function DayDetail({ day, user, pricing, locations, points, onChanged, onOpenProfile }: DetailProps & { day: Day }) {
   const shift = day.my_shift;
   const [mode, setMode] = useState<Mode>(shift ? "view" : "create");
   const [form, setForm] = useState<FormState>(() => initialForm(null, readLocal("last-location") ?? undefined));
@@ -165,11 +166,22 @@ export function DayDetail({ day, user, pricing, locations, onChanged, onOpenProf
               </button>
             </Notice>
           )}
-          <ShiftForm form={form} onChange={setForm} pricing={pricing} locations={locations} disabled={blocked} />
+          <ShiftForm
+            form={form}
+            onChange={setForm}
+            pricing={pricing}
+            locations={locations}
+            points={points}
+            load={day.points_load}
+            ownLocation={mode === "edit" ? shift?.location : null}
+            disabled={blocked}
+          />
         </div>
       ) : (
         shift && <ShiftView shift={shift} />
       )}
+
+      {!formMode && shift?.can_set_fact && <FactBlock shift={shift} pricing={pricing} onChanged={onChanged} />}
 
       <div className="space-y-2.5">
         {formMode && (
@@ -338,9 +350,73 @@ function ShiftView({ shift }: { shift: Shift }) {
         </Notice>
       )}
       {status === "rejected_by_admin" && <Notice tone="muted">Администратор не подтвердил выход на этот день.</Notice>}
-      {(status === "active" || status === "restored") && !shift.can_edit && (
+      {(status === "active" || status === "restored") && !shift.can_edit && shift.edit_count > 0 && !shift.can_set_fact && (
         <p className="text-sm text-muted-foreground">Изменение уже использовано. Дальше через администратора.</p>
       )}
+    </div>
+  );
+}
+
+function FactBlock({ shift, pricing, onChanged }: { shift: Shift; pricing: Pricing; onChanged: () => Promise<void> | void }) {
+  const [editing, setEditing] = useState(shift.fact_volume == null);
+  const [value, setValue] = useState(String(shift.fact_volume ?? shift.volume ?? ""));
+  const { busy, run } = useAction();
+  const n = Number(value) || 0;
+  const rate = n > 0 && n < pricing.lazy_threshold ? pricing.lazy_rate : pricing.base_rate;
+
+  async function save() {
+    if (!/^\d+$/.test(value)) {
+      toast.error("Факт — целое число");
+      return;
+    }
+    try {
+      await run("fact", (k) => api.setFact(shift.id, n, k), "Факт сохранён");
+      setEditing(false);
+      await onChanged();
+    } catch {
+      /* toast shown */
+    }
+  }
+
+  if (!editing && shift.fact_volume != null) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-2xl bg-go-soft px-4 py-3">
+        <div>
+          <p className="text-xs text-muted-foreground">Сделано по факту</p>
+          <p className="font-display text-xl font-semibold">
+            {shift.fact_volume} шт.
+            {shift.fact_pay != null && <span className="ml-2 text-base font-medium text-muted-foreground">{rub(shift.fact_pay)}</span>}
+          </p>
+        </div>
+        <Button variant="ghost" className="rounded-xl" onClick={() => setEditing(true)}>
+          Изменить
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3 rounded-2xl bg-muted/60 p-4">
+      <div>
+        <p className="font-semibold">Сколько сделал по факту?</p>
+        <p className="text-sm text-muted-foreground">План был {shift.volume} шт. Факт попадёт в отчёт и расчёт заработка.</p>
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" aria-label="Минус 1" onClick={() => setValue(String(Math.max(0, n - 1)))}
+                className="press grid size-12 shrink-0 place-items-center rounded-2xl bg-card">
+          <Minus className="size-5" />
+        </button>
+        <input inputMode="numeric" aria-label="Факт" value={value}
+               onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 5))}
+               className="h-12 w-full rounded-2xl border-0 bg-card text-center font-display text-xl font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
+        <button type="button" aria-label="Плюс 1" onClick={() => setValue(String(n + 1))}
+                className="press grid size-12 shrink-0 place-items-center rounded-2xl bg-card">
+          <Plus className="size-5" />
+        </button>
+      </div>
+      {n > 0 && <p className="text-sm text-muted-foreground">{n} × {rate} ₽ = {rub(n * rate)}</p>}
+      <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy} onClick={save}>
+        {busy && <LoaderCircle className="animate-spin" />} Сохранить факт
+      </Button>
     </div>
   );
 }

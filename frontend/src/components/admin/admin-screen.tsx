@@ -23,14 +23,18 @@ import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
 import { TeamSection } from "./team-section";
+import { BroadcastSection, ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 
-type Section = "raspred" | "day" | "stats" | "penalties" | "team";
+type Section = "raspred" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "raspred", label: "Распред" },
   { id: "day", label: "День" },
   { id: "stats", label: "Отчёт" },
   { id: "penalties", label: "Штрафы" },
   { id: "team", label: "Команда" },
+  { id: "points", label: "Точки" },
+  { id: "broadcast", label: "Рассылка" },
+  { id: "settings", label: "Настройки" },
 ];
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
@@ -39,32 +43,31 @@ export function AdminScreen({ me }: { me: User }) {
   const [section, setSection] = useState<Section>("raspred");
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
-  const index = SECTIONS.findIndex((s) => s.id === section);
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
-      <div className="relative grid grid-cols-5 rounded-2xl bg-card p-1 shadow-lift">
-        <span
-          aria-hidden
-          className="absolute inset-y-1 left-1 rounded-xl bg-primary transition-transform duration-300 ease-[cubic-bezier(.2,.8,.2,1)]"
-          style={{ width: `calc((100% - 0.5rem) / ${SECTIONS.length})`, transform: `translateX(${index * 100}%)` }}
-        />
-        {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => {
-              tapHaptic();
-              setSection(s.id);
-            }}
-            className={cn(
-              "relative z-10 h-10 truncate rounded-xl px-0.5 text-[12.5px] font-semibold transition-colors duration-300 md:text-sm",
-              section === s.id ? "text-primary-foreground" : "text-muted-foreground",
-            )}
-          >
-            {s.label}
-          </button>
-        ))}
-      </div>
+      <nav className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+        <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift md:w-full">
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              ref={(el) => {
+                if (el && section === s.id) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+              }}
+              onClick={() => {
+                tapHaptic();
+                setSection(s.id);
+              }}
+              className={cn(
+                "press h-10 shrink-0 rounded-xl px-4 text-sm font-semibold transition-colors duration-200 md:flex-1 md:px-2",
+                section === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </nav>
 
       <div key={section} className="screen-in">
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
@@ -72,6 +75,9 @@ export function AdminScreen({ me }: { me: User }) {
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
         {section === "penalties" && <PenaltiesSection version={version} onEdit={setEditing} />}
         {section === "team" && <TeamSection me={me} />}
+        {section === "points" && <PointsSection />}
+        {section === "broadcast" && <BroadcastSection />}
+        {section === "settings" && <SettingsSection />}
       </div>
 
       <AdminShiftSheet
@@ -343,6 +349,8 @@ function StatsSection({ version, onEdit }: { version: number; onEdit: EditFn }) 
         </div>
       </section>
 
+      <ExportCard from={range.from} to={range.to} user={user} />
+
       {stats.error && <p className="text-sm text-destructive">{stats.error.message}</p>}
       {user && t && stats.data && (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
@@ -350,9 +358,14 @@ function StatsSection({ version, onEdit }: { version: number; onEdit: EditFn }) 
             <p className="text-sm text-muted-foreground">План за период</p>
             <p className="font-display text-3xl font-semibold">{t.active_volume} шт.</p>
             <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-[15px] md:grid-cols-4">
+              <Fact label="Факт">
+                {t.fact_volume} шт.
+                {t.fact_missing > 0 && <span className="block text-xs font-normal text-wait">без факта: {t.fact_missing}</span>}
+              </Fact>
               <Fact label="Выходов">{t.active_shifts} из {t.shifts}</Fact>
+              <Fact label="Заработок, план">{rub(t.expected_pay)}</Fact>
+              <Fact label="Заработок, факт">{rub(t.fact_pay)}</Fact>
               <Fact label="Отменено">{t.cancelled_volume} шт.</Fact>
-              <Fact label="Заработок (план)">{rub(t.expected_pay)}</Fact>
               <Fact label="Штрафы">{rub(t.penalties)}</Fact>
             </dl>
           </div>
@@ -392,7 +405,13 @@ function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; on
         </span>
         <DayTrack className="mt-2.5" state={item.status} mine={item.start_time ? item : null} others={[]} index={index} />
         <span className="mt-2 block truncate text-xs text-muted-foreground">
-          {[item.location && `${item.location}, ${item.volume} шт.`, item.notes.toLowerCase()].filter(Boolean).join(", ")}
+          {[
+            item.location && `${item.location}, план ${item.volume} шт.`,
+            item.fact_volume != null && `факт ${item.fact_volume} шт.`,
+            item.notes.toLowerCase(),
+          ]
+            .filter(Boolean)
+            .join(", ")}
         </span>
       </span>
     </button>

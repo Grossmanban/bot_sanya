@@ -37,6 +37,10 @@ class PenaltyInput(StatesGroup):
     amount = State()
 
 
+class FactInput(StatesGroup):
+    amount = State()
+
+
 def open_app_keyboard() -> InlineKeyboardMarkup | None:
     if not settings.webapp_url.startswith("https://"):
         return None
@@ -240,6 +244,43 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         await state.clear()
         _, text = await apply_penalty(message.from_user.id, message.from_user.full_name, data["shift_id"], int(raw))
         await message.answer(text)
+
+    # ------------------------------------------------------------ fact after the shift
+
+    async def save_fact(tg_id: int, shift_id: int, value: int) -> str:
+        user = svc.get_user_by_tg(conn, tg_id)
+        if user is None or user["status"] != "approved":
+            return "Нет доступа"
+        try:
+            svc.set_fact(conn, user, shift_id, value, svc.new_key())
+        except svc.ServiceError as exc:
+            return exc.message
+        return f"Записал: {value} шт. Спасибо!"
+
+    @router.callback_query(F.data.startswith("fact:"))
+    async def fact_quick(call: CallbackQuery):
+        _, shift_id, value = call.data.split(":")
+        text = await save_fact(call.from_user.id, int(shift_id), int(value))
+        if text.startswith("Записал"):
+            await call.message.edit_text(f"{call.message.html_text}\n\n<b>✅ {escape(text)}</b>", parse_mode="HTML")
+        await call.answer(text)
+
+    @router.callback_query(F.data.startswith("factc:"))
+    async def fact_custom_ask(call: CallbackQuery, state: FSMContext):
+        await state.set_state(FactInput.amount)
+        await state.update_data(shift_id=int(call.data.split(":")[1]))
+        await call.message.answer("Сколько штук сделал? Напиши число.")
+        await call.answer()
+
+    @router.message(StateFilter(FactInput.amount), F.text)
+    async def fact_custom(message: Message, state: FSMContext):
+        raw = message.text.strip().replace(" ", "")
+        if not raw.isdigit():
+            await message.answer("Нужно целое число, например 23.")
+            return
+        data = await state.get_data()
+        await state.clear()
+        await message.answer(await save_fact(message.from_user.id, data["shift_id"], int(raw)))
 
     # ------------------------------------------------------------ admin: raspred
 

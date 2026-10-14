@@ -27,6 +27,8 @@ MAX_VOLUME = 10_000
 MAX_LOCATION = 100
 MAX_PENALTY = 1_000_000
 BOOKING_WEEKS_AHEAD = 1
+FACT_DAYS_BACK = 3
+BUSY = ("active", "restored", "awaiting_approval")  # statuses that take a place at a point
 
 
 class ServiceError(Exception):
@@ -100,7 +102,7 @@ def log_event(
 
 
 def _snapshot(shift: dict) -> dict:
-    return {k: shift.get(k) for k in ("status", "start_time", "end_time", "volume", "location", "penalty_amount")}
+    return {k: shift.get(k) for k in ("status", "start_time", "end_time", "volume", "location", "penalty_amount", "fact_volume")}
 
 
 def parse_date(value: str) -> date:
@@ -389,11 +391,15 @@ def serialize_shift(shift: dict | None, today: date) -> dict | None:
         "can_final_cancel": not past and status == "restored",
         "can_restore": not past and status == "cancelled" and not shift["admin_locked"] and not shift["restored_at"],
         "can_clear_off": not past and status == "pre_declared_off",
+        "fact_volume": shift.get("fact_volume"),
+        "can_set_fact": status in ACTIVE and today - timedelta(days=FACT_DAYS_BACK) <= day <= today,
     }
     if volume:
         data.update(
             rate=pricing.calculate_rate(volume), expected_pay=pricing.expected_pay(volume), lazy=pricing.is_lazy(volume)
         )
+    if shift.get("fact_volume") is not None:
+        data["fact_pay"] = pricing.expected_pay(shift["fact_volume"])
     return data
 
 
@@ -417,6 +423,13 @@ def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
         (first, last, user["id"]),
     ):
         others.setdefault(r["shift_date"], []).append(dict(r))
+    load: dict[str, dict[str, int]] = {}
+    for r in conn.execute(
+        f"""SELECT shift_date, location, COUNT(*) AS n FROM shifts
+            WHERE shift_date BETWEEN ? AND ? AND status IN {BUSY} GROUP BY shift_date, location""",
+        (first, last),
+    ):
+        load.setdefault(r["shift_date"], {})[r["location"]] = r["n"]
     result = []
     for d in days:
         iso = d.isoformat()
@@ -444,6 +457,7 @@ def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
                 "my_shift": serialize_shift(mine.get(iso), today),
                 "colleagues": colleagues,
                 "colleagues_off": off,
+                "points_load": load.get(iso, {}),
             }
         )
     return {"offset": offset, "start": first, "end": last, "today": today.isoformat(), "days": result}
@@ -514,6 +528,7 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
         _require_bookable(day, today)
         if get_user_shift_on(conn, user["id"], day) is not None:
             raise ServiceError("На эту дату у вас уже есть запись", 409, "already_exists")
+        data["location"] = check_point(conn, day, data["location"])
         urgent = day == today
         status = "awaiting_approval" if urgent else "active"
         now = now_iso()
@@ -542,6 +557,7 @@ def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: 
             raise ServiceError("Изменить можно только активную смену", 409, "bad_status")
         if shift["edit_count"] >= 1:
             raise ServiceError("Смену можно изменить только один раз. Дальше — через администратора", 409, "edit_limit")
+        data["location"] = check_point(conn, date.fromisoformat(shift["shift_date"]), data["location"], exclude=shift_id)
         conn.execute(
             """UPDATE shifts SET start_time = ?, end_time = ?, volume = ?, location = ?,
                                  edit_count = edit_count + 1, updated_at = ? WHERE id = ?""",
@@ -586,6 +602,7 @@ def restore_shift(conn, user: dict, shift_id: int, payload: dict, key: str, toda
         _require_working(user)
         if shift["status"] != "cancelled" or shift["admin_locked"] or shift["restored_at"]:
             raise ServiceError("Эту смену нельзя восстановить", 409, "cannot_restore")
+        data["location"] = check_point(conn, date.fromisoformat(shift["shift_date"]), data["location"], exclude=shift_id)
         now = now_iso()
         conn.execute(
             """UPDATE shifts SET status = 'restored', start_time = ?, end_time = ?, volume = ?, location = ?,
@@ -729,6 +746,12 @@ def admin_edit_shift(conn, admin: dict, shift_id: int, changes: dict, key: str) 
             updates.update(status="active", admin_locked=0)
         elif action not in (None, ""):
             raise ServiceError("Неизвестное действие", 422, "bad_action")
+        fact = changes.get("fact_volume")
+        if fact is not None:
+            if isinstance(fact, bool) or not isinstance(fact, int) or not 0 <= fact <= MAX_VOLUME:
+                raise ServiceError("Факт — целое число от 0", 422, "bad_fact")
+            if fact != shift["fact_volume"]:
+                updates.update(fact_volume=fact, fact_set_at=now_iso(), fact_set_by=admin["telegram_id"])
         penalty = changes.get("penalty_amount")
         if penalty is not None:
             if isinstance(penalty, bool) or not isinstance(penalty, int) or not 0 <= penalty <= MAX_PENALTY:
@@ -745,7 +768,7 @@ def admin_edit_shift(conn, admin: dict, shift_id: int, changes: dict, key: str) 
         updates["updated_at"] = now_iso()
         sets = ", ".join(f"{k} = ?" for k in updates)
         conn.execute(f"UPDATE shifts SET {sets} WHERE id = ?", (*updates.values(), shift_id))
-        new = {k: v for k, v in updates.items() if k in (*field_keys, "status", "penalty_amount")}
+        new = {k: v for k, v in updates.items() if k in (*field_keys, "status", "penalty_amount", "fact_volume")}
         log_event(conn, user_id=shift["user_id"], actor_id=admin["telegram_id"], event_type="SHIFT_EDITED_BY_ADMIN",
                   key=key, shift_id=shift_id, old=_snapshot(shift), new=new, description=reason)
         if "penalty_amount" in updates:
@@ -827,6 +850,7 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
         (user_id, date_from.isoformat(), date_to.isoformat()),
     ).fetchall()
     items, active_volume, cancelled_volume, penalties, pay = [], 0, 0, 0, 0
+    fact_volume, fact_pay, fact_missing = 0, 0, 0
     for r in rows:
         s = dict(r)
         notes = []
@@ -839,6 +863,11 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
         if s["status"] in ACTIVE:
             active_volume += s["volume"]
             pay += pricing.expected_pay(s["volume"])
+            if s["fact_volume"] is not None:
+                fact_volume += s["fact_volume"]
+                fact_pay += pricing.expected_pay(s["fact_volume"])
+            elif s["shift_date"] < today_local().isoformat():
+                fact_missing += 1
         elif s["status"] in ("cancelled", "finally_cancelled") and s["volume"]:
             cancelled_volume += s["volume"]
         penalties += s["penalty_amount"] or 0
@@ -854,6 +883,7 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
                 "rate": pricing.calculate_rate(s["volume"]) if s["volume"] else None,
                 "expected_pay": pricing.expected_pay(s["volume"]) if s["volume"] and s["status"] in ACTIVE else None,
                 "penalty_amount": s["penalty_amount"],
+                "fact_volume": s["fact_volume"],
                 "notes": ", ".join(notes),
             }
         )
@@ -869,6 +899,9 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
             "cancelled_volume": cancelled_volume,
             "penalties": penalties,
             "expected_pay": pay,
+            "fact_volume": fact_volume,
+            "fact_pay": fact_pay,
+            "fact_missing": fact_missing,
         },
     }
 
@@ -914,3 +947,163 @@ def penalty_log(conn, user_id: int | None, date_from: date | None, date_to: date
             }
         )
     return out
+
+
+# ---------------------------------------------------------------- points (справочник точек)
+
+
+def list_points(conn, include_inactive: bool = False) -> list[dict]:
+    sql = "SELECT * FROM points" + ("" if include_inactive else " WHERE active = 1") + " ORDER BY active DESC, name"
+    return [dict(r) for r in conn.execute(sql)]
+
+
+def _validate_point(name, capacity) -> tuple[str, int | None]:
+    name = (name or "").strip() if isinstance(name, str) else ""
+    if not name or len(name) > MAX_LOCATION:
+        raise ServiceError("Название точки: от 1 до 100 символов", 422, "bad_point")
+    if capacity is not None and (isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 1000):
+        raise ServiceError("Лимит людей — число от 1", 422, "bad_capacity")
+    return name, capacity
+
+
+def _point_named(conn, name: str) -> dict | None:
+    # SQLite's NOCASE only folds ASCII, so compare Cyrillic names in Python
+    return next((p for p in list_points(conn, include_inactive=True) if p["name"].casefold() == name.casefold()), None)
+
+
+def create_point(conn, admin: dict, name: str, capacity: int | None) -> dict:
+    name, capacity = _validate_point(name, capacity)
+    with transaction(conn):
+        if _point_named(conn, name):
+            raise ServiceError("Такая точка уже есть", 409, "point_exists")
+        cur = conn.execute("INSERT INTO points (name, capacity, created_at) VALUES (?, ?, ?)", (name, capacity, now_iso()))
+        log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="POINT_CREATED", key=new_key(),
+                  new={"name": name, "capacity": capacity})
+    return dict(conn.execute("SELECT * FROM points WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
+def update_point(conn, admin: dict, point_id: int, changes: dict) -> dict:
+    with transaction(conn):
+        point = conn.execute("SELECT * FROM points WHERE id = ?", (point_id,)).fetchone()
+        if point is None:
+            raise ServiceError("Точка не найдена", 404, "not_found")
+        point = dict(point)
+        name = changes["name"] if "name" in changes and changes["name"] is not None else point["name"]
+        capacity = changes["capacity"] if "capacity" in changes else point["capacity"]
+        name, capacity = _validate_point(name, capacity)
+        active = int(bool(changes["active"])) if changes.get("active") is not None else point["active"]
+        clash = _point_named(conn, name)
+        if clash and clash["id"] != point_id:
+            raise ServiceError("Такая точка уже есть", 409, "point_exists")
+        conn.execute("UPDATE points SET name = ?, capacity = ?, active = ? WHERE id = ?", (name, capacity, active, point_id))
+        if name != point["name"]:
+            # keep upcoming shifts pointing at the renamed point
+            upcoming = conn.execute("SELECT id, location FROM shifts WHERE shift_date >= ?", (today_local().isoformat(),))
+            ids = [r["id"] for r in upcoming if (r["location"] or "").casefold() == point["name"].casefold()]
+            conn.executemany("UPDATE shifts SET location = ? WHERE id = ?", [(name, i) for i in ids])
+        log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="POINT_UPDATED", key=new_key(),
+                  old={k: point[k] for k in ("name", "capacity", "active")},
+                  new={"name": name, "capacity": capacity, "active": active})
+    return dict(conn.execute("SELECT * FROM points WHERE id = ?", (point_id,)).fetchone())
+
+
+def check_point(conn, day: date, location: str, exclude: int | None = None) -> str:
+    """With a points list configured, the location must be one of them and the point must have room.
+    Returns the canonical point name. Without points, any location is accepted."""
+    points = list_points(conn)
+    if not points:
+        return location
+    point = next((p for p in points if p["name"].casefold() == location.casefold()), None)
+    if point is None:
+        raise ServiceError("Выберите точку из списка", 422, "unknown_point")
+    if point["capacity"]:
+        rows = conn.execute(
+            f"SELECT location FROM shifts WHERE shift_date = ? AND status IN {BUSY} AND id != ?",
+            (day.isoformat(), exclude or 0),
+        )
+        taken = sum(1 for r in rows if (r["location"] or "").casefold() == point["name"].casefold())
+        if taken >= point["capacity"]:
+            raise ServiceError(f"На точке «{point['name']}» уже {taken} из {point['capacity']}", 409, "point_full")
+    return point["name"]
+
+
+# ---------------------------------------------------------------- fact after the shift
+
+
+def set_fact(conn, user: dict, shift_id: int, value: int, key: str, today: date | None = None) -> Result:
+    today = today or today_local()
+    _check_key(key)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_VOLUME:
+        raise ServiceError("Факт — целое число от 0", 422, "bad_fact")
+    with transaction(conn):
+        if _seen(conn, key):
+            return Result(get_shift(conn, shift_id), False)
+        shift = get_shift(conn, shift_id)
+        if shift is None or shift["user_id"] != user["id"]:
+            raise ServiceError("Смена не найдена", 404, "not_found")
+        day = date.fromisoformat(shift["shift_date"])
+        if shift["status"] not in ACTIVE:
+            raise ServiceError("Факт вносится только по состоявшейся смене", 409, "bad_status")
+        if day > today:
+            raise ServiceError("Факт можно внести в день смены или позже", 409, "too_early")
+        if day < today - timedelta(days=FACT_DAYS_BACK):
+            raise ServiceError("Срок внесения факта прошёл, обратитесь к администратору", 409, "too_late")
+        if shift["fact_volume"] == value:
+            return Result(shift, False)
+        conn.execute("UPDATE shifts SET fact_volume = ?, fact_set_at = ?, fact_set_by = ?, updated_at = ? WHERE id = ?",
+                     (value, now_iso(), user["telegram_id"], now_iso(), shift_id))
+        log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="FACT_SET", key=key,
+                  shift_id=shift_id, old={"fact_volume": shift["fact_volume"]}, new={"fact_volume": value})
+    return Result(get_shift(conn, shift_id), True, "FACT_SET")
+
+
+# ---------------------------------------------------------------- notifications preferences and broadcasts
+
+
+def set_notify(conn, user: dict, enabled: bool) -> dict:
+    with transaction(conn):
+        conn.execute("UPDATE users SET notify_reminders = ? WHERE id = ?", (int(enabled), user["id"]))
+    return get_user(conn, user["id"])
+
+
+AUDIENCES = {
+    "working": "Работающим сейчас",
+    "all": "Всем сотрудникам",
+    "admins": "Администраторам",
+}
+
+
+def broadcast_recipients(conn, audience: str) -> list[dict]:
+    if audience == "working":
+        sql = "SELECT * FROM users WHERE status = 'approved' AND work_status = 'working'"
+    elif audience == "all":
+        sql = "SELECT * FROM users WHERE status = 'approved'"
+    elif audience == "admins":
+        sql = "SELECT * FROM users WHERE status = 'approved' AND role = 'admin'"
+    else:
+        raise ServiceError("Неизвестная аудитория", 422, "bad_audience")
+    return [dict(r) for r in conn.execute(sql)]
+
+
+def create_broadcast(conn, admin: dict, audience: str, text: str) -> tuple[dict, list[dict]]:
+    text = (text or "").strip()
+    if not text:
+        raise ServiceError("Напишите текст сообщения", 422, "empty")
+    if len(text) > 3000:
+        raise ServiceError("Сообщение длиннее 3000 символов", 422, "too_long")
+    recipients = broadcast_recipients(conn, audience)
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO broadcasts (author_id, audience, text, recipients, created_at) VALUES (?, ?, ?, ?, ?)",
+            (admin["telegram_id"], audience, text, len(recipients), now_iso()),
+        )
+    return dict(conn.execute("SELECT * FROM broadcasts WHERE id = ?", (cur.lastrowid,)).fetchone()), recipients
+
+
+def list_broadcasts(conn, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        """SELECT b.*, u.first_name, u.last_name FROM broadcasts b
+           LEFT JOIN users u ON u.telegram_id = b.author_id ORDER BY b.id DESC LIMIT ?""",
+        (limit,),
+    )
+    return [dict(r) for r in rows]

@@ -70,6 +70,11 @@ export function useAction() {
   return { busy, run };
 }
 
+/** Current Moscow time as HH:MM. */
+export function moscowTime(): string {
+  return new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date());
+}
+
 export function moscowToday(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow" }).format(new Date());
 }
