@@ -22,18 +22,20 @@ import { haptic, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
+import { TeamSection } from "./team-section";
 
-type Section = "raspred" | "day" | "stats" | "penalties";
+type Section = "raspred" | "day" | "stats" | "penalties" | "team";
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "raspred", label: "Распред" },
   { id: "day", label: "День" },
-  { id: "stats", label: "Статистика" },
+  { id: "stats", label: "Отчёт" },
   { id: "penalties", label: "Штрафы" },
+  { id: "team", label: "Команда" },
 ];
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
-export function AdminScreen() {
+export function AdminScreen({ me }: { me: User }) {
   const [section, setSection] = useState<Section>("raspred");
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
@@ -41,11 +43,11 @@ export function AdminScreen() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
-      <div className="relative grid grid-cols-4 rounded-2xl bg-card p-1 shadow-lift">
+      <div className="relative grid grid-cols-5 rounded-2xl bg-card p-1 shadow-lift">
         <span
           aria-hidden
           className="absolute inset-y-1 left-1 rounded-xl bg-primary transition-transform duration-300 ease-[cubic-bezier(.2,.8,.2,1)]"
-          style={{ width: "calc((100% - 0.5rem) / 4)", transform: `translateX(${index * 100}%)` }}
+          style={{ width: `calc((100% - 0.5rem) / ${SECTIONS.length})`, transform: `translateX(${index * 100}%)` }}
         />
         {SECTIONS.map((s) => (
           <button
@@ -55,7 +57,7 @@ export function AdminScreen() {
               setSection(s.id);
             }}
             className={cn(
-              "relative z-10 h-10 truncate rounded-xl px-1 text-[13px] font-semibold transition-colors duration-300 md:text-sm",
+              "relative z-10 h-10 truncate rounded-xl px-0.5 text-[12.5px] font-semibold transition-colors duration-300 md:text-sm",
               section === s.id ? "text-primary-foreground" : "text-muted-foreground",
             )}
           >
@@ -69,6 +71,7 @@ export function AdminScreen() {
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
         {section === "penalties" && <PenaltiesSection version={version} onEdit={setEditing} />}
+        {section === "team" && <TeamSection me={me} />}
       </div>
 
       <AdminShiftSheet

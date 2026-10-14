@@ -8,7 +8,7 @@ from html import escape
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from . import services as svc
 from .timeutil import ddmm, ddmm_wd
@@ -193,7 +193,9 @@ class Notifier:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def send(self, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> bool:
+    async def send(
+        self, chat_id: int, text: str, markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None
+    ) -> bool:
         if self.bot is None:
             log.info("[notify → %s] %s", chat_id, text)
             return False
@@ -250,3 +252,25 @@ class Notifier:
             user["telegram_id"],
             f"💸 Вам начислен штраф {shift['penalty_amount']} ₽ за окончательную отмену смены {ddmm(_day(shift))}.",
         )
+
+    async def access_changed(self, user: dict, previous_status: str, open_app: InlineKeyboardMarkup | None) -> None:
+        if user["status"] == "approved":
+            if svc.claim_welcome(self.conn, user["id"]):
+                await self.send(user["telegram_id"], "Добро пожаловать в систему!", open_app)
+            else:
+                await self.send(user["telegram_id"], "Доступ снова открыт.", open_app)
+        elif previous_status == "pending":
+            await self.send(user["telegram_id"], "В доступе отказано.")
+        else:
+            await self.send(user["telegram_id"], "Доступ к графику закрыт администратором.", ReplyKeyboardRemove())
+
+    async def role_changed(self, user: dict) -> None:
+        if user["role"] == "admin":
+            await self.send(
+                user["telegram_id"],
+                "Вам выданы права администратора. В приложении появилась вкладка «Админ», "
+                "сюда будут приходить заявки и уведомления.",
+                ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📋 Распред на завтра")]], resize_keyboard=True),
+            )
+        else:
+            await self.send(user["telegram_id"], "Права администратора сняты.", ReplyKeyboardRemove())

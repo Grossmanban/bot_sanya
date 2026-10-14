@@ -239,6 +239,81 @@ def set_work_status(conn, user: dict, work_status: str, key: str) -> dict:
     return get_user(conn, user["id"])
 
 
+def is_owner(user: dict) -> bool:
+    """Owners are the ADMIN_IDS from config: always admins, and the only ones who grant admin rights."""
+    return user["telegram_id"] in settings.admin_ids
+
+
+def team(conn) -> list[dict]:
+    rows = conn.execute(
+        """SELECT * FROM users
+           ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+                    role = 'employee', first_name, last_name"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict, bool]:
+    if role not in ("admin", "employee"):
+        raise ServiceError("Некорректная роль", 422, "bad_role")
+    if not is_owner(actor):
+        raise ServiceError("Назначать администраторов может только владелец", 403, "owner_only")
+    _check_key(key)
+    with transaction(conn):
+        user = get_user(conn, user_id)
+        if user is None:
+            raise ServiceError("Пользователь не найден", 404, "not_found")
+        if _seen(conn, key):
+            return user, False
+        if is_owner(user):
+            raise ServiceError("Владелец всегда администратор", 409, "owner")
+        if user["status"] != "approved":
+            raise ServiceError("Сначала откройте человеку доступ", 409, "not_approved")
+        if user["role"] == role:
+            return user, False
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="ROLE_CHANGED", key=key,
+                  old={"role": user["role"]}, new={"role": role})
+    return get_user(conn, user_id), True
+
+
+def set_access(conn, actor: dict, user_id: int, allow: bool, key: str) -> tuple[dict, bool]:
+    """allow=True: accept a request or reopen access; False: reject a request or close access."""
+    _check_key(key)
+    with transaction(conn):
+        user = get_user(conn, user_id)
+        if user is None:
+            raise ServiceError("Пользователь не найден", 404, "not_found")
+        if _seen(conn, key):
+            return user, False
+        if not allow and is_owner(user):
+            raise ServiceError("Владельцу нельзя закрыть доступ", 409, "owner")
+        if not allow and user["id"] == actor["id"]:
+            raise ServiceError("Нельзя закрыть доступ самому себе", 409, "self")
+        if not allow and user["role"] == "admin" and not is_owner(actor):
+            raise ServiceError("Закрыть доступ администратору может только владелец", 403, "owner_only")
+        target = "approved" if allow else "rejected"
+        if user["status"] == target:
+            return user, False
+        # closing access also takes away admin rights and the working status
+        conn.execute(
+            """UPDATE users SET status = ?, decided_at = ?, decided_by = ?,
+                                role = CASE WHEN ? = 'rejected' THEN 'employee' ELSE role END,
+                                work_status = 'not_working'
+               WHERE id = ?""",
+            (target, now_iso(), actor["telegram_id"], target, user_id),
+        )
+        event = {
+            ("pending", True): "REGISTRATION_APPROVED",
+            ("pending", False): "REGISTRATION_REJECTED",
+            ("approved", False): "ACCESS_CLOSED",
+            ("rejected", True): "ACCESS_REOPENED",
+        }[(user["status"], allow)]
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
+                  old={"status": user["status"], "role": user["role"]}, new={"status": target})
+    return get_user(conn, user_id), True
+
+
 def list_users(conn, statuses=("approved",)) -> list[dict]:
     marks = ",".join("?" * len(statuses))
     rows = conn.execute(
