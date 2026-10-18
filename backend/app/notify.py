@@ -16,11 +16,13 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 
-from . import app_settings
+from . import app_settings, media
 from . import permissions as perms
 from . import services as svc
+from .config import settings
 from .timeutil import ddmm, ddmm_wd
 
 log = logging.getLogger(__name__)
@@ -196,13 +198,35 @@ def svc_status_ru(status: str) -> str:
 # ---------------------------------------------------------------- sender
 
 
-def shortfall_keyboard(shift_id: int) -> InlineKeyboardMarkup:
-    presets = [InlineKeyboardButton(text=f"{a} ₽", callback_data=f"sf:{shift_id}:{a}") for a in PENALTY_PRESETS]
-    return InlineKeyboardMarkup(inline_keyboard=[
-        presets,
-        [InlineKeyboardButton(text="Своя сумма…", callback_data=f"sf:{shift_id}:custom"),
-         InlineKeyboardButton(text="Без штрафа", callback_data=f"sf:{shift_id}:0")],
-    ])
+def review_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="✅ Принять", callback_data=f"rv:a:{shift_id}"),
+             InlineKeyboardButton(text="🔄 На исправление", callback_data=f"rv:r:{shift_id}")]]
+    if can_fine:
+        rows.append([InlineKeyboardButton(text=f"⚠️ {a} ₽", callback_data=f"rv:f:{shift_id}:{a}") for a in PENALTY_PRESETS])
+        rows.append([InlineKeyboardButton(text="⚠️ Штраф — своя сумма", callback_data=f"rv:f:{shift_id}:c")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def no_show_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if can_fine:
+        rows.append([InlineKeyboardButton(text=f"💸 {a} ₽", callback_data=f"ns:f:{shift_id}:{a}") for a in PENALTY_PRESETS])
+        rows.append([InlineKeyboardButton(text="💸 Своя сумма", callback_data=f"ns:f:{shift_id}:c")])
+    rows.append([InlineKeyboardButton(text="🤝 Без штрафа", callback_data=f"ns:x:{shift_id}")])
+    if settings.webapp_url.startswith("https://"):
+        rows.append([InlineKeyboardButton(text="✍️ Внести результат в приложении", web_app=WebAppInfo(url=settings.webapp_url))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def report_keyboard(shift: dict) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="📸 Сдать отчёт", callback_data=f"rep:{shift['id']}")]]
+    if settings.webapp_url.startswith("https://"):
+        rows.append([InlineKeyboardButton(text="Открыть в приложении", web_app=WebAppInfo(url=settings.webapp_url))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def shift_place(shift: dict) -> str:
+    return f"{ddmm_wd(_day(shift))} {shift['start_time']}–{shift['end_time']}, «{escape(shift['location'] or '')}»"
 
 
 def _shortfall_line(shift: dict) -> str:
@@ -215,6 +239,7 @@ class Notifier:
         self.bot = bot
         self.conn = conn
         self._tasks: set[asyncio.Task] = set()
+        self._photo_cache: dict[str, tuple[bytes, str]] = {}
 
     def spawn(self, coro) -> None:
         """Fire-and-forget: API responses never wait on Telegram."""
@@ -297,6 +322,44 @@ class Notifier:
         except Exception as exc:
             log.warning("photo to %s failed: %s", chat_id, exc)
             return False
+
+    async def store_photo(self, chat_id: int, data: bytes, ext: str, caption: str) -> str:
+        """Keep an uploaded screenshot in Telegram (ТЗ 1.2): send it to the person's own chat as a receipt
+        and return the file_id. Without a bot (local dev) the file is saved to MEDIA_DIR."""
+        if self.bot is None:
+            return media.save_local(data, ext)
+        try:
+            msg = await self._retry(lambda: self.bot.send_photo(
+                chat_id, BufferedInputFile(data, f"report.{ext}"), caption=caption[:1024], parse_mode="HTML"))
+        except Exception as exc:
+            log.warning("photo upload for %s failed: %s", chat_id, exc)
+            raise svc.ServiceError("Не удалось загрузить скриншот. Напишите боту /start и попробуйте снова",
+                                   502, "upload_failed") from exc
+        return msg.photo[-1].file_id
+
+    async def fetch_photo(self, file_id: str) -> tuple[bytes, str] | None:
+        """Bytes for the signed preview link; a small in-memory cache saves repeated downloads."""
+        if file_id.startswith("local:"):
+            path = media.local_path(file_id)
+            if path is None:
+                return None
+            return path.read_bytes(), media.TYPES.get(path.suffix.lstrip("."), "image/jpeg")
+        if file_id in self._photo_cache:
+            return self._photo_cache[file_id]
+        if self.bot is None:
+            return None
+        try:
+            file = await self._retry(lambda: self.bot.get_file(file_id))
+            buf = await self.bot.download_file(file.file_path)
+            data = buf.read()
+        except Exception as exc:
+            log.warning("photo download failed: %s", exc)
+            return None
+        item = (data, media.TYPES.get(media.sniff(data) or "jpg", "image/jpeg"))
+        if len(self._photo_cache) >= 60:
+            self._photo_cache.pop(next(iter(self._photo_cache)))
+        self._photo_cache[file_id] = item
+        return item
 
     async def archive(self, tags: list[str], text: str, person: dict | None = None, photo: str | None = None) -> bool:
         """Copy an important action to the private archive group with hashtags for search.
@@ -422,39 +485,105 @@ class Notifier:
                         ReplyKeyboardRemove() if state == "blocked" else None)
         await self.archive(tags, f"{line} — {who(user)}{why}\nИзменил: {who(actor)}", user)
 
-    async def fact_result(self, shift: dict, actor_tg: int | None = None) -> None:
-        """After a fact is saved: warn the employee and ask admins for a decision if the plan was missed."""
-        if not svc.shortfall(shift) or shift["shortfall_status"]:
-            return
+    # ------------------------------------------------------------ reports (ТЗ 3.2–3.4)
+
+    async def _photo_or_text(self, chat_id: int | str, photo: str | None, text: str, markup=None) -> bool:
+        if photo and not photo.startswith("local:"):
+            return await self.send_photo(chat_id, photo, text, markup)
+        return await self.send(int(chat_id), text, markup)
+
+    async def _archive_report(self, tags: list[str], text: str, user: dict, report: dict | None) -> None:
+        photo = report["photo_file_id"] if report and report["photo_file_id"] and not report["photo_file_id"].startswith("local:") else None
+        await self.archive(tags, text, user, photo)
+
+    async def report_submitted(self, shift: dict, report: dict) -> None:
+        from . import reports
+
         user = svc.get_user(self.conn, shift["user_id"])
-        day = _day(shift)
-        place = f"{ddmm_wd(day)} {shift['start_time']}–{shift['end_time']}, «{escape(shift['location'] or '')}»"
+        plan_fact = f"План {shift['volume']}, факт {report['fact_volume']} шт."
+        if report["status"] == "auto_approved":
+            await self.send(user["telegram_id"], f"✅ Отчёт принят: {shift_place(shift)}\n{plan_fact}")
+            await self._archive_report(["отчёт", "принят"], f"✅ ОТЧЁТ ПРИНЯТ (план выполнен) — {who(user)}\n"
+                                       f"{shift_place(shift)}\n{plan_fact}", user, report)
+            return
         await self.send(
             user["telegram_id"],
-            f"⚠️ <b>Не по норме</b>\n{place}\n{_shortfall_line(shift)}\n\nАдминистраторы это видят и могут назначить штраф.",
+            f"📝 Отчёт отправлен на проверку: {shift_place(shift)}\n{_shortfall_line(shift)}\n"
+            "Пока его не проверили, можно заменить его в приложении.",
         )
-        await self.to_admins(
-            f"📉 <b>Не по норме</b>\n{who(user)}\n{place}\n{_shortfall_line(shift)}\n\nНазначить штраф?",
-            shortfall_keyboard(shift["id"]),
-            exclude=actor_tg,
-        )
+        attempt = f" (попытка {report['attempt']})" if report["attempt"] > 1 else ""
+        caption = f"📝 <b>Отчёт на проверку</b>{attempt}\n{who(user)}\n{shift_place(shift)}\n{_shortfall_line(shift)}"
+        for chat in reports.reviewers(self.conn, user):
+            reviewer = svc.get_user_by_tg(self.conn, chat)
+            fine = reviewer is not None and perms.can(reviewer, "fine_direct", user) or chat in settings.admin_ids
+            await self._photo_or_text(chat, report["photo_file_id"], caption, review_keyboard(shift["id"], fine))
 
+    async def report_reviewed(self, shift: dict, report: dict, actor: dict) -> None:
+        from . import reports
 
-    async def shortfall_decided(self, shift: dict, admin_name: str, admin_tg: int) -> None:
         user = svc.get_user(self.conn, shift["user_id"])
-        day = ddmm(_day(shift))
-        if shift["shortfall_status"] == "fined":
-            await self.send(user["telegram_id"],
-                            f"💸 Штраф {shift['shortfall_penalty']} ₽: не выполнена норма {day} "
-                            f"(план {shift['volume']}, факт {shift['fact_volume']} шт.).")
-            verdict = f"штраф {shift['shortfall_penalty']} ₽"
-            await self.archive(
-                ["штраф", "недобор"],
-                f"💸 Штраф {shift['shortfall_penalty']} ₽ — {who(user)}\nНедобор {day}: план {shift['volume']}, "
-                f"факт {shift['fact_volume']} шт.\nНазначил: {escape(admin_name)}",
-                user,
-            )
+        place = shift_place(shift)
+        note = f"\nКомментарий: {escape(shift['report_note'])}" if shift["report_note"] else ""
+        plan_fact = f"План {shift['volume']}, факт {report['fact_volume']} шт."
+        if report["status"] == "approved":
+            await self.send(user["telegram_id"], f"✅ Отчёт принят: {place}\n{plan_fact}{note}")
+            tags, line = ["отчёт", "принят"], "✅ ОТЧЁТ ПРИНЯТ"
+        elif report["status"] == "rejected_retry":
+            await self.send(user["telegram_id"], f"🔄 Отчёт вернули на исправление: {place}{note}\n\n"
+                            "Сдайте отчёт заново — в приложении или кнопкой ниже.", report_keyboard(shift))
+            tags, line = ["отчёт", "исправление"], "🔄 ТРЕБУЕТСЯ ИСПРАВЛЕНИЕ"
         else:
-            await self.send(user["telegram_id"], f"По смене {day} недобор учтён без штрафа.")
-            verdict = "без штрафа"
-        await self.to_admins(f"Решено по недобору {who(user)} за {day}: {verdict} — {escape(admin_name)}", exclude=admin_tg)
+            await self.send(user["telegram_id"], f"❌ Отчёт отклонён, штраф {report['penalty_amount']} ₽: {place}{note}")
+            tags, line = ["отчёт", "штраф"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {report['penalty_amount']} ₽"
+        await self._archive_report(tags, f"{line} — {who(user)}\n{place}\n{plan_fact}{note}\nПроверил: {who(actor)}",
+                                   user, report)
+        for chat in reports.reviewers(self.conn, user):
+            if chat != actor["telegram_id"]:
+                await self.send(chat, f"{line}: {who(user)}, {ddmm(_day(shift))} — {who(actor)}")
+
+    async def no_show(self, shift: dict) -> None:
+        from . import reports
+
+        user = svc.get_user(self.conn, shift["user_id"])
+        place = shift_place(shift)
+        await self.send(user["telegram_id"],
+                        f"🚫 Отчёт по смене {place} не сдан вовремя — смена отмечена как неявка. "
+                        "Решение примет администратор.")
+        await self.archive(["неявка"], f"🚫 НЕЯВКА — {who(user)}\n{place}, план {shift['volume']} шт.", user)
+        for chat in reports.reviewers(self.conn, user):
+            reviewer = svc.get_user_by_tg(self.conn, chat)
+            fine = reviewer is not None and perms.can(reviewer, "fine_direct", user) or chat in settings.admin_ids
+            await self.send(chat, f"🚫 <b>Неявка</b>: нет отчёта\n{who(user)}\n{place}, план {shift['volume']} шт.\n\n"
+                            "Назначьте штраф, отпустите без штрафа или внесите результат за сотрудника.",
+                            no_show_keyboard(shift["id"], fine))
+
+    async def no_show_resolved(self, shift: dict, actor: dict) -> None:
+        user = svc.get_user(self.conn, shift["user_id"])
+        place = shift_place(shift)
+        note = f"\nПричина: {escape(shift['report_note'])}" if shift["report_note"] else ""
+        if shift["shortfall_status"] == "fined":
+            await self.send(user["telegram_id"], f"💸 Штраф {shift['shortfall_penalty']} ₽ за неявку: {place}{note}")
+            tags, line = ["неявка", "штраф"], f"💸 НЕЯВКА | ШТРАФ {shift['shortfall_penalty']} ₽"
+        else:
+            await self.send(user["telegram_id"], f"🤝 Неявка {place} закрыта без штрафа.{note}")
+            tags, line = ["неявка"], "🤝 НЕЯВКА БЕЗ ШТРАФА"
+        await self.archive(tags, f"{line} — {who(user)}\n{place}{note}\nРешил: {who(actor)}", user)
+
+    async def manual_result(self, shift: dict, report: dict, actor: dict) -> None:
+        user = svc.get_user(self.conn, shift["user_id"])
+        place = shift_place(shift)
+        note = f"\nКомментарий: {escape(shift['report_note'])}" if shift["report_note"] else ""
+        text = f"План {shift['volume']}, факт {report['fact_volume']} шт."
+        await self.send(user["telegram_id"], f"✍️ Администратор внёс результат: {place}\n{text}{note}")
+        await self._archive_report(["отчёт", "ручной"], f"✍️ РЕЗУЛЬТАТ ВНЕСЁН ВРУЧНУЮ — {who(user)}\n{place}\n{text}{note}\n"
+                                   f"Внёс: {who(actor)}", user, report)
+
+    async def report_reminder(self, shift: dict, deadline_text: str) -> bool:
+        user = svc.get_user(self.conn, shift["user_id"])
+        return await self.send(
+            user["telegram_id"],
+            f"⚠️ Вы не сдали отчёт за смену {shift_place(shift)}.\n"
+            f"Напоминаем: за отсутствие отчёта может быть начислен штраф. У вас есть время до {deadline_text}, "
+            "чтобы исправить ситуацию.",
+            report_keyboard(shift),
+        )

@@ -236,6 +236,60 @@ CREATE TABLE IF NOT EXISTS archive_log (
 """)
 
 
+
+def _reports(conn: sqlite3.Connection) -> None:
+    """6: shift reports (fact + screenshot), review and no-shows (ТЗ 3.2–3.4)."""
+    _run_script(conn, """
+    CREATE TABLE reports (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        shift_id       INTEGER NOT NULL REFERENCES shifts(id),
+        user_id        INTEGER NOT NULL REFERENCES users(id),
+        attempt        INTEGER NOT NULL,
+        fact_volume    INTEGER NOT NULL CHECK (fact_volume >= 0),
+        photo_file_id  TEXT,
+        source         TEXT NOT NULL CHECK (source IN ('app','bot','admin','legacy')),
+        status         TEXT NOT NULL CHECK (status IN (
+                           'pending_review','approved','auto_approved','rejected_penalty','rejected_retry')),
+        submitted_by   INTEGER NOT NULL,
+        submitted_at   TEXT NOT NULL,
+        reviewed_by    INTEGER,
+        reviewed_at    TEXT,
+        review_comment TEXT,
+        penalty_amount INTEGER,
+        UNIQUE (shift_id, attempt)
+    );
+    CREATE INDEX ix_reports_status ON reports (status, submitted_at);
+    ALTER TABLE shifts ADD COLUMN report_state TEXT CHECK (report_state IS NULL OR report_state IN (
+        'pending_review','approved','needs_fix','rejected','no_show'));
+    ALTER TABLE shifts ADD COLUMN report_reminded_at TEXT;
+    ALTER TABLE shifts ADD COLUMN no_show_at TEXT;
+    ALTER TABLE shifts ADD COLUMN report_note TEXT;
+    """)
+    # facts entered before reports existed become legacy reports with the decision already made
+    rows = conn.execute(
+        """SELECT * FROM shifts WHERE fact_volume IS NOT NULL AND status IN ('active','restored')"""
+    ).fetchall()
+    for s in rows:
+        under = s["volume"] is not None and s["fact_volume"] < s["volume"]
+        if s["shortfall_status"] == "fined":
+            status, state = "rejected_penalty", "rejected"
+        elif under and s["shortfall_status"] is None:
+            status, state = "pending_review", "pending_review"
+        else:
+            status, state = "approved", "approved"
+        conn.execute(
+            """INSERT INTO reports (shift_id, user_id, attempt, fact_volume, source, status, submitted_by, submitted_at,
+                                    reviewed_by, reviewed_at, penalty_amount)
+               VALUES (?, ?, 1, ?, 'legacy', ?, ?, ?, ?, ?, ?)""",
+            (s["id"], s["user_id"], s["fact_volume"], status, s["fact_set_by"] or 0, s["fact_set_at"] or s["updated_at"],
+             s["shortfall_decided_by"], s["shortfall_decided_at"], s["shortfall_penalty"]),
+        )
+        conn.execute("UPDATE shifts SET report_state = ? WHERE id = ?", (state, s["id"]))
+
+
+MIGRATIONS.append(_reports)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

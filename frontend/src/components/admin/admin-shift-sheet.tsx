@@ -15,13 +15,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
-import { api, type AdminAction, type ShiftStatus } from "@/lib/api";
+import { api, type AdminAction, type ReportView, type ShiftStatus } from "@/lib/api";
 import { STATUS_META, longDate } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { useWide } from "@/lib/use-media";
 import { useCan } from "@/lib/caps";
 import { cn } from "@/lib/utils";
-import { PlanFactBar, ShortfallDecision } from "./shortfall";
+import { ReportDecision } from "./reports";
 
 export interface EditableShift {
   id: number;
@@ -36,6 +36,7 @@ export interface EditableShift {
   shortfall?: number;
   shortfall_status?: "fined" | "waived" | null;
   shortfall_penalty?: number | null;
+  report?: ReportView | null;
   name: string;
   username: string | null;
 }
@@ -58,7 +59,6 @@ export function AdminShiftSheet({
   const [volume, setVolume] = useState("");
   const [location, setLocation] = useState("");
   const [penalty, setPenalty] = useState("");
-  const [fact, setFact] = useState("");
   const [reason, setReason] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const { busy, run } = useAction();
@@ -71,7 +71,6 @@ export function AdminShiftSheet({
     setVolume(shift.volume ? String(shift.volume) : "");
     setLocation(shift.location ?? "");
     setPenalty(shift.penalty_amount != null ? String(shift.penalty_amount) : "");
-    setFact(shift.fact_volume != null ? String(shift.fact_volume) : "");
     setReason(shift.status === "finally_cancelled" ? "Окончательная отмена смены" : "");
   }, [shift]);
 
@@ -101,7 +100,6 @@ export function AdminShiftSheet({
       if (volume && Number(volume) !== shift.volume) body.volume = Number(volume);
     }
     if (isFinal && penalty !== "" && Number(penalty) !== shift.penalty_amount) body.penalty_amount = Number(penalty);
-    if (going && fact !== "" && Number(fact) !== (shift.fact_volume ?? null)) body.fact_volume = Number(fact);
     if (Object.keys(body).length === 1) {
       toast.error("Ничего не изменилось");
       return;
@@ -194,23 +192,25 @@ export function AdminShiftSheet({
                   </div>
                 )}
 
-                {going && !!shift.shortfall && shift.volume != null && shift.fact_volume != null && (
-                  <div className="space-y-3 rounded-2xl bg-cancel-soft p-4">
-                    <p className="font-semibold text-cancel">Не по норме: −{shift.shortfall} шт.</p>
-                    <PlanFactBar plan={shift.volume} fact={shift.fact_volume} />
-                    <ShortfallDecision
-                      shiftId={shift.id}
-                      current={{ status: shift.shortfall_status ?? null, penalty: shift.shortfall_penalty ?? null }}
+                {going && shift.report?.started && (
+                  <div className="space-y-3 rounded-2xl bg-muted/50 p-4">
+                    <p className="font-semibold">Отчёт</p>
+                    <ReportDecision
+                      subject={{
+                        shift_id: shift.id,
+                        date: shift.date,
+                        volume: shift.volume ?? 0,
+                        fact_volume: shift.fact_volume ?? null,
+                        state: shift.report.state,
+                        decided: shift.report.decided,
+                        fine: shift.report.fine,
+                        note: shift.report.note,
+                        deadline: shift.report.deadline,
+                        attempts: shift.report.last ? [shift.report.last] : [],
+                      }}
                       onDone={onChanged}
                     />
                   </div>
-                )}
-
-                {going && (
-                  <Field label="Факт, шт.">
-                    <input inputMode="numeric" className={cn(field, "tabular")} placeholder="не внесён" value={fact}
-                           onChange={(e) => setFact(e.target.value.replace(/\D/g, "").slice(0, 5))} />
-                  </Field>
                 )}
 
                 {isFinal && canFine && (

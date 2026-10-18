@@ -176,11 +176,24 @@ def test_points_settings_and_fact_endpoints(client, conn):
     assert client.get("/api/points", headers=h).json()["items"][0]["name"] == "Европа"
     client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
     today = today_local().isoformat()
-    sid = client.post("/api/shifts/create", json={"shift_date": today, "start_time": "08:00", "end_time": "09:00", "volume": 10,
+    sid = client.post("/api/shifts/create", json={"shift_date": today, "start_time": "00:00", "end_time": "00:30", "volume": 10,
                                                   "location": "европа", "idempotency_key": key()}, headers=h).json()["shift"]["id"]
     client.patch(f"/api/admin/shifts/{sid}", json={"action": "approve_urgent", "reason": "", "idempotency_key": key()}, headers=owner)
-    r = client.post(f"/api/shifts/{sid}/fact", json={"fact_volume": 12, "idempotency_key": key()}, headers=h)
-    assert r.status_code == 200 and r.json()["shift"]["fact_volume"] == 12 and r.json()["shift"]["location"] == "Европа"
+    k = key()
+    url = f"/api/shifts/{sid}/report?fact_volume=12&idempotency_key={k}"
+    assert client.post(url, content=b"not an image", headers=h).status_code == 415
+    assert client.post(url, headers=h).status_code == 422
+    jpeg = b"\xff\xd8\xff\xe0" + b"0" * 64
+    r = client.post(url, content=jpeg, headers={**h, "Content-Type": "image/jpeg"})
+    assert r.status_code == 200, r.text
+    shift = r.json()["shift"]
+    assert shift["fact_volume"] == 12 and shift["location"] == "Европа" and shift["report"]["state"] == "approved"
+    photo = shift["report"]["last"]["photo_url"]
+    got = client.get(photo)
+    assert got.status_code == 200 and got.content == jpeg
+    assert client.get(photo.replace("sig=", "sig=0")).status_code == 403
+    # a retry with the same key does not upload again
+    assert client.post(url, content=jpeg, headers=h).json()["changed"] is False
 
 
 def test_trainer_sees_only_own_network_and_cannot_fine(client, conn):

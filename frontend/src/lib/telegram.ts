@@ -123,3 +123,15 @@ export function bindBackButton(active: boolean, onBack: () => void) {
     back.hide();
   };
 }
+
+/** Open a person's Telegram profile: t.me/username, or tg://user?id= when they have no username. */
+export function openChat(user: { username: string | null; telegram_id: number }) {
+  if (user.username) {
+    const link = `https://t.me/${user.username}`;
+    const tg = webApp();
+    if (tg) tg.openTelegramLink(link);
+    else window.open(link, "_blank");
+  } else {
+    window.location.href = `tg://user?id=${user.telegram_id}`;
+  }
+}

@@ -3,17 +3,18 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import app_settings, export, pricing
+from . import app_settings, export, media, pricing
 from . import permissions as perms
+from . import reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
 from .notify import Notifier
 from .bot import open_app_keyboard
-from .timeutil import today_local
+from .timeutil import now_local, today_local
 
 
 class ShiftPayload(BaseModel):
@@ -51,7 +52,6 @@ class AdminEdit(BaseModel):
     location: str | None = None
     action: str | None = None
     penalty_amount: int | None = None
-    fact_volume: int | None = None
 
 
 class RoleBody(BaseModel):
@@ -70,8 +70,10 @@ class StateBody(BaseModel):
     idempotency_key: str
 
 
-class FactBody(BaseModel):
-    fact_volume: int
+class ReviewBody(BaseModel):
+    action: str  # approve | return | fine  (no-show: fine | excuse)
+    amount: int | None = None
+    comment: str | None = None
     idempotency_key: str
 
 
@@ -106,11 +108,6 @@ class ExportBody(BaseModel):
     date_from: str
     date_to: str
     user_id: int | None = None
-
-
-class ShortfallBody(BaseModel):
-    amount: int | None = None  # None = no fine
-    override: bool = True
 
 
 class AdminDelete(BaseModel):
@@ -204,6 +201,23 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             return None
         return {u["id"] for u in visible(actor, svc.list_users(conn))}
 
+    async def read_photo(request: Request, required: bool) -> tuple[bytes, str] | None:
+        """Raw image body (the Mini App sends a compressed JPEG); jpg/png/webp up to 10 MB."""
+        data = await request.body()
+        if not data:
+            if required:
+                raise svc.ServiceError("Прикрепите скриншот результата", 422, "photo_required")
+            return None
+        if len(data) > media.MAX_PHOTO:
+            raise svc.ServiceError("Файл больше 10 МБ", 413, "too_large")
+        ext = media.sniff(data)
+        if ext is None:
+            raise svc.ServiceError("Нужна картинка: JPG, PNG или WebP", 415, "bad_image")
+        return data, ext
+
+    def shift_out(shift: dict | None) -> dict | None:
+        return svc.serialize_shift(shift, today_local(), conn)
+
     def respond(result: svc.Result, old: dict | None = None) -> dict:
         if result.changed and result.event and result.shift:
             notifier.spawn(notifier.shift_event(result.event, result.shift["id"], old))
@@ -275,12 +289,33 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def final_cancel(shift_id: int, body: KeyOnly, user: dict = Depends(current_user)):
         return respond(svc.final_cancel_shift(conn, user, shift_id, body.idempotency_key))
 
-    @api.post("/shifts/{shift_id}/fact")
-    async def fact(shift_id: int, body: FactBody, user: dict = Depends(current_user)):
-        result = svc.set_fact(conn, user, shift_id, body.fact_volume, body.idempotency_key)
+    @api.post("/shifts/{shift_id}/report")
+    async def submit_report(shift_id: int, request: Request, fact_volume: int = Query(...),
+                            idempotency_key: str = Query(...), user: dict = Depends(current_user)):
+        if svc._seen(conn, idempotency_key):  # a retry of a report that already went through: don't upload again
+            return {"shift": shift_out(svc.get_shift(conn, shift_id)), "changed": False}
+        shift = reports.check_submittable(svc.get_shift(conn, shift_id), user, now_local())
+        reports._check_value(fact_volume)
+        data, ext = await read_photo(request, required=True)
+        file_id = await notifier.store_photo(
+            user["telegram_id"], data, ext,
+            f"📸 Ваш отчёт за {shift['shift_date'][8:10]}.{shift['shift_date'][5:7]}: {fact_volume} шт.",
+        )
+        result = reports.submit(conn, user, shift_id, fact_volume, file_id, "app", idempotency_key)
         if result.changed:
-            notifier.spawn(notifier.fact_result(result.shift))
-        return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
+            notifier.spawn(notifier.report_submitted(result.shift, result.report))
+        return {"shift": shift_out(result.shift), "changed": result.changed}
+
+    @api.get("/media/report/{report_id}")
+    async def report_photo(report_id: int, exp: int, sig: str):
+        if not media.verify(report_id, exp, sig):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        report = reports.get_report(conn, report_id)
+        found = await notifier.fetch_photo(report["photo_file_id"]) if report and report["photo_file_id"] else None
+        if found is None:
+            raise svc.ServiceError("Фото недоступно", 404, "not_found")
+        data, mime = found
+        return Response(data, media_type=mime, headers={"Cache-Control": "private, max-age=3600"})
 
     @api.post("/shifts/pre-declare-off")
     async def pre_declare(body: DateKey, user: dict = Depends(current_user)):
@@ -413,7 +448,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         for s in svc.shifts_on(conn, d):
             if only is not None and s["user_id"] not in only:
                 continue
-            item = svc.serialize_shift(s, today)
+            item = svc.serialize_shift(s, today, conn)
             item.update(user_id=s["user_id"], name=f"{s['first_name']} {s['last_name']}", username=s["username"])
             items.append(item)
         count, volume = svc.day_totals(conn, d)
@@ -448,8 +483,6 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         require(admin, "schedule", owner_id)
         if body.penalty_amount is not None:
             require(admin, "fine_direct", owner_id)
-        if body.fact_volume is not None:
-            require(admin, "review", owner_id)
         if body.action in ("approve_urgent", "reject_urgent"):
             # same path as the bot's [Разрешить]/[Запретить] buttons, incl. the push to the employee
             approve = body.action == "approve_urgent"
@@ -464,26 +497,58 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                       body.idempotency_key)
         if result.changed:
             notifier.spawn(notifier.admin_edit(admin, result.shift, body.reason))
-            if before and result.shift["fact_volume"] != before["fact_volume"]:
-                notifier.spawn(notifier.fact_result(result.shift, admin["telegram_id"]))
             if (before and result.shift["penalty_amount"] is not None
                     and result.shift["penalty_amount"] != before["penalty_amount"]):
                 notifier.spawn(notifier.penalty_assigned(result.shift, svc.full_name(admin)))
         return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
 
-    @api.get("/admin/shortfalls")
-    async def admin_shortfalls(pending: bool = True, admin: dict = Depends(admin_user)):
-        only = visible_ids(admin)
-        items = svc.shortfalls(conn, pending_only=pending)
-        return {"items": [i for i in items if only is None or i["user_id"] in only]}
+    # ------------------------------------------------------------ reports (ТЗ 3.3–3.4)
 
-    @api.post("/admin/shifts/{shift_id}/shortfall")
-    async def admin_shortfall(shift_id: int, body: ShortfallBody, admin: dict = Depends(admin_user)):
-        require(admin, "fine_direct" if body.amount else "review", shift_user(shift_id))
-        result = svc.decide_shortfall(conn, admin, shift_id, body.amount, override=body.override)
+    @api.get("/admin/reports")
+    async def admin_reports(kind: str = "review", day: str | None = None, admin: dict = Depends(staff("review"))):
+        only = visible_ids(admin)
+        items = reports.queue(conn, kind, svc.parse_date(day) if day else None)
+        items = [i for i in items if (only is None or i["user_id"] in only) and i["user_id"] != admin["id"]
+                 or perms.is_owner(admin)]
+        return {"items": items, "counts": reports.counts(conn, only)}
+
+    @api.get("/admin/reports/counts")
+    async def admin_report_counts(admin: dict = Depends(admin_user)):
+        if not perms.can(admin, "review"):
+            return {"review": 0, "no_show": 0}
+        return reports.counts(conn, visible_ids(admin))
+
+    @api.post("/admin/shifts/{shift_id}/review")
+    async def admin_review(shift_id: int, body: ReviewBody, admin: dict = Depends(staff("review"))):
+        result = reports.review(conn, admin, shift_id, body.action, body.idempotency_key, body.amount, body.comment)
         if result.changed:
-            notifier.spawn(notifier.shortfall_decided(result.shift, svc.full_name(admin), admin["telegram_id"]))
-        return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
+            notifier.spawn(notifier.report_reviewed(result.shift, result.report, admin))
+        return {"shift": shift_out(result.shift), "changed": result.changed}
+
+    @api.post("/admin/shifts/{shift_id}/no-show")
+    async def admin_no_show(shift_id: int, body: ReviewBody, admin: dict = Depends(staff("review"))):
+        result = reports.resolve_no_show(conn, admin, shift_id, body.action, body.idempotency_key, body.amount,
+                                         body.comment)
+        if result.changed:
+            notifier.spawn(notifier.no_show_resolved(result.shift, admin))
+        return {"shift": shift_out(result.shift), "changed": result.changed}
+
+    @api.post("/admin/shifts/{shift_id}/result")
+    async def admin_result(shift_id: int, request: Request, fact_volume: int = Query(...),
+                           idempotency_key: str = Query(...), comment: str | None = None,
+                           admin: dict = Depends(staff("review"))):
+        if svc._seen(conn, idempotency_key):
+            return {"shift": shift_out(svc.get_shift(conn, shift_id)), "changed": False}
+        require(admin, "review", shift_user(shift_id))
+        photo = await read_photo(request, required=False)
+        file_id = None
+        if photo:
+            file_id = await notifier.store_photo(admin["telegram_id"], photo[0], photo[1],
+                                                 "📎 Подтверждение к результату, внесённому вручную")
+        result = reports.manual_result(conn, admin, shift_id, fact_volume, idempotency_key, file_id, comment)
+        if result.changed:
+            notifier.spawn(notifier.manual_result(result.shift, result.report, admin))
+        return {"shift": shift_out(result.shift), "changed": result.changed}
 
     @api.post("/admin/shifts/{shift_id}/delete")
     async def admin_delete(shift_id: int, body: AdminDelete, admin: dict = Depends(admin_user)):

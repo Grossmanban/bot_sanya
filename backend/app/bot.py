@@ -19,10 +19,11 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
+from . import reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
-from .timeutil import today_local
+from .timeutil import now_local, today_local
 
 log = logging.getLogger(__name__)
 
@@ -38,12 +39,23 @@ class PenaltyInput(StatesGroup):
     amount = State()
 
 
-class FactInput(StatesGroup):
-    amount = State()
+class ReportInput(StatesGroup):
+    volume = State()
+    photo = State()
 
 
-class ShortfallInput(StatesGroup):
+class DecisionInput(StatesGroup):
     amount = State()
+    reason = State()
+
+
+# quick reasons offered as buttons when a decision needs a comment
+REASONS = {
+    "return": [],
+    "fine": ["Не выполнена норма", "Скриншот не подтверждает результат"],
+    "ns_fine": ["Не сдан отчёт о смене", "Не вышел на смену"],
+    "ns_excuse": ["Уважительная причина", "Смена не состоялась"],
+}
 
 
 def open_app_keyboard() -> InlineKeyboardMarkup | None:
@@ -260,90 +272,178 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         _, text = await apply_penalty(message.from_user.id, message.from_user.full_name, data["shift_id"], int(raw))
         await message.answer(text)
 
-    # ------------------------------------------------------------ fact after the shift
+    # ------------------------------------------------------------ reports: fact + screenshot (ТЗ 3.2)
 
-    async def save_fact(tg_id: int, shift_id: int, value: int) -> str:
+    async def start_report(tg_id: int, shift_id: int, state: FSMContext, volume: int | None = None) -> str | None:
+        """Begin the report dialog; returns an error text if the report can't be submitted now."""
         user = svc.get_user_by_tg(conn, tg_id)
-        if user is None or user["status"] != "approved":
+        if user is None or user["status"] != "approved" or user["account_state"] == "blocked":
             return "Нет доступа"
         try:
-            result = svc.set_fact(conn, user, shift_id, value, svc.new_key())
+            shift = reports.check_submittable(svc.get_shift(conn, shift_id), user, now_local())
         except svc.ServiceError as exc:
             return exc.message
-        if result.changed:
-            await notifier.fact_result(result.shift)
-        return f"Записал: {value} шт. Спасибо!"
+        await state.clear()
+        await state.update_data(shift_id=shift_id)
+        if volume is None:
+            await state.set_state(ReportInput.volume)
+            await notifier.send(tg_id, f"Сколько штук сделал за смену {notify.shift_place(shift)}? Напиши число.",
+                                InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                                    text=f"✅ {shift['volume']} шт., как план", callback_data=f"repv:{shift_id}:{shift['volume']}")]]))
+        else:
+            await state.update_data(volume=volume)
+            await state.set_state(ReportInput.photo)
+            await notifier.send(tg_id, f"Факт: {volume} шт. Теперь пришли скриншот результата одним фото.")
+        return None
 
-    @router.callback_query(F.data.startswith("fact:"))
-    async def fact_quick(call: CallbackQuery):
+    @router.callback_query(F.data.startswith("rep:"))
+    async def report_begin(call: CallbackQuery, state: FSMContext):
+        error = await start_report(call.from_user.id, int(call.data.split(":")[1]), state)
+        await call.answer(error or "", show_alert=bool(error))
+
+    @router.callback_query(F.data.startswith("repv:") | F.data.startswith("fact:"))
+    async def report_quick_volume(call: CallbackQuery, state: FSMContext):
+        # fact:… are buttons from messages sent before reports needed a screenshot
         _, shift_id, value = call.data.split(":")
-        text = await save_fact(call.from_user.id, int(shift_id), int(value))
-        if text.startswith("Записал"):
-            await call.message.edit_text(f"{call.message.html_text}\n\n<b>✅ {escape(text)}</b>", parse_mode="HTML")
-        await call.answer(text)
+        error = await start_report(call.from_user.id, int(shift_id), state, int(value))
+        await call.answer(error or "", show_alert=bool(error))
 
     @router.callback_query(F.data.startswith("factc:"))
-    async def fact_custom_ask(call: CallbackQuery, state: FSMContext):
-        await state.set_state(FactInput.amount)
-        await state.update_data(shift_id=int(call.data.split(":")[1]))
-        await call.message.answer("Сколько штук сделал? Напиши число.")
-        await call.answer()
+    async def report_legacy_custom(call: CallbackQuery, state: FSMContext):
+        error = await start_report(call.from_user.id, int(call.data.split(":")[1]), state)
+        await call.answer(error or "", show_alert=bool(error))
 
-    @router.message(StateFilter(FactInput.amount), F.text)
-    async def fact_custom(message: Message, state: FSMContext):
+    @router.message(StateFilter(ReportInput.volume), F.text)
+    async def report_volume(message: Message, state: FSMContext):
         raw = message.text.strip().replace(" ", "")
-        if not raw.isdigit():
+        if not raw.isdigit() or int(raw) > svc.MAX_VOLUME:
             await message.answer("Нужно целое число, например 23.")
             return
+        await state.update_data(volume=int(raw))
+        await state.set_state(ReportInput.photo)
+        await message.answer("Теперь пришли скриншот результата одним фото.")
+
+    @router.message(StateFilter(ReportInput.photo), F.photo)
+    async def report_photo(message: Message, state: FSMContext):
         data = await state.get_data()
-        await state.clear()
-        await message.answer(await save_fact(message.from_user.id, data["shift_id"], int(raw)))
-
-    # ------------------------------------------------------------ shortfall decisions
-
-    async def decide_shortfall(tg, admin_name: str, shift_id: int, amount: int | None) -> tuple[bool, str]:
-        admin = allowed(tg.id, "fine_direct" if amount else "review", shift_owner(shift_id))
-        if admin is None:
-            return False, "Недостаточно прав"
+        user = svc.get_user_by_tg(conn, message.from_user.id)
         try:
-            result = svc.decide_shortfall(conn, admin, shift_id, amount)
+            result = reports.submit(conn, user, data["shift_id"], data["volume"], message.photo[-1].file_id, "bot",
+                                    svc.new_key())
+        except svc.ServiceError as exc:
+            await state.clear()
+            await message.answer(exc.message)
+            return
+        await state.clear()
+        await notifier.report_submitted(result.shift, result.report)
+
+    @router.message(StateFilter(ReportInput.photo))
+    async def report_photo_missing(message: Message):
+        await message.answer("Нужен скриншот как фото (не файлом). Нажми 📎 → Фото и отправь одно изображение.")
+
+    # ------------------------------------------------------------ reports: review and no-shows (ТЗ 3.3–3.4)
+
+    async def mark_done(call: CallbackQuery, text: str) -> None:
+        line = f"\n\n<b>{escape(text)}</b> — {escape(call.from_user.full_name)}"
+        try:
+            if call.message.photo:
+                await call.message.edit_caption(caption=(call.message.html_text or "") + line, parse_mode="HTML")
+            else:
+                await call.message.edit_text(call.message.html_text + line, parse_mode="HTML")
+        except Exception:
+            log.debug("could not mark decision on the message", exc_info=True)
+
+    async def decide(tg_id: int, kind: str, shift_id: int, amount: int | None = None,
+                     comment: str | None = None) -> tuple[bool, str]:
+        actor = svc.get_user_by_tg(conn, tg_id)
+        if actor is None:
+            return False, "Нет доступа"
+        try:
+            if kind in ("approve", "return", "fine"):
+                result = reports.review(conn, actor, shift_id, kind, svc.new_key(), amount, comment)
+                if result.changed:
+                    await notifier.report_reviewed(result.shift, result.report, actor)
+            else:
+                result = reports.resolve_no_show(conn, actor, shift_id, kind.removeprefix("ns_"), svc.new_key(),
+                                                 amount, comment)
+                if result.changed:
+                    await notifier.no_show_resolved(result.shift, actor)
         except svc.ServiceError as exc:
             return False, exc.message
         if not result.changed:
-            done = result.shift
-            already = f"штраф {done['shortfall_penalty']} ₽" if done["shortfall_status"] == "fined" else "без штрафа"
-            return False, f"Уже решено: {already}"
-        await notifier.shortfall_decided(result.shift, admin_name, tg.id)
-        return True, f"Штраф {amount} ₽ назначен" if amount else "Решено без штрафа"
+            return False, "Уже решено"
+        return True, {"approve": "✅ Принят", "return": "🔄 Возвращён на исправление", "fine": f"⚠️ Штраф {amount} ₽",
+                      "ns_fine": f"💸 Штраф {amount} ₽", "ns_excuse": "🤝 Без штрафа"}[kind]
 
-    @router.callback_query(F.data.startswith("sf:"))
-    async def shortfall_pick(call: CallbackQuery, state: FSMContext):
-        _, shift_id, amount = call.data.split(":")
-        need = "review" if amount == "0" else "fine_direct"
-        if allowed(call.from_user.id, need, shift_owner(int(shift_id))) is None:
-            return await deny(call)
-        if amount == "custom":
-            await state.set_state(ShortfallInput.amount)
-            await state.update_data(shift_id=int(shift_id))
-            await call.message.answer("Введите сумму штрафа за недобор в рублях (целое число):")
-            await call.answer()
+    async def ask_reason(message: Message, state: FSMContext, kind: str) -> None:
+        presets = REASONS[kind]
+        await state.set_state(DecisionInput.reason)
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=r, callback_data=f"rsn:{i}")]
+                                                       for i, r in enumerate(presets)]) if presets else None
+        prompt = "Что нужно исправить? Напиши комментарий." if kind == "return" else "Причина? Выбери или напиши своими словами."
+        await message.answer(prompt, reply_markup=markup)
+
+    @router.callback_query(F.data.startswith("rv:") | F.data.startswith("ns:"))
+    async def decision_pick(call: CallbackQuery, state: FSMContext):
+        parts = call.data.split(":")
+        family, action, shift_id = parts[0], parts[1], int(parts[2])
+        kind = {("rv", "a"): "approve", ("rv", "r"): "return", ("rv", "f"): "fine",
+                ("ns", "f"): "ns_fine", ("ns", "x"): "ns_excuse"}[(family, action)]
+        if kind == "approve":
+            ok, text = await decide(call.from_user.id, kind, shift_id)
+            if ok:
+                await mark_done(call, text)
+            await call.answer(text, show_alert=not ok)
             return
-        ok, text = await decide_shortfall(call.from_user, call.from_user.full_name, int(shift_id), int(amount) or None)
-        if ok:
-            await call.message.edit_text(f"{call.message.html_text}\n\n<b>{escape(text)}</b> — {escape(call.from_user.full_name)}",
-                                         parse_mode="HTML")
-        await call.answer(text, show_alert=not ok)
+        await state.clear()
+        await state.update_data(kind=kind, shift_id=shift_id, origin_chat=call.message.chat.id,
+                                origin_msg=call.message.message_id)
+        if kind in ("fine", "ns_fine"):
+            if parts[3] == "c":
+                await state.set_state(DecisionInput.amount)
+                await call.message.answer("Сумма штрафа в рублях (целое число):")
+                await call.answer()
+                return
+            await state.update_data(amount=int(parts[3]))
+        await ask_reason(call.message, state, kind)
+        await call.answer()
 
-    @router.message(StateFilter(ShortfallInput.amount), F.text)
-    async def shortfall_custom(message: Message, state: FSMContext):
+    @router.message(StateFilter(DecisionInput.amount), F.text)
+    async def decision_amount(message: Message, state: FSMContext):
         raw = message.text.strip().replace(" ", "").replace("₽", "")
         if not raw.isdigit() or not 0 < int(raw) <= svc.MAX_PENALTY:
             await message.answer("Нужно целое число больше нуля, например 700.")
             return
+        await state.update_data(amount=int(raw))
+        await ask_reason(message, state, (await state.get_data())["kind"])
+
+    async def finish_decision(tg_id: int, state: FSMContext, comment: str) -> str:
         data = await state.get_data()
         await state.clear()
-        _, text = await decide_shortfall(message.from_user, message.from_user.full_name, data["shift_id"], int(raw))
-        await message.answer(text)
+        ok, text = await decide(tg_id, data["kind"], data["shift_id"], data.get("amount"), comment)
+        if ok and notifier.bot is not None:
+            # mark the original card so other reviewers' copies are not the only trace
+            try:
+                await notifier.bot.edit_message_reply_markup(chat_id=data["origin_chat"], message_id=data["origin_msg"])
+            except Exception:
+                pass
+        return text if ok else f"Не получилось: {text}"
+
+    @router.callback_query(StateFilter(DecisionInput.reason), F.data.startswith("rsn:"))
+    async def decision_reason_preset(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        reason = REASONS[data["kind"]][int(call.data.split(":")[1])]
+        text = await finish_decision(call.from_user.id, state, reason)
+        await call.message.edit_text(f"{escape(reason)}\n\n<b>{escape(text)}</b>", parse_mode="HTML")
+        await call.answer()
+
+    @router.message(StateFilter(DecisionInput.reason), F.text)
+    async def decision_reason_text(message: Message, state: FSMContext):
+        await message.answer(await finish_decision(message.from_user.id, state, message.text.strip()))
+
+    @router.callback_query(F.data.startswith("sf:") | F.data.startswith("pen_old:"))
+    async def legacy_shortfall(call: CallbackQuery):
+        await call.answer("Эта кнопка устарела — решение по отчётам теперь в приложении, раздел «Отчёты».", show_alert=True)
 
     # ------------------------------------------------------------ admin: raspred
 

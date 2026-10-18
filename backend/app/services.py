@@ -28,7 +28,6 @@ MAX_VOLUME = 10_000
 MAX_LOCATION = 100
 MAX_PENALTY = 1_000_000
 BOOKING_WEEKS_AHEAD = 1
-FACT_DAYS_BACK = 3
 BUSY = ("active", "restored", "awaiting_approval")
 # soft-deleted rows: kept as history, invisible everywhere else
 DEAD = ("withdrawn", "removed")
@@ -442,7 +441,8 @@ def shifts_on(conn, day: date) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def serialize_shift(shift: dict | None, today: date) -> dict | None:
+def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | None = None) -> dict | None:
+    """conn adds the report block (state, deadline, last attempt) for cards that show it."""
     if shift is None:
         return None
     day = date.fromisoformat(shift["shift_date"])
@@ -467,8 +467,7 @@ def serialize_shift(shift: dict | None, today: date) -> dict | None:
         "can_restore": not past and status == "cancelled" and not shift["admin_locked"] and not shift["restored_at"],
         "can_clear_off": not past and status == "pre_declared_off",
         "fact_volume": shift.get("fact_volume"),
-        "can_set_fact": status in ACTIVE and today - timedelta(days=FACT_DAYS_BACK) <= day <= today
-        and not shift.get("shortfall_status"),
+        "report_state": shift.get("report_state"),
         "shortfall": shortfall(shift),
         "shortfall_status": shift.get("shortfall_status"),
         "shortfall_penalty": shift.get("shortfall_penalty"),
@@ -479,6 +478,10 @@ def serialize_shift(shift: dict | None, today: date) -> dict | None:
         )
     if shift.get("fact_volume") is not None:
         data["fact_pay"] = pricing.expected_pay(shift["fact_volume"])
+    if conn is not None:
+        from . import reports  # reports builds on this module
+
+        data["report"] = reports.view(conn, shift)
     return data
 
 
@@ -533,7 +536,7 @@ def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
                 "weekday": d.weekday(),
                 "is_past": d < today,
                 "is_today": d == today,
-                "my_shift": serialize_shift(mine.get(iso), today),
+                "my_shift": serialize_shift(mine.get(iso), today, conn),
                 "colleagues": colleagues,
                 "colleagues_off": off,
                 "points_load": load.get(iso, {}),
@@ -562,6 +565,17 @@ def history(conn, user: dict, weeks_back: int, today: date | None = None) -> lis
     return weeks
 
 
+def report_fine_reason(s: dict) -> str:
+    """Why a report-related fine (shortfall_* columns) was given."""
+    if s.get("report_state") == "no_show":
+        head = "Неявка: отчёт не сдан"
+    elif s.get("fact_volume") is not None and s.get("volume") and s["fact_volume"] < s["volume"]:
+        head = f"Не выполнена норма: план {s['volume']}, факт {s['fact_volume']} шт."
+    else:
+        head = "Отчёт отклонён"
+    return f"{head}. {s['report_note']}" if s.get("report_note") else head
+
+
 def user_penalties(conn, user_id: int) -> list[dict]:
     out = []
     for r in conn.execute(
@@ -575,8 +589,7 @@ def user_penalties(conn, user_id: int) -> list[dict]:
                         "penalty_amount": s["penalty_amount"], "reason": "Окончательная отмена смены"})
         if s["shortfall_status"] == "fined":
             out.append({"id": s["id"], "kind": "shortfall", "shift_date": s["shift_date"],
-                        "penalty_amount": s["shortfall_penalty"],
-                        "reason": f"Не выполнена норма: план {s['volume']}, факт {s['fact_volume']} шт."})
+                        "penalty_amount": s["shortfall_penalty"], "reason": report_fine_reason(s)})
     return out
 
 
@@ -837,16 +850,6 @@ def admin_edit_shift(conn, admin: dict, shift_id: int, changes: dict, key: str) 
             updates.update(status="active", admin_locked=0)
         elif action not in (None, ""):
             raise ServiceError("Неизвестное действие", 422, "bad_action")
-        fact = changes.get("fact_volume")
-        if fact is not None:
-            if isinstance(fact, bool) or not isinstance(fact, int) or not 0 <= fact <= MAX_VOLUME:
-                raise ServiceError("Факт — целое число от 0", 422, "bad_fact")
-            if fact != shift["fact_volume"]:
-                updates.update(fact_volume=fact, fact_set_at=now_iso(), fact_set_by=admin["telegram_id"])
-                if shift["volume"] and fact >= shift["volume"] and shift["shortfall_status"]:
-                    # plan met after the correction: the shortfall decision no longer applies
-                    updates.update(shortfall_status=None, shortfall_penalty=None, shortfall_decided_by=None,
-                                   shortfall_decided_at=None)
         penalty = changes.get("penalty_amount")
         if penalty is not None:
             if isinstance(penalty, bool) or not isinstance(penalty, int) or not 0 <= penalty <= MAX_PENALTY:
@@ -1022,7 +1025,8 @@ def penalty_log(conn, user_id: int | None, date_from: date | None, date_to: date
     """Fines for final cancellations and for missed plans, plus shortfalls still waiting for a decision."""
     sql = f"""SELECT s.*, u.first_name, u.last_name, u.username FROM shifts s JOIN users u ON u.id = s.user_id
               WHERE (s.status = 'finally_cancelled'
-                     OR (s.status IN {ACTIVE} AND s.fact_volume IS NOT NULL AND s.fact_volume < s.volume))"""
+                     OR (s.status IN {ACTIVE} AND (s.shortfall_status IS NOT NULL
+                                                   OR s.report_state IN ('pending_review','no_show'))))"""
     params: list = []
     if user_id:
         sql += " AND s.user_id = ?"
@@ -1044,58 +1048,13 @@ def penalty_log(conn, user_id: int | None, date_from: date | None, date_to: date
             out.append({**base, "kind": "final_cancel", "reason": "Окончательная отмена смены",
                         "amount": s["penalty_amount"], "status": "fined" if s["penalty_amount"] is not None else None,
                         "set_by": admins.get(s["penalty_set_by"]) if s["penalty_set_by"] else None, "set_at": s["penalty_set_at"]})
-        elif s["shortfall_status"] != "waived":
-            out.append({**base, "kind": "shortfall",
-                        "reason": f"Не по норме: план {s['volume']}, факт {s['fact_volume']} шт. (−{shortfall(s)})",
+        elif s["shortfall_status"] != "waived" and (s["shortfall_status"] or s["report_state"] == "no_show" or shortfall(s)):
+            out.append({**base, "kind": "no_show" if s["report_state"] == "no_show" else "shortfall",
+                        "reason": report_fine_reason(s),
                         "amount": s["shortfall_penalty"], "status": s["shortfall_status"],
                         "set_by": admins.get(s["shortfall_decided_by"]) if s["shortfall_decided_by"] else None,
                         "set_at": s["shortfall_decided_at"]})
     return out
-
-
-def shortfalls(conn, pending_only: bool = True, limit: int = 100) -> list[dict]:
-    sql = f"""SELECT s.*, u.first_name, u.last_name, u.username, u.telegram_id FROM shifts s JOIN users u ON u.id = s.user_id
-              WHERE s.status IN {ACTIVE} AND s.fact_volume IS NOT NULL AND s.fact_volume < s.volume"""
-    if pending_only:
-        sql += " AND s.shortfall_status IS NULL"
-    sql += " ORDER BY s.shift_date DESC, s.start_time LIMIT ?"
-    out = []
-    for r in conn.execute(sql, (limit,)):
-        s = dict(r)
-        out.append({"shift_id": s["id"], "date": s["shift_date"], "user_id": s["user_id"], "name": full_name(s),
-                    "username": s["username"], "location": s["location"], "start_time": s["start_time"],
-                    "end_time": s["end_time"], "volume": s["volume"], "fact_volume": s["fact_volume"],
-                    "shortfall": shortfall(s), "percent": shortfall_percent(s), "status": s["shortfall_status"],
-                    "penalty": s["shortfall_penalty"]})
-    return out
-
-
-def decide_shortfall(conn, admin: dict, shift_id: int, amount: int | None, override: bool = False) -> Result:
-    """amount=None waives the fine; otherwise a fine in rubles. First decision wins unless override."""
-    if amount is not None and (isinstance(amount, bool) or not isinstance(amount, int) or not 0 < amount <= MAX_PENALTY):
-        raise ServiceError("Некорректная сумма штрафа", 422, "bad_penalty")
-    with transaction(conn):
-        shift = get_shift(conn, shift_id)
-        if shift is None:
-            raise ServiceError("Смена не найдена", 404, "not_found")
-        if not shortfall(shift):
-            raise ServiceError("По этой смене норма выполнена", 409, "no_shortfall")
-        if shift["shortfall_status"] and not override:
-            return Result(shift, False)
-        status = "fined" if amount is not None else "waived"
-        if shift["shortfall_status"] == status and shift["shortfall_penalty"] == amount:
-            return Result(shift, False)
-        conn.execute(
-            """UPDATE shifts SET shortfall_status = ?, shortfall_penalty = ?, shortfall_decided_by = ?,
-                                 shortfall_decided_at = ?, updated_at = ? WHERE id = ?""",
-            (status, amount, admin["telegram_id"], now_iso(), now_iso(), shift_id),
-        )
-        log_event(conn, user_id=shift["user_id"], actor_id=admin["telegram_id"],
-                  event_type="SHORTFALL_FINED" if amount is not None else "SHORTFALL_WAIVED", key=new_key(),
-                  shift_id=shift_id, old={"shortfall_status": shift["shortfall_status"], "penalty": shift["shortfall_penalty"]},
-                  new={"shortfall_status": status, "penalty": amount},
-                  description=f"план {shift['volume']}, факт {shift['fact_volume']}")
-    return Result(get_shift(conn, shift_id), True, "SHORTFALL_FINED" if amount is not None else "SHORTFALL_WAIVED")
 
 
 # ---------------------------------------------------------------- points (справочник точек)
@@ -1177,35 +1136,6 @@ def check_point(conn, day: date, location: str, exclude: int | None = None) -> s
 
 
 # ---------------------------------------------------------------- fact after the shift
-
-
-def set_fact(conn, user: dict, shift_id: int, value: int, key: str, today: date | None = None) -> Result:
-    today = today or today_local()
-    _check_key(key)
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_VOLUME:
-        raise ServiceError("Факт — целое число от 0", 422, "bad_fact")
-    with transaction(conn):
-        if _seen(conn, key):
-            return Result(get_shift(conn, shift_id), False)
-        shift = get_shift(conn, shift_id)
-        if shift is None or shift["user_id"] != user["id"]:
-            raise ServiceError("Смена не найдена", 404, "not_found")
-        day = date.fromisoformat(shift["shift_date"])
-        if shift["status"] not in ACTIVE:
-            raise ServiceError("Факт вносится только по состоявшейся смене", 409, "bad_status")
-        if day > today:
-            raise ServiceError("Факт можно внести в день смены или позже", 409, "too_early")
-        if day < today - timedelta(days=FACT_DAYS_BACK):
-            raise ServiceError("Срок внесения факта прошёл, обратитесь к администратору", 409, "too_late")
-        if shift["shortfall_status"]:
-            raise ServiceError("Администратор уже принял решение по этой смене, факт не меняется", 409, "fact_locked")
-        if shift["fact_volume"] == value:
-            return Result(shift, False)
-        conn.execute("UPDATE shifts SET fact_volume = ?, fact_set_at = ?, fact_set_by = ?, updated_at = ? WHERE id = ?",
-                     (value, now_iso(), user["telegram_id"], now_iso(), shift_id))
-        log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="FACT_SET", key=key,
-                  shift_id=shift_id, old={"fact_volume": shift["fact_volume"]}, new={"fact_volume": value})
-    return Result(get_shift(conn, shift_id), True, "FACT_SET")
 
 
 # ---------------------------------------------------------------- notifications preferences and broadcasts

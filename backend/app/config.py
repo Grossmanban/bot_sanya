@@ -34,6 +34,8 @@ class Settings:
     # RUN_BOT=0 lets you run the API and Mini App locally without Telegram polling.
     run_bot: bool = field(default_factory=lambda: os.environ.get("RUN_BOT", "1") != "0")
     frontend_dist: str = field(default_factory=lambda: os.environ.get("FRONTEND_DIST", str(ROOT / "frontend" / "out")))
+    # screenshots live in Telegram (file_id); this folder is only used when the bot is not running (local dev)
+    media_dir: str = field(default_factory=lambda: os.environ.get("MEDIA_DIR", str(ROOT / "data" / "media")))
     init_data_max_age: int = 24 * 3600
 
     @property
