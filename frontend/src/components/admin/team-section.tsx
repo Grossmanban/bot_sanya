@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, ChevronRight, Copy, LoaderCircle, Send, X } from "lucide-react";
+import { Ban, Check, ChevronRight, Copy, LoaderCircle, MessageCircle, Pause, Play, Send, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type User } from "@/lib/api";
+import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
 import { dayMonth } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { haptic, webApp } from "@/lib/telegram";
@@ -23,17 +23,20 @@ import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
 
-export function TeamSection({ me }: { me: User }) {
+export function TeamSection({ me, caps }: { me: User; caps: Capability[] }) {
   const { data, reload } = useLoad(() => api.admin.team(), []);
   const [selected, setSelected] = useState<User | null>(null);
   const { busy, run } = useAction();
 
   if (!data) return <Skeleton className="h-80 rounded-3xl" />;
 
+  const live = (u: User) => u.status === "approved" && u.account_state !== "blocked";
   const pending = data.items.filter((u) => u.status === "pending");
-  const admins = data.items.filter((u) => u.status === "approved" && u.role === "admin");
-  const staff = data.items.filter((u) => u.status === "approved" && u.role === "employee");
+  const leads = data.items.filter((u) => live(u) && u.role !== "employee");
+  const staff = data.items.filter((u) => live(u) && u.role === "employee");
+  const blocked = data.items.filter((u) => u.status === "approved" && u.account_state === "blocked");
   const closed = data.items.filter((u) => u.status === "rejected");
+  const canDecide = caps.includes("registrations");
 
   async function decide(user: User, allow: boolean) {
     try {
@@ -46,9 +49,9 @@ export function TeamSection({ me }: { me: User }) {
 
   return (
     <div className="space-y-4">
-      <Invite botUsername={data.bot_username} />
+      {canDecide && <Invite botUsername={data.bot_username} />}
 
-      {pending.length > 0 && (
+      {canDecide && pending.length > 0 && (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">
             Заявки <span className="text-muted-foreground">{pending.length}</span>
@@ -79,13 +82,16 @@ export function TeamSection({ me }: { me: User }) {
         </section>
       )}
 
-      <Group title="Администраторы" users={admins} me={me} onPick={setSelected} />
-      <Group title="Сотрудники" users={staff} me={me} onPick={setSelected} empty="Пока никого. Отправьте приглашение выше." />
-      {closed.length > 0 && <Group title="Доступ закрыт" users={closed} me={me} onPick={setSelected} muted />}
+      {leads.length > 0 && <Group title="Руководство" users={leads} me={me} onPick={setSelected} />}
+      <Group title="Сотрудники" users={staff} me={me} onPick={setSelected}
+             empty={canDecide ? "Пока никого. Отправьте приглашение выше." : "В вашей сети пока никого."} />
+      {blocked.length > 0 && <Group title="Заблокированы" users={blocked} me={me} onPick={setSelected} muted />}
+      {closed.length > 0 && <Group title="Заявка отклонена" users={closed} me={me} onPick={setSelected} muted />}
 
       <MemberSheet
         user={selected}
         me={me}
+        caps={caps}
         onClose={() => setSelected(null)}
         onChanged={async () => {
           setSelected(null);
@@ -183,10 +189,14 @@ function Group({
                     {u.id === me.id && <span className="font-normal text-muted-foreground"> (вы)</span>}
                   </span>
                   <span className="block text-sm text-muted-foreground">
-                    {u.is_owner ? "Владелец" : u.username ? `@${u.username}` : `ID ${u.telegram_id}`}
+                    {u.role !== "employee" ? ROLE_TITLES[u.role] : u.username ? `@${u.username}` : `ID ${u.telegram_id}`}
                   </span>
                 </span>
-                {u.status === "approved" && (
+                {u.account_state === "paused" ? (
+                  <span className="flex items-center gap-1 rounded-full bg-wait-soft px-2 py-0.5 text-xs font-semibold text-wait">
+                    <Pause className="size-3" /> пауза
+                  </span>
+                ) : u.status === "approved" && u.account_state === "active" && (
                   <span className={cn("flex items-center gap-1.5 text-xs", u.work_status === "working" ? "text-go" : "text-muted-foreground")}>
                     <span className={cn("size-1.5 rounded-full", u.work_status === "working" ? "bg-go" : "bg-idle")} />
                     {u.work_status === "working" ? "работает" : "не работает"}
@@ -202,30 +212,54 @@ function Group({
   );
 }
 
+const ROLE_OPTIONS: Exclude<Role, "owner">[] = ["employee", "trainer", "admin"];
+
+function openProfile(user: User) {
+  const tg = webApp();
+  if (user.username) {
+    const link = `https://t.me/${user.username}`;
+    if (tg) tg.openTelegramLink(link);
+    else window.open(link, "_blank");
+  } else {
+    // without a username only the tg:// deep link can open the chat
+    window.location.href = `tg://user?id=${user.telegram_id}`;
+  }
+}
+
 function MemberSheet({
   user,
   me,
+  caps,
   onClose,
   onChanged,
 }: {
   user: User | null;
   me: User;
+  caps: Capability[];
   onClose: () => void;
   onChanged: () => void;
 }) {
   const wide = useWide();
   const { busy, run } = useAction();
-  const [confirmClose, setConfirmClose] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [blocking, setBlocking] = useState(false);
+  const [reason, setReason] = useState("");
 
   const isSelf = user?.id === me.id;
-  const owner = !!me.is_owner;
   const approved = user?.status === "approved";
-  const canRole = !!user && approved && owner && !user.is_owner;
-  const canClose = !!user && approved && !isSelf && !user.is_owner && (user.role === "employee" || owner);
+  const state = user?.account_state ?? "active";
+  const touchable = !!user && approved && !isSelf && !user.is_owner;
+  const canRole = touchable && caps.includes("roles") && state !== "blocked";
+  const canPause = touchable && caps.includes("pause") && state !== "blocked";
+  const canBlock = touchable && caps.includes("block");
+  const canDecide = caps.includes("registrations");
 
   async function act(name: string, fn: (key: string) => Promise<unknown>, success: string) {
     try {
       await run(name, fn, success);
+      setPausing(false);
+      setBlocking(false);
+      setReason("");
       onChanged();
     } catch {
       /* toast shown */
@@ -235,18 +269,25 @@ function MemberSheet({
   const statusText = !user
     ? ""
     : user.status === "pending"
-      ? "Ждёт решения по заявке"
+      ? "Ждёт решения"
       : user.status === "rejected"
-        ? "Доступ закрыт"
-        : user.is_owner
-          ? "Владелец: всегда администратор"
-          : user.role === "admin"
-            ? "Администратор"
-            : "Сотрудник";
+        ? "Заявка отклонена"
+        : ROLE_TITLES[user.role];
 
   return (
     <>
-      <Drawer open={!!user} onOpenChange={(o) => !o && onClose()} direction={wide ? "right" : "bottom"} repositionInputs={false}>
+      <Drawer
+        open={!!user}
+        onOpenChange={(o) => {
+          if (!o) {
+            setPausing(false);
+            setReason("");
+            onClose();
+          }
+        }}
+        direction={wide ? "right" : "bottom"}
+        repositionInputs={false}
+      >
         <DrawerContent
           className={cn(
             "border-0 bg-card",
@@ -256,7 +297,7 @@ function MemberSheet({
           {user && (
             <div className={cn("overflow-y-auto px-5", wide ? "h-full py-8" : "pb-safe pt-2")}>
               <div className="flex items-start gap-4">
-                <Avatar user={user} className="size-16 rounded-2xl text-xl" />
+                <Avatar user={user} className={cn("size-16 rounded-2xl text-xl", state === "blocked" && "bg-muted text-muted-foreground")} />
                 <div className="min-w-0 flex-1">
                   <DrawerTitle className="font-display text-xl font-semibold">{user.first_name} {user.last_name}</DrawerTitle>
                   <DrawerDescription>
@@ -269,6 +310,18 @@ function MemberSheet({
                   </DrawerClose>
                 )}
               </div>
+
+              {state !== "active" && (
+                <div className={cn("mt-5 flex items-start gap-3 rounded-2xl p-4",
+                  state === "paused" ? "bg-wait-soft text-wait" : "bg-cancel-soft text-cancel")}>
+                  {state === "paused" ? <Pause className="mt-0.5 size-4 shrink-0" /> : <Ban className="mt-0.5 size-4 shrink-0" />}
+                  <div className="text-sm">
+                    <p className="font-semibold">{state === "paused" ? "На паузе" : "Заблокирован"}</p>
+                    {user.state_reason && <p className="mt-0.5 text-foreground/80">{user.state_reason}</p>}
+                  </div>
+                </div>
+              )}
+
               <dl className="mt-6 grid grid-cols-2 gap-4 text-[15px]">
                 <div>
                   <dt className="text-xs text-muted-foreground">Роль</dt>
@@ -282,8 +335,44 @@ function MemberSheet({
                 )}
               </dl>
 
+              {!isSelf && (
+                <Button variant="secondary" className="press mt-5 h-12 w-full rounded-2xl text-[15px] font-semibold"
+                        onClick={() => openProfile(user)}>
+                  <MessageCircle /> Открыть в Telegram
+                </Button>
+              )}
+
+              {canRole && (
+                <div className="mt-6">
+                  <p className="mb-2 text-xs text-muted-foreground">Права</p>
+                  <div className="grid grid-cols-3 gap-1 rounded-2xl bg-muted p-1">
+                    {ROLE_OPTIONS.map((r) => (
+                      <button
+                        key={r}
+                        disabled={!!busy}
+                        onClick={() => r !== user.role && act(`role-${r}`, (k) => api.admin.setRole(user.id, r, k), `Роль: ${ROLE_TITLES[r]}`)}
+                        className={cn(
+                          "press flex h-11 items-center justify-center gap-1.5 rounded-xl text-sm font-semibold transition-colors",
+                          user.role === r ? "bg-card text-foreground shadow-lift" : "text-muted-foreground",
+                        )}
+                      >
+                        {busy === `role-${r}` && <LoaderCircle className="size-4 animate-spin" />}
+                        {ROLE_TITLES[r]}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    {user.role === "trainer"
+                      ? "Тренер видит только свою сеть: смены, отчёты, паузы. Штрафы — через администратора."
+                      : user.role === "admin"
+                        ? "Администратор работает со всеми: смены, отчёты, штрафы, рассылки. Без денег и блокировок."
+                        : "Сотрудник видит свой график, отчёты и штрафы."}
+                  </p>
+                </div>
+              )}
+
               <div className="mt-6 space-y-2.5">
-                {user.status === "pending" && (
+                {user.status === "pending" && canDecide && (
                   <>
                     <Button className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={!!busy}
                             onClick={() => act("allow", (k) => api.admin.setAccess(user.id, true, k), "Заявка принята")}>
@@ -295,35 +384,58 @@ function MemberSheet({
                     </Button>
                   </>
                 )}
-                {canRole && (
-                  <Button
-                    className="press h-14 w-full rounded-2xl text-base font-semibold"
-                    variant={user.role === "admin" ? "secondary" : "default"}
-                    disabled={!!busy}
-                    onClick={() =>
-                      user.role === "admin"
-                        ? act("role", (k) => api.admin.setRole(user.id, "employee", k), "Права администратора сняты")
-                        : act("role", (k) => api.admin.setRole(user.id, "admin", k), "Назначен администратором")
-                    }
-                  >
-                    {busy === "role" && <LoaderCircle className="animate-spin" />}
-                    {user.role === "admin" ? "Снять права администратора" : "Сделать администратором"}
-                  </Button>
-                )}
-                {user.status === "rejected" && (
+                {user.status === "rejected" && canDecide && (
                   <Button className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={!!busy}
                           onClick={() => act("reopen", (k) => api.admin.setAccess(user.id, true, k), "Доступ открыт")}>
                     {busy === "reopen" && <LoaderCircle className="animate-spin" />} Вернуть доступ
                   </Button>
                 )}
-                {canClose && (
-                  <Button variant="ghost" className="h-12 w-full rounded-2xl text-[15px] font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
-                          disabled={!!busy} onClick={() => setConfirmClose(true)}>
-                    Закрыть доступ
+
+                {canPause && state === "paused" && (
+                  <Button className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={!!busy}
+                          onClick={() => act("resume", (k) => api.admin.setState(user.id, "active", null, k), "Пауза снята")}>
+                    {busy === "resume" ? <LoaderCircle className="animate-spin" /> : <Play />} Снять паузу
                   </Button>
                 )}
-                {approved && !owner && !user.is_owner && user.role === "employee" && (
-                  <p className="pt-1 text-center text-sm text-muted-foreground">Назначать администраторов может только владелец.</p>
+                {canPause && state === "active" && !pausing && (
+                  <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
+                          onClick={() => setPausing(true)}>
+                    <Pause /> Поставить на паузу
+                  </Button>
+                )}
+                {pausing && (
+                  <div className="row-in space-y-2.5 rounded-2xl bg-wait-soft p-4">
+                    <p className="text-sm font-semibold text-wait">Пауза: новые смены недоступны, статус — «Не работаю»</p>
+                    <textarea rows={2} autoFocus value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))}
+                              placeholder="Причина, например «больничный до 25.10»"
+                              className="w-full resize-none rounded-xl border-0 bg-card px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
+                    <div className="flex gap-2">
+                      <Button className="press h-11 flex-1 rounded-xl font-semibold" disabled={!!busy || !reason.trim()}
+                              onClick={() => act("pause", (k) => api.admin.setState(user.id, "paused", reason.trim(), k), "На паузе")}>
+                        {busy === "pause" && <LoaderCircle className="animate-spin" />} Поставить на паузу
+                      </Button>
+                      <Button variant="ghost" className="h-11 rounded-xl" onClick={() => { setPausing(false); setReason(""); }}>
+                        Отмена
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {canBlock && state === "blocked" && (
+                  <Button className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={!!busy}
+                          onClick={() => act("unblock", (k) => api.admin.setState(user.id, "active", null, k), "Разблокирован")}>
+                    {busy === "unblock" && <LoaderCircle className="animate-spin" />} Разблокировать
+                  </Button>
+                )}
+                {canBlock && state !== "blocked" && (
+                  <Button variant="ghost" className="h-12 w-full rounded-2xl text-[15px] font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
+                          disabled={!!busy} onClick={() => { setPausing(false); setReason(""); setBlocking(true); }}>
+                    <Ban /> Заблокировать
+                  </Button>
+                )}
+
+                {approved && touchable && !caps.includes("roles") && user.role === "employee" && (
+                  <p className="pt-1 text-center text-sm text-muted-foreground">Роли и блокировки — у владельца.</p>
                 )}
                 {isSelf && <p className="pt-1 text-center text-sm text-muted-foreground">Это вы.</p>}
               </div>
@@ -332,22 +444,24 @@ function MemberSheet({
         </DrawerContent>
       </Drawer>
 
-      <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>
+      <AlertDialog open={blocking} onOpenChange={(o) => { setBlocking(o); if (!o) setReason(""); }}>
         <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle className="font-display">Закрыть доступ?</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Заблокировать {user?.first_name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              {user?.first_name} больше не сможет открыть график и записываться на выходы. История смен сохранится, доступ можно вернуть.
+              Доступ к графику и отчётам закроется, права будут сняты. История и деньги сохранятся, разблокировать можно в любой момент.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} placeholder="Причина (видна в архиве)"
+                    className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
           <AlertDialogFooter>
-            <AlertDialogCancel className="rounded-xl">Оставить</AlertDialogCancel>
+            <AlertDialogCancel className="rounded-xl">Отмена</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
               className="rounded-xl"
-              onClick={() => user && act("close", (k) => api.admin.setAccess(user.id, false, k), "Доступ закрыт")}
+              onClick={() => user && act("block", (k) => api.admin.setState(user.id, "blocked", reason.trim() || null, k), "Заблокирован")}
             >
-              Закрыть доступ
+              Заблокировать
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

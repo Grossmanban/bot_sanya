@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pause, X } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Day, type Pricing, type User, type Week } from "@/lib/api";
@@ -87,9 +87,21 @@ export function ScheduleScreen({
       <div className="space-y-4">
         <WeekHero week={week} offset={offset} setOffset={setOffset} selected={wide ? openDate : null} onPick={open} />
 
-        {user.work_status !== "working" && <WorkToggle onUserChange={onUserChange} />}
+        {user.account_state === "paused" ? (
+          <div className="row-in flex items-start gap-3 rounded-3xl bg-wait-soft p-5 text-wait">
+            <Pause className="mt-0.5 size-5 shrink-0" />
+            <div>
+              <p className="font-semibold">Аккаунт на паузе</p>
+              <p className="mt-0.5 text-sm text-foreground/75">
+                {user.state_reason ? `${user.state_reason}. ` : ""}Новые смены пока недоступны — снимет администратор.
+              </p>
+            </div>
+          </div>
+        ) : (
+          user.work_status !== "working" && <WorkToggle onUserChange={onUserChange} />
+        )}
 
-        {showHint && (
+        {showHint && user.account_state !== "paused" && (
           <div className="flex items-start gap-3 px-1 text-sm text-muted-foreground">
             <p className="flex-1">Нажми на день, чтобы выбрать время, точку и объём. Если не выходишь — отметь выходной.</p>
             <button

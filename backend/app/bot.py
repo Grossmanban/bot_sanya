@@ -17,7 +17,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import notify
+from . import app_settings, notify
+from . import permissions as perms
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -60,11 +61,20 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
 def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     router = Router()
 
-    def is_admin(telegram_id: int) -> bool:
-        if telegram_id in settings.admin_ids:
-            return True
-        user = svc.get_user_by_tg(conn, telegram_id)
-        return bool(user and user["role"] == "admin" and user["status"] == "approved")
+    def allowed(telegram_id: int, capability: str, target_user_id: int | None = None) -> dict | None:
+        """The acting user if they hold the capability (for that employee), else None."""
+        actor = svc.get_user_by_tg(conn, telegram_id)
+        target = svc.get_user(conn, target_user_id) if target_user_id else None
+        if target_user_id and target is None:
+            return None
+        return actor if perms.can(actor, capability, target) else None
+
+    def shift_owner(shift_id: int) -> int | None:
+        shift = svc.get_shift(conn, shift_id)
+        return shift["user_id"] if shift else None
+
+    async def deny(call: CallbackQuery) -> None:
+        await call.answer("Недостаточно прав", show_alert=True)
 
     async def show_menu(message: Message, user: dict) -> None:
         markup = open_app_keyboard()
@@ -72,13 +82,13 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         if markup is None:
             text += "\n\n⚠️ Ссылка на приложение ещё не настроена (WEBAPP_URL)."
         await message.answer(text, reply_markup=markup)
-        if user["role"] == "admin":
+        if perms.can(user, "raspred"):
             await message.answer("Админ: распред на завтра — кнопкой ниже или /raspred_zavtra",
                                  reply_markup=admin_reply_keyboard())
 
     # ------------------------------------------------------------ /start and registration
 
-    @router.message(CommandStart())
+    @router.message(CommandStart(), F.chat.type == "private")
     async def start(message: Message, state: FSMContext):
         tg = message.from_user
         user = svc.ensure_admin(conn, tg.id, tg.first_name or "", tg.last_name or "", tg.username)
@@ -96,9 +106,14 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             await message.answer("Ваша заявка уже на рассмотрении. Мы сообщим, когда администратор её рассмотрит.")
         elif user["status"] == "rejected":
             await message.answer("В доступе отказано.")
+        elif user["account_state"] == "blocked":
+            await message.answer("⛔ Аккаунт заблокирован. Если это ошибка — свяжитесь с руководителем.")
         else:
             if svc.claim_welcome(conn, user["id"]):
                 await message.answer("Добро пожаловать в систему!")
+            if user["account_state"] == "paused":
+                reason = f"\nПричина: {escape(user['state_reason'])}" if user["state_reason"] else ""
+                await message.answer(f"⏸ Аккаунт на паузе — новые смены пока недоступны.{reason}", parse_mode="HTML")
             await show_menu(message, user)
 
     @router.callback_query(F.data == "register")
@@ -148,9 +163,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
 
     @router.callback_query(F.data.startswith("reg:"))
     async def registration_decide(call: CallbackQuery):
-        if not is_admin(call.from_user.id):
-            await call.answer("Только для администраторов", show_alert=True)
-            return
+        actor = allowed(call.from_user.id, "registrations")
+        if actor is None:
+            return await deny(call)
         _, verdict, user_id = call.data.split(":")
         approve = verdict == "ok"
         try:
@@ -168,20 +183,15 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             parse_mode="HTML",
         )
         await call.answer(verdict_text)
-        if approve:
-            if svc.claim_welcome(conn, user["id"]):
-                await notifier.send(user["telegram_id"], "Добро пожаловать в систему!", open_app_keyboard())
-        else:
-            await notifier.send(user["telegram_id"], "В доступе отказано.")
+        await notifier.access_changed(user, "pending", open_app_keyboard(), actor)
 
     # ------------------------------------------------------------ urgent requests
 
     @router.callback_query(F.data.startswith("urg:"))
     async def urgent_decide(call: CallbackQuery):
-        if not is_admin(call.from_user.id):
-            await call.answer("Только для администраторов", show_alert=True)
-            return
         _, verdict, shift_id = call.data.split(":")
+        if allowed(call.from_user.id, "schedule", shift_owner(int(shift_id))) is None:
+            return await deny(call)
         approve = verdict == "ok"
         try:
             result = svc.decide_urgent(conn, int(shift_id), approve, call.from_user.id)
@@ -202,13 +212,15 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     # ------------------------------------------------------------ penalties
 
     async def apply_penalty(admin_tg: int, admin_name: str, shift_id: int, amount: int) -> tuple[bool, str]:
+        if allowed(admin_tg, "fine_direct", shift_owner(shift_id)) is None:
+            return False, "Недостаточно прав"
         try:
             result = svc.set_penalty(conn, shift_id, amount, admin_tg)
         except svc.ServiceError as exc:
             return False, exc.message
         if not result.changed:
             return False, f"Штраф уже назначен: {result.shift['penalty_amount']} ₽"
-        await notifier.penalty_assigned(result.shift)
+        await notifier.penalty_assigned(result.shift, admin_name)
         user = svc.get_user(conn, result.shift["user_id"])
         await notifier.to_admins(
             f"💸 Штраф {amount} ₽ назначен сотруднику {notify.who(user)} "
@@ -219,10 +231,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
 
     @router.callback_query(F.data.startswith("pen:"))
     async def penalty_pick(call: CallbackQuery, state: FSMContext):
-        if not is_admin(call.from_user.id):
-            await call.answer("Только для администраторов", show_alert=True)
-            return
         _, shift_id, amount = call.data.split(":")
+        if allowed(call.from_user.id, "fine_direct", shift_owner(int(shift_id))) is None:
+            return await deny(call)
         shift = svc.get_shift(conn, int(shift_id))
         if shift and shift["penalty_amount"] is not None:
             await call.answer(f"Штраф уже назначен: {shift['penalty_amount']} ₽", show_alert=True)
@@ -291,7 +302,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     # ------------------------------------------------------------ shortfall decisions
 
     async def decide_shortfall(tg, admin_name: str, shift_id: int, amount: int | None) -> tuple[bool, str]:
-        admin = svc.get_user_by_tg(conn, tg.id) or {"telegram_id": tg.id, "id": None}
+        admin = allowed(tg.id, "fine_direct" if amount else "review", shift_owner(shift_id))
+        if admin is None:
+            return False, "Недостаточно прав"
         try:
             result = svc.decide_shortfall(conn, admin, shift_id, amount)
         except svc.ServiceError as exc:
@@ -305,10 +318,10 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
 
     @router.callback_query(F.data.startswith("sf:"))
     async def shortfall_pick(call: CallbackQuery, state: FSMContext):
-        if not is_admin(call.from_user.id):
-            await call.answer("Только для администраторов", show_alert=True)
-            return
         _, shift_id, amount = call.data.split(":")
+        need = "review" if amount == "0" else "fine_direct"
+        if allowed(call.from_user.id, need, shift_owner(int(shift_id))) is None:
+            return await deny(call)
         if amount == "custom":
             await state.set_state(ShortfallInput.amount)
             await state.update_data(shift_id=int(shift_id))
@@ -337,22 +350,50 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     @router.message(Command("raspred_zavtra"))
     @router.message(F.text == RASPRED_BUTTON)
     async def raspred(message: Message):
-        if not is_admin(message.from_user.id):
+        if allowed(message.from_user.id, "raspred") is None:
             return
         data = svc.raspred(conn, today_local() + timedelta(days=1))
         # plain text so it copies cleanly into the work chat
         await message.answer(data["text"], parse_mode=None)
 
+    # ------------------------------------------------------------ archive group (owner, inside the group)
+
+    @router.message(Command("archive_here"))
+    async def archive_here(message: Message):
+        if message.chat.type not in ("group", "supergroup"):
+            await message.answer("Отправьте /archive_here внутри закрытой группы, куда бот добавлен.")
+            return
+        if message.from_user.id not in settings.admin_ids:
+            return
+        app_settings.set_raw(conn, "archive_chat_id", str(message.chat.id))
+        app_settings.set_raw(conn, "archive_chat_title", message.chat.title or "")
+        await message.answer(
+            "🗂 Архив подключён. Сюда будут приходить штрафы, бонусы, блокировки, решения по отчётам и выплаты "
+            "с хештегами — ищите по #штраф, #блок, #отчёт или по имени сотрудника."
+        )
+        await notifier.archive(["архив"], f"Архив подключён — {escape(message.from_user.full_name)}")
+
+    @router.message(Command("archive_off"))
+    async def archive_off(message: Message):
+        if message.from_user.id not in settings.admin_ids:
+            return
+        if app_settings.get_raw(conn, "archive_chat_id") != str(message.chat.id) and message.chat.type != "private":
+            await message.answer("Архив подключён к другому чату.")
+            return
+        app_settings.set_raw(conn, "archive_chat_id", None)
+        app_settings.set_raw(conn, "archive_chat_title", None)
+        await message.answer("Архив отключён.")
+
     # ------------------------------------------------------------ fallback
 
-    @router.message(StateFilter(None))
+    @router.message(StateFilter(None), F.chat.type == "private")
     async def fallback(message: Message):
         user = svc.get_user_by_tg(conn, message.from_user.id)
         if user is None:
             await message.answer("Вы ещё не зарегистрированы. Нажмите /start")
         elif user["status"] == "pending":
             await message.answer("Ваша заявка на рассмотрении.")
-        elif user["status"] == "approved":
+        elif user["status"] == "approved" and user["account_state"] != "blocked":
             await show_menu(message, user)
         # rejected: no access, stay silent
 

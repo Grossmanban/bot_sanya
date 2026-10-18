@@ -210,7 +210,8 @@ def test_admin_edit_locks_user_edit_and_force_cancel_blocks_restore(conn, make_u
     res = svc.admin_edit_shift(conn, admin, sid, {"action": "force_restore", "reason": "выздоровел"}, svc.new_key())
     assert res.shift["status"] == "active"
     svc.admin_delete_shift(conn, admin, sid, "ошибка", svc.new_key())
-    assert svc.get_shift(conn, sid) is None
+    assert svc.get_shift(conn, sid)["status"] == "removed"  # kept as history, never deleted
+    assert svc.get_user_shift_on(conn, user["id"], SAT) is None
     assert conn.execute("SELECT COUNT(*) FROM event_logs WHERE event_type = 'SHIFT_REMOVED_BY_ADMIN'").fetchone()[0] == 1
 
 
@@ -258,27 +259,76 @@ def test_only_owner_grants_admin_and_owner_is_protected(conn, make_user):
     assert svc.admin_telegram_ids(conn) == sorted([999, helper["telegram_id"]])
 
 
-def test_close_and_reopen_access(conn, make_user):
+def test_block_is_owner_only_and_pause_needs_reason(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     helper = make_user("Мария", "Админова", "maria")
     helper, _ = svc.set_role(conn, owner, helper["id"], "admin", svc.new_key())
     worker = make_user()
 
-    # a regular admin may close access for employees, but not for admins or themselves
-    closed, changed = svc.set_access(conn, helper, worker["id"], False, svc.new_key())
-    assert changed and closed["status"] == "rejected" and closed["work_status"] == "not_working"
+    # an admin pauses an employee (reason required), cannot block, cannot touch owners or themselves
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_account_state(conn, helper, worker["id"], "paused", "", svc.new_key())
+    assert e.value.code == "reason_required"
+    paused, changed = svc.set_account_state(conn, helper, worker["id"], "paused", "отпуск", svc.new_key())
+    assert changed and paused["account_state"] == "paused" and paused["work_status"] == "not_working"
+    with pytest.raises(svc.ServiceError) as e:
+        create(conn, paused)
+    assert e.value.code == "paused"
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_account_state(conn, helper, worker["id"], "blocked", None, svc.new_key())
+    assert e.value.code == "owner_only"
     with pytest.raises(svc.ServiceError):
-        svc.set_access(conn, helper, helper["id"], False, svc.new_key())
+        svc.set_account_state(conn, helper, owner["id"], "paused", "x", svc.new_key())
     with pytest.raises(svc.ServiceError):
-        svc.set_access(conn, helper, owner["id"], False, svc.new_key())
+        svc.set_account_state(conn, helper, helper["id"], "paused", "x", svc.new_key())
 
-    # closing an admin's access demotes them; reopening keeps them an employee
-    closed_admin, _ = svc.set_access(conn, owner, helper["id"], False, svc.new_key())
-    assert closed_admin["role"] == "employee"
-    reopened, changed = svc.set_access(conn, owner, worker["id"], True, svc.new_key())
-    assert changed and reopened["status"] == "approved"
+    # the owner blocks an admin: rights are taken away; unblocking keeps them an employee
+    blocked, _ = svc.set_account_state(conn, owner, helper["id"], "blocked", "уволен", svc.new_key())
+    assert blocked["account_state"] == "blocked" and blocked["role"] == "employee"
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_account_state(conn, helper, worker["id"], "active", None, svc.new_key())  # blocked admin has no rights
+    back, _ = svc.set_account_state(conn, owner, helper["id"], "active", None, svc.new_key())
+    assert back["account_state"] == "active" and back["state_reason"] is None
+    # approved people are not "rejected" any more: access is closed only by block/pause
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_access(conn, owner, worker["id"], False, svc.new_key())
+    assert e.value.code == "use_block"
+
+
+def test_four_roles_and_permissions(conn, make_user):
+    from app import permissions as perms
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    admin = make_user("Мария", "Админова", "maria")
+    trainer = make_user("Тимур", "Тренер", "tim")
+    worker = make_user()
+    admin, _ = svc.set_role(conn, owner, admin["id"], "admin", svc.new_key())
+    trainer, _ = svc.set_role(conn, owner, trainer["id"], "trainer", svc.new_key())
     with pytest.raises(svc.ServiceError):
-        create(conn, reopened)  # back in, but must switch on "working" again
+        svc.set_role(conn, admin, worker["id"], "trainer", svc.new_key())  # only the owner hands out roles
+    assert [perms.role_of(u) for u in (owner, admin, trainer, worker)] == ["owner", "admin", "trainer", "employee"]
+    assert perms.can(owner, "money") and not perms.can(admin, "money") and not perms.can(trainer, "money")
+    assert perms.can(admin, "fine_direct") and not perms.can(trainer, "fine_direct") and perms.can(trainer, "fine_request")
+    assert perms.can(owner, "global_actual") and not perms.can(admin, "global_actual")
+    # a trainer manages only people of their own network
+    assert not perms.manages(trainer, worker)
+    conn.execute("UPDATE users SET network_id = 1 WHERE id IN (?, ?)", (trainer["id"], worker["id"]))
+    trainer, worker = svc.get_user(conn, trainer["id"]), svc.get_user(conn, worker["id"])
+    assert perms.manages(trainer, worker) and perms.can(trainer, "pause", worker)
+    assert perms.manages(admin, worker)
+    # trainers and employees don't receive admin notifications
+    assert set(svc.admin_telegram_ids(conn)) == {999, admin["telegram_id"]}
+
+
+def test_reminders_locked_while_working(conn, make_user):
+    u = make_user()  # working
+    with pytest.raises(svc.ServiceError) as e:
+        svc.set_notify(conn, u, False)
+    assert e.value.code == "reminders_locked"
+    u = svc.set_work_status(conn, u, "not_working", svc.new_key())
+    assert svc.set_notify(conn, u, False)["notify_reminders"] == 0
+    u = svc.set_work_status(conn, u, "working", svc.new_key())
+    assert u["notify_reminders"] == 1  # switched back on automatically
 
 
 def test_pending_request_decided_from_team(conn):

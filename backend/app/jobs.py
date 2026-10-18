@@ -130,7 +130,8 @@ async def week_reminders(conn, notifier: Notifier, today: date) -> int:
         for r in conn.execute(
             """SELECT u.* FROM users u
                WHERE u.status = 'approved' AND u.work_status = 'working' AND u.notify_reminders = 1
-                 AND NOT EXISTS (SELECT 1 FROM shifts s WHERE s.user_id = u.id AND s.shift_date BETWEEN ? AND ?)""",
+                 AND NOT EXISTS (SELECT 1 FROM shifts s WHERE s.user_id = u.id AND s.shift_date BETWEEN ? AND ?
+                                 AND s.status NOT IN ('withdrawn','removed'))""",
             (nxt[0].isoformat(), nxt[-1].isoformat()),
         )
     ]
@@ -182,7 +183,7 @@ def weekly_summary(conn, today: date) -> tuple[str, date, date]:
     start, end = days[0], days[-1]
     lines, plan_total, fact_total = [], 0, 0
     users = conn.execute(
-        "SELECT DISTINCT user_id FROM shifts WHERE shift_date BETWEEN ? AND ?", (start.isoformat(), end.isoformat())
+        "SELECT DISTINCT user_id FROM shifts WHERE shift_date BETWEEN ? AND ? AND status NOT IN ('withdrawn','removed')", (start.isoformat(), end.isoformat())
     ).fetchall()
     for (user_id,) in users:
         st = svc.stats(conn, user_id, start, end)

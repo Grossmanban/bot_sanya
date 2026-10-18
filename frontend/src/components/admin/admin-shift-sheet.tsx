@@ -19,6 +19,7 @@ import { api, type AdminAction, type ShiftStatus } from "@/lib/api";
 import { STATUS_META, longDate } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { useWide } from "@/lib/use-media";
+import { useCan } from "@/lib/caps";
 import { cn } from "@/lib/utils";
 import { PlanFactBar, ShortfallDecision } from "./shortfall";
 
@@ -61,6 +62,7 @@ export function AdminShiftSheet({
   const [reason, setReason] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const { busy, run } = useAction();
+  const canFine = useCan("fine_direct");
 
   useEffect(() => {
     if (!shift) return;
@@ -211,7 +213,7 @@ export function AdminShiftSheet({
                   </Field>
                 )}
 
-                {isFinal && (
+                {isFinal && canFine && (
                   <div className="space-y-2 rounded-2xl bg-cancel-soft p-4">
                     <p className="text-sm font-semibold">Штраф за окончательную отмену</p>
                     <div className="flex gap-2">
