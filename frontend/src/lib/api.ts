@@ -16,12 +16,33 @@ export interface User {
   last_name: string;
   username: string | null;
   status: "pending" | "approved" | "rejected";
-  role: "employee" | "admin";
+  /** effective role: owners come from the server config (ADMIN_IDS) */
+  role: Role;
   work_status: "working" | "not_working";
+  account_state: "active" | "paused" | "blocked";
+  state_reason: string | null;
+  network_id: number | null;
   is_owner?: boolean;
   created_at?: string;
   notify_reminders?: boolean;
 }
+
+export type Role = "owner" | "admin" | "trainer" | "employee";
+
+export const ROLE_TITLES: Record<Role, string> = {
+  owner: "Владелец",
+  admin: "Администратор",
+  trainer: "Тренер",
+  employee: "Сотрудник",
+};
+
+/** see backend/app/permissions.py */
+export type Capability =
+  | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
+  | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
+  | "registrations" | "export" | "raspred";
+
+export const isStaff = (u: User) => u.role !== "employee" && u.account_state !== "blocked";
 
 export interface Pricing {
   base_rate: number;
@@ -34,6 +55,14 @@ export interface Me {
   user?: User;
   pricing?: Pricing;
   bot_username?: string | null;
+  role_title?: string;
+  capabilities?: Capability[];
+}
+
+export interface SettingsResponse {
+  settings: ScheduleSettings;
+  timezone: string;
+  archive: { connected: boolean; title: string | null };
 }
 
 export interface Shift {
@@ -299,9 +328,8 @@ export const api = {
     createPoint: (name: string, capacity: number | null) => post<{ point: Point }>("/api/admin/points", { name, capacity }),
     updatePoint: (id: number, body: { name?: string; capacity?: number; clear_capacity?: boolean; active?: boolean }) =>
       patch<{ point: Point }>(`/api/admin/points/${id}`, body),
-    settings: () => request<{ settings: ScheduleSettings; timezone: string }>("/api/admin/settings"),
-    saveSettings: (body: Partial<ScheduleSettings>) =>
-      patch<{ settings: ScheduleSettings; timezone: string }>("/api/admin/settings", body),
+    settings: () => request<SettingsResponse>("/api/admin/settings"),
+    saveSettings: (body: Partial<ScheduleSettings>) => patch<SettingsResponse>("/api/admin/settings", body),
     broadcasts: () =>
       request<{ items: Broadcast[]; audiences: Record<string, string>; people: { id: number; working: boolean; admin: boolean }[] }>(
         "/api/admin/broadcasts",
@@ -315,10 +343,12 @@ export const api = {
     decideShortfall: (shiftId: number, amount: number | null) =>
       post<{ shift: Shift; changed: boolean }>(`/api/admin/shifts/${shiftId}/shortfall`, { amount, override: true }),
     team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),
-    setRole: (userId: number, role: User["role"], key: string) =>
+    setRole: (userId: number, role: Exclude<Role, "owner">, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/role`, { role, idempotency_key: key }),
     setAccess: (userId: number, allow: boolean, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/access`, { allow, idempotency_key: key }),
+    setState: (userId: number, state: User["account_state"], reason: string | null, key: string) =>
+      post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/state`, { state, reason, idempotency_key: key }),
     raspred: () => request<Raspred>("/api/admin/raspred/tomorrow"),
     day: (day: string) =>
       request<{ date: string; items: AdminShift[]; total_count: number; total_volume: number }>(`/api/admin/day?day=${day}`),

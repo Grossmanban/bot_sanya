@@ -5,7 +5,7 @@ import { Check, Copy, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type AdminShift, type StatsItem, type User } from "@/lib/api";
+import { api, type AdminShift, type Capability, type StatsItem, type User } from "@/lib/api";
 import {
   STATUS_META,
   WEEKDAYS_SHORT,
@@ -19,6 +19,7 @@ import {
 } from "@/lib/format";
 import { moscowToday, useLoad } from "@/lib/hooks";
 import { haptic, tapHaptic } from "@/lib/telegram";
+import { CapsContext } from "@/lib/caps";
 import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
@@ -28,31 +29,34 @@ import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
 type Section = "raspred" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: "raspred", label: "Распред" },
-  { id: "day", label: "День" },
-  { id: "stats", label: "Отчёт" },
-  { id: "penalties", label: "Штрафы" },
-  { id: "team", label: "Команда" },
-  { id: "points", label: "Точки" },
-  { id: "broadcast", label: "Рассылка" },
-  { id: "settings", label: "Настройки" },
+// need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
+const SECTIONS: { id: Section; label: string; need: Capability }[] = [
+  { id: "raspred", label: "Распред", need: "raspred" },
+  { id: "day", label: "День", need: "schedule" },
+  { id: "stats", label: "Отчёт", need: "review" },
+  { id: "penalties", label: "Штрафы", need: "review" },
+  { id: "team", label: "Команда", need: "pause" },
+  { id: "points", label: "Точки", need: "points" },
+  { id: "broadcast", label: "Рассылка", need: "broadcast_all" },
+  { id: "settings", label: "Настройки", need: "settings" },
 ];
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
-export function AdminScreen({ me }: { me: User }) {
-  const [section, setSection] = useState<Section>("raspred");
+export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
+  const sections = SECTIONS.filter((s) => caps.includes(s.need));
+  const [section, setSection] = useState<Section>(sections[0]?.id ?? "day");
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
   const pendingShort = useLoad(() => api.admin.shortfalls(), [version, section]);
   const shortCount = pendingShort.data?.items.length ?? 0;
 
   return (
+    <CapsContext.Provider value={caps}>
     <div className="mx-auto max-w-3xl space-y-5">
       <nav className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
         <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift md:w-full">
-          {SECTIONS.map((s) => (
+          {sections.map((s) => (
             <button
               key={s.id}
               ref={(el) => {
@@ -83,8 +87,10 @@ export function AdminScreen({ me }: { me: User }) {
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
-        {section === "penalties" && <PenaltiesSection version={version} onEdit={setEditing} onChanged={() => setVersion((v) => v + 1)} />}
-        {section === "team" && <TeamSection me={me} />}
+        {section === "penalties" && (
+          <PenaltiesSection version={version} onEdit={setEditing} onChanged={() => setVersion((v) => v + 1)} />
+        )}
+        {section === "team" && <TeamSection me={me} caps={caps} />}
         {section === "points" && <PointsSection />}
         {section === "broadcast" && <BroadcastSection />}
         {section === "settings" && <SettingsSection />}
@@ -99,6 +105,7 @@ export function AdminScreen({ me }: { me: User }) {
         }}
       />
     </div>
+    </CapsContext.Provider>
   );
 }
 

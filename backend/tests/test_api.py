@@ -59,7 +59,8 @@ def test_access_by_registration_status(client, conn):
 
 def test_admin_from_config_is_auto_created(client):
     me = client.get("/api/me", headers=headers(999, "Саня", "Админ", "sanya")).json()
-    assert me["user"]["role"] == "admin" and me["user"]["status"] == "approved"
+    assert me["user"]["role"] == "owner" and me["user"]["status"] == "approved"
+    assert "money" in me["capabilities"] and me["role_title"] == "Владелец"
     assert client.get("/api/admin/raspred/tomorrow", headers=headers(999)).status_code == 200
 
 
@@ -143,7 +144,7 @@ def test_team_endpoints(client, conn):
     other, _ = svc.create_registration(conn, 51, None, "Ещё", "Один")
     svc.decide_registration(conn, other["id"], True, 999)
     r = client.post(f"/api/admin/team/{other['id']}/role", json={"role": "admin", "idempotency_key": key()}, headers=h)
-    assert r.status_code == 403 and r.json()["code"] == "owner_only"
+    assert r.status_code == 403 and r.json()["code"] == "forbidden"
 
 
 def test_points_settings_and_fact_endpoints(client, conn):
@@ -180,3 +181,54 @@ def test_points_settings_and_fact_endpoints(client, conn):
     client.patch(f"/api/admin/shifts/{sid}", json={"action": "approve_urgent", "reason": "", "idempotency_key": key()}, headers=owner)
     r = client.post(f"/api/shifts/{sid}/fact", json={"fact_volume": 12, "idempotency_key": key()}, headers=h)
     assert r.status_code == 200 and r.json()["shift"]["fact_volume"] == 12 and r.json()["shift"]["location"] == "Европа"
+
+
+def test_trainer_sees_only_own_network_and_cannot_fine(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    ids = {}
+    for tg, name in ((60, "Тренер"), (61, "Свой"), (62, "Чужой")):
+        u, _ = svc.create_registration(conn, tg, None, name, "Тест")
+        svc.decide_registration(conn, u["id"], True, 999)
+        ids[name] = u["id"]
+    conn.execute("UPDATE users SET network_id = 1 WHERE id IN (?, ?)", (ids["Тренер"], ids["Свой"]))
+    conn.execute("UPDATE users SET network_id = 2 WHERE id = ?", (ids["Чужой"],))
+    r = client.post(f"/api/admin/team/{ids['Тренер']}/role", json={"role": "trainer", "idempotency_key": key()}, headers=owner)
+    assert r.json()["user"]["role"] == "trainer"
+
+    th = headers(60, "Тренер", "Тест")
+    me = client.get("/api/me", headers=th).json()
+    assert me["role_title"] == "Тренер" and "money" not in me["capabilities"] and "review" in me["capabilities"]
+    team = {u["id"] for u in client.get("/api/admin/team", headers=th).json()["items"]}
+    assert ids["Свой"] in team and ids["Чужой"] not in team
+    assert client.get("/api/admin/raspred/tomorrow", headers=th).status_code == 403
+    assert client.get("/api/admin/settings", headers=th).status_code == 403
+    stats = "/api/admin/stats?user_id={}&from=2026-10-12&to=2026-10-18"
+    assert client.get(stats.format(ids["Свой"]), headers=th).status_code == 200
+    assert client.get(stats.format(ids["Чужой"]), headers=th).status_code == 403
+    # trainers pause their own people only, and never block
+    body = {"state": "paused", "reason": "больничный", "idempotency_key": key()}
+    assert client.post(f"/api/admin/team/{ids['Чужой']}/state", json=body, headers=th).status_code == 403
+    r = client.post(f"/api/admin/team/{ids['Свой']}/state", json={**body, "idempotency_key": key()}, headers=th)
+    assert r.json()["user"]["account_state"] == "paused"
+    r = client.post(f"/api/admin/team/{ids['Свой']}/state",
+                    json={"state": "blocked", "reason": "x", "idempotency_key": key()}, headers=th)
+    assert r.status_code == 403
+
+
+def test_blocked_account_loses_access_and_archive_logs(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    u, _ = svc.create_registration(conn, 70, None, "Анна", "Блок")
+    svc.decide_registration(conn, u["id"], True, 999)
+    h = headers(70, "Анна", "Блок")
+    assert client.get("/api/schedule/week", headers=h).status_code == 200
+    r = client.post(f"/api/admin/team/{u['id']}/state",
+                    json={"state": "blocked", "reason": "нарушение", "idempotency_key": key()}, headers=owner)
+    assert r.json()["changed"] and r.json()["user"]["account_state"] == "blocked"
+    r = client.get("/api/schedule/week", headers=h)
+    assert r.status_code == 403 and r.json()["code"] == "blocked"
+    # no archive group yet: the entry is kept with the reason it was not sent
+    rows = conn.execute("SELECT tags, sent, error FROM archive_log").fetchall()
+    assert rows and rows[-1]["tags"] == "блок" and rows[-1]["sent"] == 0 and rows[-1]["error"]
+    assert client.get("/api/admin/settings", headers=owner).json()["archive"] == {"connected": False, "title": None}

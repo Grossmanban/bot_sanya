@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CalendarDays, ShieldCheck, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
-import { api, type Me, type User } from "@/lib/api";
+import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
 import { initData, setupWebApp, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
@@ -69,9 +69,12 @@ export function MiniApp() {
     body = <AccessScreen kind="unregistered" botUsername={me.bot_username} />;
   } else if (me.user.status !== "approved") {
     body = <AccessScreen kind={me.user.status} botUsername={me.bot_username} />;
+  } else if (me.user.account_state === "blocked") {
+    body = <AccessScreen kind="blocked" message={me.user.state_reason ? `Причина: ${me.user.state_reason}. Если это ошибка — свяжитесь с руководителем.` : undefined} />;
   } else {
     const user = me.user;
-    const tabs = TABS.filter((t) => t.id !== "admin" || user.role === "admin");
+    const staff = isStaff(user);
+    const tabs = TABS.filter((t) => t.id !== "admin" || staff);
     const working = user.work_status === "working";
     const activeIndex = tabs.findIndex((t) => t.id === tab);
 
@@ -104,8 +107,9 @@ export function MiniApp() {
               <span className="block truncate font-semibold">{user.first_name} {user.last_name}</span>
               <span className={cn("flex items-center gap-1.5 text-xs", working ? "text-go" : "text-muted-foreground")}>
                 <span className={cn("size-1.5 rounded-full", working ? "bg-go" : "bg-idle")} />
-                {working ? "Работаю" : "Не работаю"}
+                {user.account_state === "paused" ? "На паузе" : working ? "Работаю" : "Не работаю"}
               </span>
+              {staff && <span className="block text-xs text-muted-foreground">{ROLE_TITLES[user.role]}</span>}
             </span>
           </button>
         </aside>
@@ -121,7 +125,7 @@ export function MiniApp() {
                 working ? "bg-go-soft text-go" : "bg-muted text-muted-foreground",
               )}
             >
-              {working ? "Работаю" : "Не работаю"}
+              {user.account_state === "paused" ? "На паузе" : working ? "Работаю" : "Не работаю"}
               <Avatar user={user} className="size-7 rounded-full text-[11px]" />
             </button>
           </header>
@@ -131,7 +135,7 @@ export function MiniApp() {
               <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => go("profile")} onUserChange={updateUser} />
             )}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} />}
-            {tab === "admin" && user.role === "admin" && <AdminScreen me={user} />}
+            {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} />}
           </main>
         </div>
 

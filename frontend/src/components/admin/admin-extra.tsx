@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { FileSpreadsheet, LoaderCircle, Plus, Send } from "lucide-react";
+import { Archive, FileSpreadsheet, LoaderCircle, Plus, Send } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { api, type Point, type ScheduleSettings, type User } from "@/lib/api";
+import { api, type Point, type ScheduleSettings, type SettingsResponse, type User } from "@/lib/api";
 import { WEEKDAYS } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -254,6 +254,42 @@ export function SettingsSection() {
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!dirty || !!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} {dirty ? "Сохранить настройки" : "Всё сохранено"}
       </Button>
+      <ArchiveCard archive={data.archive} />
     </div>
+  );
+}
+
+const ARCHIVE_TAGS = ["#штраф", "#бонус", "#блок", "#пауза", "#роль", "#доступ", "#отчёт", "#выплата"];
+
+function ArchiveCard({ archive }: { archive: SettingsResponse["archive"] }) {
+  return (
+    <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <div className="flex items-start gap-3">
+        <span className={cn("grid size-10 shrink-0 place-items-center rounded-xl",
+          archive.connected ? "bg-go-soft text-go" : "bg-muted text-muted-foreground")}>
+          <Archive className="size-5" strokeWidth={1.8} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 className="font-semibold">Архивная группа</h2>
+          <p className="text-sm text-muted-foreground">
+            {archive.connected
+              ? `Подключена: ${archive.title || "группа"}. Сюда уходят деньги, статусы и дисциплина.`
+              : "Не подключена. События сохраняются в журнале и начнут уходить в группу после подключения."}
+          </p>
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-1.5">
+        {ARCHIVE_TAGS.map((t) => (
+          <span key={t} className="rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">{t}</span>
+        ))}
+      </div>
+      {!archive.connected && (
+        <ol className="mt-4 list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+          <li>Создайте закрытую группу и добавьте в неё бота.</li>
+          <li>Владелец отправляет в группе команду <code className="rounded bg-muted px-1.5 py-0.5 text-foreground">/archive_here</code>.</li>
+          <li>Отключить — <code className="rounded bg-muted px-1.5 py-0.5 text-foreground">/archive_off</code> там же.</li>
+        </ol>
+      )}
+    </section>
   );
 }

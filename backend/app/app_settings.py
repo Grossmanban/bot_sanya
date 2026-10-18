@@ -67,3 +67,20 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
             "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", rows
         )
     return get_all(conn)
+
+
+# internal values that are not edited from the settings screen (e.g. the archive group set by /archive_here)
+def get_raw(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (f"raw:{key}",)).fetchone()
+    return row[0] if row else None
+
+
+def set_raw(conn: sqlite3.Connection, key: str, value: str | None) -> None:
+    with transaction(conn):
+        if value is None:
+            conn.execute("DELETE FROM app_settings WHERE key = ?", (f"raw:{key}",))
+        else:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (f"raw:{key}", value),
+            )

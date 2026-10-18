@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from . import permissions as perms
 from . import pricing
 from .config import settings
 from .db import transaction
@@ -28,7 +29,10 @@ MAX_LOCATION = 100
 MAX_PENALTY = 1_000_000
 BOOKING_WEEKS_AHEAD = 1
 FACT_DAYS_BACK = 3
-BUSY = ("active", "restored", "awaiting_approval")  # statuses that take a place at a point
+BUSY = ("active", "restored", "awaiting_approval")
+# soft-deleted rows: kept as history, invisible everywhere else
+DEAD = ("withdrawn", "removed")
+LIVE = f"status NOT IN {DEAD}"  # statuses that take a place at a point
 
 
 class ServiceError(Exception):
@@ -181,8 +185,18 @@ def ensure_admin(conn, telegram_id: int, first_name: str, last_name: str, userna
 
 
 def admin_telegram_ids(conn: sqlite3.Connection) -> list[int]:
-    ids = {r[0] for r in conn.execute("SELECT telegram_id FROM users WHERE role = 'admin' AND status = 'approved'")}
+    """Owners and admins (trainers get notifications only about their network)."""
+    ids = {
+        r[0]
+        for r in conn.execute(
+            "SELECT telegram_id FROM users WHERE role = 'admin' AND status = 'approved' AND account_state != 'blocked'"
+        )
+    }
     return sorted(ids | set(settings.admin_ids))
+
+
+def owner_telegram_ids() -> list[int]:
+    return sorted(settings.admin_ids)
 
 
 def create_registration(conn, telegram_id: int, username: str | None, first_name: str, last_name: str) -> tuple[dict, bool]:
@@ -238,8 +252,15 @@ def set_work_status(conn, user: dict, work_status: str, key: str) -> dict:
         if _seen(conn, key):
             return get_user(conn, user["id"])
         current = get_user(conn, user["id"])
+        if work_status == "working" and current["account_state"] == "paused":
+            raise ServiceError("Аккаунт на паузе: статус «Работаю» включит администратор, сняв паузу", 403, "paused")
         if current["work_status"] != work_status:
-            conn.execute("UPDATE users SET work_status = ? WHERE id = ?", (work_status, user["id"]))
+            conn.execute(
+                """UPDATE users SET work_status = ?, work_status_at = ?,
+                                    notify_reminders = CASE WHEN ? = 'working' THEN 1 ELSE notify_reminders END
+                   WHERE id = ?""",
+                (work_status, now_iso(), work_status, user["id"]),
+            )
             log_event(
                 conn,
                 user_id=user["id"],
@@ -253,8 +274,8 @@ def set_work_status(conn, user: dict, work_status: str, key: str) -> dict:
 
 
 def is_owner(user: dict) -> bool:
-    """Owners are the ADMIN_IDS from config: always admins, and the only ones who grant admin rights."""
-    return user["telegram_id"] in settings.admin_ids
+    """Owners are the ADMIN_IDS from config (Super Admin)."""
+    return perms.is_owner(user)
 
 
 def team(conn) -> list[dict]:
@@ -267,19 +288,20 @@ def team(conn) -> list[dict]:
 
 
 def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict, bool]:
-    if role not in ("admin", "employee"):
+    if role not in ("admin", "trainer", "employee"):
         raise ServiceError("Некорректная роль", 422, "bad_role")
     if not is_owner(actor):
-        raise ServiceError("Назначать администраторов может только владелец", 403, "owner_only")
+        raise ServiceError("Назначать роли может только владелец", 403, "owner_only")
     _check_key(key)
     with transaction(conn):
+        actor = _fresh_actor(conn, actor)
         user = get_user(conn, user_id)
         if user is None:
             raise ServiceError("Пользователь не найден", 404, "not_found")
         if _seen(conn, key):
             return user, False
         if is_owner(user):
-            raise ServiceError("Владелец всегда администратор", 409, "owner")
+            raise ServiceError("Владельцу роль не меняется", 409, "owner")
         if user["status"] != "approved":
             raise ServiceError("Сначала откройте человеку доступ", 409, "not_approved")
         if user["role"] == role:
@@ -291,7 +313,7 @@ def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict
 
 
 def set_access(conn, actor: dict, user_id: int, allow: bool, key: str) -> tuple[dict, bool]:
-    """allow=True: accept a request or reopen access; False: reject a request or close access."""
+    """Decide a registration request (pending), or reopen a declined one. Closing access is block/pause."""
     _check_key(key)
     with transaction(conn):
         user = get_user(conn, user_id)
@@ -299,31 +321,73 @@ def set_access(conn, actor: dict, user_id: int, allow: bool, key: str) -> tuple[
             raise ServiceError("Пользователь не найден", 404, "not_found")
         if _seen(conn, key):
             return user, False
-        if not allow and is_owner(user):
-            raise ServiceError("Владельцу нельзя закрыть доступ", 409, "owner")
-        if not allow and user["id"] == actor["id"]:
-            raise ServiceError("Нельзя закрыть доступ самому себе", 409, "self")
-        if not allow and user["role"] == "admin" and not is_owner(actor):
-            raise ServiceError("Закрыть доступ администратору может только владелец", 403, "owner_only")
+        if user["status"] == "approved":
+            if allow:
+                return user, False
+            raise ServiceError("У сотрудника уже есть доступ: используйте паузу или блокировку", 409, "use_block")
         target = "approved" if allow else "rejected"
         if user["status"] == target:
             return user, False
-        # closing access also takes away admin rights and the working status
         conn.execute(
-            """UPDATE users SET status = ?, decided_at = ?, decided_by = ?,
-                                role = CASE WHEN ? = 'rejected' THEN 'employee' ELSE role END,
-                                work_status = 'not_working'
-               WHERE id = ?""",
-            (target, now_iso(), actor["telegram_id"], target, user_id),
+            "UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working' WHERE id = ?",
+            (target, now_iso(), actor["telegram_id"], user_id),
         )
         event = {
             ("pending", True): "REGISTRATION_APPROVED",
             ("pending", False): "REGISTRATION_REJECTED",
-            ("approved", False): "ACCESS_CLOSED",
             ("rejected", True): "ACCESS_REOPENED",
         }[(user["status"], allow)]
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
-                  old={"status": user["status"], "role": user["role"]}, new={"status": target})
+                  old={"status": user["status"]}, new={"status": target})
+    return get_user(conn, user_id), True
+
+
+def _fresh_actor(conn, actor: dict) -> dict:
+    """Permissions are checked against the current DB row, never a stale copy."""
+    fresh = get_user(conn, actor["id"]) if actor.get("id") else None
+    if fresh is None or fresh["status"] != "approved" or fresh["account_state"] == "blocked":
+        raise ServiceError("Нет доступа", 403, "forbidden")
+    return fresh
+
+
+def set_account_state(conn, actor: dict, user_id: int, state: str, reason: str | None, key: str) -> tuple[dict, bool]:
+    """active / paused (owner, admin, own trainer; reason required) / blocked (owner only)."""
+    if state not in ("active", "paused", "blocked"):
+        raise ServiceError("Некорректное состояние", 422, "bad_state")
+    reason = (reason or "").strip() or None
+    _check_key(key)
+    with transaction(conn):
+        actor = _fresh_actor(conn, actor)
+        user = get_user(conn, user_id)
+        if user is None:
+            raise ServiceError("Пользователь не найден", 404, "not_found")
+        if _seen(conn, key):
+            return user, False
+        if user["status"] != "approved":
+            raise ServiceError("Сначала примите заявку", 409, "not_approved")
+        if is_owner(user):
+            raise ServiceError("Владельца нельзя поставить на паузу или заблокировать", 409, "owner")
+        if user["id"] == actor["id"]:
+            raise ServiceError("Нельзя менять состояние своего аккаунта", 409, "self")
+        current = user["account_state"]
+        if "blocked" in (state, current) and not perms.can(actor, "block"):
+            raise ServiceError("Блокировать и разблокировать может только владелец", 403, "owner_only")
+        if not perms.can(actor, "pause", user):
+            raise ServiceError("Нет прав на этого сотрудника", 403, "forbidden")
+        if state == "paused" and not reason:
+            raise ServiceError("Укажите причину паузы", 422, "reason_required")
+        if current == state:
+            return user, False
+        conn.execute(
+            """UPDATE users SET account_state = ?, state_reason = ?, state_changed_at = ?, state_changed_by = ?,
+                                work_status = CASE WHEN ? = 'active' THEN work_status ELSE 'not_working' END,
+                                role = CASE WHEN ? = 'blocked' THEN 'employee' ELSE role END
+               WHERE id = ?""",
+            (state, reason if state != "active" else None, now_iso(), actor["telegram_id"], state, state, user_id),
+        )
+        event = {"paused": "ACCOUNT_PAUSED", "blocked": "ACCOUNT_BLOCKED", "active": "ACCOUNT_ACTIVATED"}[state]
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
+                  old={"account_state": current}, new={"account_state": state}, description=reason)
     return get_user(conn, user_id), True
 
 
@@ -344,7 +408,7 @@ def get_shift(conn, shift_id: int) -> dict | None:
 
 def get_user_shift_on(conn, user_id: int, day: date) -> dict | None:
     return _row(
-        conn.execute("SELECT * FROM shifts WHERE user_id = ? AND shift_date = ?", (user_id, day.isoformat())).fetchone()
+        conn.execute(f"SELECT * FROM shifts WHERE user_id = ? AND shift_date = ? AND {LIVE}", (user_id, day.isoformat())).fetchone()
     )
 
 
@@ -371,7 +435,7 @@ def shifts_on(conn, day: date) -> list[dict]:
     rows = conn.execute(
         """SELECT s.*, u.first_name, u.last_name, u.username, u.telegram_id
            FROM shifts s JOIN users u ON u.id = s.user_id
-           WHERE s.shift_date = ?
+           WHERE s.shift_date = ? AND s.status NOT IN ('withdrawn','removed')
            ORDER BY s.start_time IS NULL, s.start_time, u.first_name""",
         (day.isoformat(),),
     ).fetchall()
@@ -425,7 +489,7 @@ def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
     mine = {
         r["shift_date"]: dict(r)
         for r in conn.execute(
-            "SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ?", (user["id"], first, last)
+            f"SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ? AND {LIVE}", (user["id"], first, last)
         )
     }
     others: dict[str, list[dict]] = {}
@@ -484,7 +548,7 @@ def history(conn, user: dict, weeks_back: int, today: date | None = None) -> lis
     for offset in range(-1, -weeks_back - 1, -1):
         days = week_dates(offset, today)
         rows = conn.execute(
-            "SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ? ORDER BY shift_date",
+            f"SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ? AND {LIVE} ORDER BY shift_date",
             (user["id"], days[0].isoformat(), days[-1].isoformat()),
         ).fetchall()
         if rows:
@@ -520,6 +584,9 @@ def user_penalties(conn, user_id: int) -> list[dict]:
 
 
 def _require_working(user: dict) -> None:
+    if user.get("account_state") == "paused":
+        reason = f": {user['state_reason']}" if user.get("state_reason") else ""
+        raise ServiceError(f"Аккаунт на паузе{reason}. Запись в график недоступна", 403, "paused")
     if user["work_status"] != "working":
         raise ServiceError("Сначала включите статус «Работаю» в профиле", 403, "not_working")
 
@@ -691,7 +758,7 @@ def clear_pre_declare_off(conn, user: dict, shift_id: int, key: str, today: date
             raise ServiceError("День не отмечен как нерабочий", 409, "bad_status")
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="PRE_DECLARED_OFF_CLEARED",
                   key=key, shift_id=shift_id, old={"date": shift["shift_date"], "status": "pre_declared_off"})
-        conn.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
+        conn.execute("UPDATE shifts SET status = 'withdrawn', updated_at = ? WHERE id = ?", (now_iso(), shift_id))
     return Result(None, True, "PRE_DECLARED_OFF_CLEARED")
 
 
@@ -823,7 +890,7 @@ def admin_delete_shift(conn, admin: dict, shift_id: int, reason: str, key: str) 
         log_event(conn, user_id=shift["user_id"], actor_id=admin["telegram_id"], event_type="SHIFT_REMOVED_BY_ADMIN",
                   key=key, shift_id=shift_id, old={**_snapshot(shift), "date": shift["shift_date"]},
                   description=reason)
-        conn.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
+        conn.execute("UPDATE shifts SET status = 'removed', updated_at = ? WHERE id = ?", (now_iso(), shift_id))
     return Result({**shift, "status": "removed"}, True, "SHIFT_REMOVED_BY_ADMIN")
 
 
@@ -875,7 +942,7 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
     if user is None:
         raise ServiceError("Сотрудник не найден", 404, "not_found")
     rows = conn.execute(
-        "SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ? ORDER BY shift_date",
+        f"SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ? AND {LIVE} ORDER BY shift_date",
         (user_id, date_from.isoformat(), date_to.isoformat()),
     ).fetchall()
     items, active_volume, cancelled_volume, penalties, pay = [], 0, 0, 0, 0
@@ -1064,7 +1131,7 @@ def create_point(conn, admin: dict, name: str, capacity: int | None) -> dict:
     return dict(conn.execute("SELECT * FROM points WHERE id = ?", (cur.lastrowid,)).fetchone())
 
 
-def update_point(conn, admin: dict, point_id: int, changes: dict) -> dict:
+def update_point(conn, admin: dict, point_id: int, changes: dict, today: date | None = None) -> dict:
     with transaction(conn):
         point = conn.execute("SELECT * FROM points WHERE id = ?", (point_id,)).fetchone()
         if point is None:
@@ -1080,7 +1147,7 @@ def update_point(conn, admin: dict, point_id: int, changes: dict) -> dict:
         conn.execute("UPDATE points SET name = ?, capacity = ?, active = ? WHERE id = ?", (name, capacity, active, point_id))
         if name != point["name"]:
             # keep upcoming shifts pointing at the renamed point
-            upcoming = conn.execute("SELECT id, location FROM shifts WHERE shift_date >= ?", (today_local().isoformat(),))
+            upcoming = conn.execute("SELECT id, location FROM shifts WHERE shift_date >= ?", ((today or today_local()).isoformat(),))
             ids = [r["id"] for r in upcoming if (r["location"] or "").casefold() == point["name"].casefold()]
             conn.executemany("UPDATE shifts SET location = ? WHERE id = ?", [(name, i) for i in ids])
         log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="POINT_UPDATED", key=new_key(),
@@ -1145,7 +1212,11 @@ def set_fact(conn, user: dict, shift_id: int, value: int, key: str, today: date 
 
 
 def set_notify(conn, user: dict, enabled: bool) -> dict:
+    """ТЗ 2.1: while «Работаю» the reminders can't be switched off."""
     with transaction(conn):
+        current = get_user(conn, user["id"])
+        if not enabled and current["work_status"] == "working":
+            raise ServiceError('Переведите статус "Не работаю", чтобы выключить напоминания', 409, "reminders_locked")
         conn.execute("UPDATE users SET notify_reminders = ? WHERE id = ?", (int(enabled), user["id"]))
     return get_user(conn, user["id"])
 

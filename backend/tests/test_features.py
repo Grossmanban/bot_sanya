@@ -76,7 +76,7 @@ def test_point_rename_moves_upcoming_shifts(conn, make_user):
     point = svc.create_point(conn, admin, "Европа", None)
     u = make_user()
     sid = shift(conn, u)["id"]
-    svc.update_point(conn, admin, point["id"], {"name": "ТЦ Европа"})
+    svc.update_point(conn, admin, point["id"], {"name": "ТЦ Европа"}, today=TODAY)
     assert svc.get_shift(conn, sid)["location"] == "ТЦ Европа"
     svc.update_point(conn, admin, point["id"], {"active": False})
     assert svc.list_points(conn) == []
@@ -110,6 +110,7 @@ def test_eve_reminder_auto_raspred_once(conn, make_user):
     a, b = make_user(), make_user("Ваня", "Бургер", None)
     shift(conn, a)
     shift(conn, b, payload={**P, "start_time": "14:00"})
+    b = svc.set_work_status(conn, b, "not_working", svc.new_key())  # reminders can only be muted when not working
     svc.set_notify(conn, b, False)
     n = FakeNotifier(conn)
     ran = run(jobs.tick(conn, n, at(TODAY, "21:05")))
@@ -340,3 +341,26 @@ def test_shortfall_waive_and_admin_correction(conn, make_user):
     # admin raises the fact back to the plan: the decision is cleared
     fixed = svc.admin_edit_shift(conn, owner, s["id"], {"fact_volume": 20, "reason": "нашли ещё"}, svc.new_key())
     assert fixed.shift["shortfall_status"] is None
+
+
+def test_archive_posts_with_hashtags_and_retries(conn, make_user):
+    from aiogram.exceptions import TelegramRetryAfter
+
+    notifier = FakeNotifier(conn)
+    user = make_user(first="Олег", last="Сидоров-Петров")
+    assert not run(notifier.archive(["штраф"], "x", user))  # no group yet
+    app_settings.set_raw(conn, "archive_chat_id", "-1001")
+    assert run(notifier.archive(["штраф", "недобор"], "💸 500 ₽", user))
+    chat, text = notifier.sent[-1]
+    assert chat == -1001 and text.startswith("#штраф #недобор #Олег_Сидоров_Петров")
+    assert conn.execute("SELECT sent FROM archive_log ORDER BY id DESC").fetchone()[0] == 1
+
+    calls = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) < 2:
+            raise TelegramRetryAfter(method=None, message="flood", retry_after=0)
+        return "ok"
+
+    assert run(Notifier._retry(flaky)) == "ok" and len(calls) == 2

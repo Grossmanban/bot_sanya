@@ -102,11 +102,15 @@ export function ProfileScreen({
           </span>
           <span className="flex-1">
             <span className="block font-medium">Напоминания в боте</span>
-            <span className="block text-sm text-muted-foreground">Накануне смены и про график на следующую неделю</span>
+            <span className="block text-sm text-muted-foreground">
+              {user.work_status === "working"
+                ? "Пока статус «Работаю», напоминания о сменах и отчётах всегда включены"
+                : "Накануне смены и про график на следующую неделю"}
+            </span>
           </span>
           <Switch
-            checked={user.notify_reminders !== false}
-            disabled={busy === "notify"}
+            checked={user.work_status === "working" || user.notify_reminders !== false}
+            disabled={busy === "notify" || user.work_status === "working"}
             onCheckedChange={async (on) => {
               try {
                 const res = await run("notify", () => api.setNotify(on), on ? "Напоминания включены" : "Напоминания выключены");

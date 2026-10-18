@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Shortfall } from "@/lib/api";
 import { dayMonth, plural, rub } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
+import { useCan } from "@/lib/caps";
 import { cn } from "@/lib/utils";
 
 const PRESETS = [500, 1000, 2000];
@@ -43,6 +44,7 @@ export function ShortfallDecision({
   const [custom, setCustom] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const { busy, run } = useAction();
+  const canFine = useCan("fine_direct");
 
   async function decide(amount: number | null) {
     try {
@@ -60,8 +62,11 @@ export function ShortfallDecision({
           Сейчас: {current.status === "fined" ? `штраф ${rub(current.penalty ?? 0)}` : "без штрафа"}. Можно изменить.
         </p>
       )}
+      {!canFine && (
+        <p className="text-sm text-muted-foreground">Штраф назначает администратор. Вы можете закрыть недобор без штрафа.</p>
+      )}
       <div className="flex flex-wrap gap-2">
-        {PRESETS.map((a) => (
+        {canFine && PRESETS.map((a) => (
           <Button key={a} size="sm" disabled={!!busy}
                   className={cn("press h-10 rounded-xl bg-cancel px-4 font-semibold text-white hover:bg-cancel/90",
                     current?.status === "fined" && current.penalty === a && "ring-2 ring-cancel/40 ring-offset-2 ring-offset-card")}
@@ -69,10 +74,12 @@ export function ShortfallDecision({
             {busy === String(a) && <LoaderCircle className="animate-spin" />} {a} ₽
           </Button>
         ))}
-        <Button size="sm" variant="secondary" className="press h-10 rounded-xl px-4 font-semibold" disabled={!!busy}
-                onClick={() => setShowCustom((v) => !v)}>
-          Своя сумма
-        </Button>
+        {canFine && (
+          <Button size="sm" variant="secondary" className="press h-10 rounded-xl px-4 font-semibold" disabled={!!busy}
+                  onClick={() => setShowCustom((v) => !v)}>
+            Своя сумма
+          </Button>
+        )}
         <Button size="sm" variant="ghost" className="press h-10 rounded-xl px-4 font-semibold" disabled={!!busy} onClick={() => decide(null)}>
           {busy === "null" && <LoaderCircle className="animate-spin" />} Без штрафа
         </Button>

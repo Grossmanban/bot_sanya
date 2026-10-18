@@ -1,10 +1,10 @@
 "use client";
 
-import { Clock3, LoaderCircle, Lock, Send, TriangleAlert, UserPlus } from "lucide-react";
+import { Ban, Clock3, LoaderCircle, Lock, Send, TriangleAlert, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { webApp } from "@/lib/telegram";
 
-type Kind = "outside" | "unregistered" | "pending" | "rejected" | "error";
+type Kind = "outside" | "unregistered" | "pending" | "rejected" | "blocked" | "error";
 
 const COPY: Record<Kind, { icon: typeof Clock3; title: string; text: string }> = {
   outside: {
@@ -23,6 +23,11 @@ const COPY: Record<Kind, { icon: typeof Clock3; title: string; text: string }> =
     text: "Как только администратор примет решение, бот пришлёт сообщение.",
   },
   rejected: { icon: Lock, title: "Доступ закрыт", text: "Администратор отклонил заявку." },
+  blocked: {
+    icon: Ban,
+    title: "Аккаунт заблокирован",
+    text: "График и отчёты недоступны. Если это ошибка — свяжитесь с руководителем.",
+  },
   error: { icon: TriangleAlert, title: "Не удалось загрузить", text: "" },
 };
 

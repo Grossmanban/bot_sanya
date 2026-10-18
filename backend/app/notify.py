@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
+import re
 import sqlite3
 from datetime import date
 from html import escape
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
 from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
@@ -17,6 +18,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
+from . import app_settings
+from . import permissions as perms
 from . import services as svc
 from .timeutil import ddmm, ddmm_wd
 
@@ -35,6 +38,11 @@ def plural(n: int, one: str, few: str, many: str) -> str:
 
 def employees(n: int) -> str:
     return f"{n} {plural(n, 'сотрудник', 'сотрудника', 'сотрудников')}"
+
+
+def person_tag(user: dict) -> str:
+    """#Иван_Петров — lets the archive be filtered by person."""
+    return "#" + re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", svc.full_name(user)).strip("_")
 
 
 def who(user: dict) -> str:
@@ -214,6 +222,21 @@ class Notifier:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    @staticmethod
+    async def _retry(call, attempts: int = 3):
+        """Retry flood limits and network/server hiccups (ТЗ 12.3); other API errors fail fast."""
+        for attempt in range(1, attempts + 1):
+            try:
+                return await call()
+            except TelegramRetryAfter as exc:
+                if attempt == attempts:
+                    raise
+                await asyncio.sleep(min(exc.retry_after, 30))
+            except (TelegramNetworkError, TelegramServerError):
+                if attempt == attempts:
+                    raise
+                await asyncio.sleep(attempt)
+
     async def send(
         self, chat_id: int, text: str, markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None
     ) -> bool:
@@ -221,8 +244,8 @@ class Notifier:
             log.info("[notify → %s] %s", chat_id, text)
             return False
         try:
-            await self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML",
-                                        disable_web_page_preview=True)
+            await self._retry(lambda: self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML",
+                                                            disable_web_page_preview=True))
             return True
         except TelegramAPIError as exc:
             # user blocked the bot, chat not found, etc. — keep going for the other recipients
@@ -237,7 +260,8 @@ class Notifier:
             log.info("[document → %s] %s (%d bytes)", chat_id, filename, len(data))
             return False
         try:
-            await self.bot.send_document(chat_id, BufferedInputFile(data, filename), caption=caption, parse_mode="HTML")
+            await self._retry(lambda: self.bot.send_document(chat_id, BufferedInputFile(data, filename), caption=caption,
+                                                             parse_mode="HTML"))
             return True
         except TelegramAPIError as exc:
             log.warning("document to %s failed: %s", chat_id, exc)
@@ -261,6 +285,37 @@ class Notifier:
             await asyncio.sleep(0.05)  # stay well under Telegram's ~30 msg/s limit
         self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
         return delivered
+
+    async def send_photo(self, chat_id: int | str, photo: str, caption: str, markup=None) -> bool:
+        if self.bot is None:
+            log.info("[photo → %s] %s", chat_id, caption)
+            return False
+        try:
+            await self._retry(lambda: self.bot.send_photo(chat_id, photo, caption=caption[:1024], parse_mode="HTML",
+                                                          reply_markup=markup))
+            return True
+        except Exception as exc:
+            log.warning("photo to %s failed: %s", chat_id, exc)
+            return False
+
+    async def archive(self, tags: list[str], text: str, person: dict | None = None, photo: str | None = None) -> bool:
+        """Copy an important action to the private archive group with hashtags for search.
+        Never raises: the business action already happened; a failed copy is logged in archive_log."""
+        head = " ".join(f"#{t}" for t in tags)
+        if person:
+            head += f" {person_tag(person)}"
+        body = f"{head}\n{text}"
+        cur = self.conn.execute(
+            "INSERT INTO archive_log (tags, text, created_at) VALUES (?, ?, ?)", (",".join(tags), body, svc.now_iso())
+        )
+        chat = app_settings.get_raw(self.conn, "archive_chat_id")
+        if not chat:
+            self.conn.execute("UPDATE archive_log SET error = 'archive group is not set' WHERE id = ?", (cur.lastrowid,))
+            return False
+        ok = await (self.send_photo(int(chat), photo, body) if photo else self.send(int(chat), body))
+        self.conn.execute("UPDATE archive_log SET sent = ?, error = ? WHERE id = ?",
+                          (int(ok), None if ok else "send failed", cur.lastrowid))
+        return ok
 
     async def to_admins(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None):
         for admin_id in svc.admin_telegram_ids(self.conn):
@@ -297,14 +352,23 @@ class Notifier:
             text = f"❌ Ваша срочная заявка на сегодня ({ddmm(_day(shift))}) отклонена администратором."
         await self.send(user["telegram_id"], text)
 
-    async def penalty_assigned(self, shift: dict) -> None:
+    async def penalty_assigned(self, shift: dict, actor_name: str | None = None) -> None:
         user = svc.get_user(self.conn, shift["user_id"])
         await self.send(
             user["telegram_id"],
             f"💸 Вам начислен штраф {shift['penalty_amount']} ₽ за окончательную отмену смены {ddmm(_day(shift))}.",
         )
+        await self.archive(
+            ["штраф", "отмена"],
+            f"💸 Штраф {shift['penalty_amount']} ₽ — {who(user)}\nОкончательная отмена смены {ddmm_wd(_day(shift))}"
+            + (f"\nНазначил: {escape(actor_name)}" if actor_name else ""),
+            user,
+        )
 
-    async def access_changed(self, user: dict, previous_status: str, open_app: InlineKeyboardMarkup | None) -> None:
+    async def access_changed(self, user: dict, previous_status: str, open_app: InlineKeyboardMarkup | None,
+                             actor: dict | None = None) -> None:
+        verdict = "✅ Заявка принята" if user["status"] == "approved" else "❌ Заявка отклонена"
+        await self.archive(["доступ"], f"{verdict} — {who(user)}" + (f"\nРешил: {who(actor)}" if actor else ""), user)
         if user["status"] == "approved":
             if svc.claim_welcome(self.conn, user["id"]):
                 await self.send(user["telegram_id"], "Добро пожаловать в систему!", open_app)
@@ -315,7 +379,15 @@ class Notifier:
         else:
             await self.send(user["telegram_id"], "Доступ к графику закрыт администратором.", ReplyKeyboardRemove())
 
-    async def role_changed(self, user: dict) -> None:
+    async def role_changed(self, user: dict, actor: dict | None = None, previous: str | None = None) -> None:
+        title = perms.ROLE_TITLES[perms.role_of(user)]
+        if previous:
+            await self.archive(
+                ["роль"],
+                f"👤 {who(user)}: {perms.ROLE_TITLES.get(previous, previous)} → {title}"
+                + (f"\nИзменил: {who(actor)}" if actor else ""),
+                user,
+            )
         if user["role"] == "admin":
             await self.send(
                 user["telegram_id"],
@@ -323,8 +395,32 @@ class Notifier:
                 "сюда будут приходить заявки и уведомления.",
                 ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📋 Распред на завтра")]], resize_keyboard=True),
             )
+        elif user["role"] == "trainer":
+            await self.send(
+                user["telegram_id"],
+                "Вы назначены тренером. В приложении появилась вкладка «Админ» — там ваша команда, "
+                "её смены и отчёты.",
+                ReplyKeyboardRemove(),
+            )
         else:
-            await self.send(user["telegram_id"], "Права администратора сняты.", ReplyKeyboardRemove())
+            await self.send(user["telegram_id"], "Расширенные права сняты, вы снова сотрудник.", ReplyKeyboardRemove())
+
+    async def account_state_changed(self, user: dict, actor: dict, previous: str) -> None:
+        state, reason = user["account_state"], user["state_reason"]
+        why = f"\nПричина: {escape(reason)}" if reason else ""
+        if state == "paused":
+            tags, line = ["пауза"], "⏸ На паузе"
+            personal = "⏸ Ваш аккаунт поставлен на паузу: новые смены пока недоступны." + why
+        elif state == "blocked":
+            tags, line = ["блок"], "⛔ Заблокирован"
+            personal = "⛔ Ваш аккаунт заблокирован." + why
+        else:
+            tags = ["блок"] if previous == "blocked" else ["пауза"]
+            line = "✅ Разблокирован" if previous == "blocked" else "▶️ Пауза снята"
+            personal = "✅ Доступ восстановлен. Можно снова записываться на смены."
+        await self.send(user["telegram_id"], personal,
+                        ReplyKeyboardRemove() if state == "blocked" else None)
+        await self.archive(tags, f"{line} — {who(user)}{why}\nИзменил: {who(actor)}", user)
 
     async def fact_result(self, shift: dict, actor_tg: int | None = None) -> None:
         """After a fact is saved: warn the employee and ask admins for a decision if the plan was missed."""
@@ -352,6 +448,12 @@ class Notifier:
                             f"💸 Штраф {shift['shortfall_penalty']} ₽: не выполнена норма {day} "
                             f"(план {shift['volume']}, факт {shift['fact_volume']} шт.).")
             verdict = f"штраф {shift['shortfall_penalty']} ₽"
+            await self.archive(
+                ["штраф", "недобор"],
+                f"💸 Штраф {shift['shortfall_penalty']} ₽ — {who(user)}\nНедобор {day}: план {shift['volume']}, "
+                f"факт {shift['fact_volume']} шт.\nНазначил: {escape(admin_name)}",
+                user,
+            )
         else:
             await self.send(user["telegram_id"], f"По смене {day} недобор учтён без штрафа.")
             verdict = "без штрафа"

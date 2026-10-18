@@ -41,12 +41,17 @@ def _sheet(wb: Workbook, title: str, header: list[str], rows: list[list], widths
     return ws
 
 
-def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id: int | None = None) -> bytes:
+def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id: int | None = None,
+               only: set[int] | None = None) -> bytes:
+    """only: restrict to these user ids (a trainer's network)."""
     params: list = [date_from.isoformat(), date_to.isoformat()]
-    where = "s.shift_date BETWEEN ? AND ?"
+    where = "s.shift_date BETWEEN ? AND ? AND s.status NOT IN ('withdrawn','removed')"
     if user_id:
         where += " AND s.user_id = ?"
         params.append(user_id)
+    if only is not None:
+        where += f" AND s.user_id IN ({','.join('?' * len(only)) or 'NULL'})"
+        params.extend(sorted(only))
     shifts = [
         dict(r)
         for r in conn.execute(
