@@ -13,9 +13,9 @@ from datetime import date, datetime, time, timedelta
 from html import escape
 from pathlib import Path
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 
-from . import app_settings, export, notify
+from . import app_settings, export, notify, reports
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -72,10 +72,25 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
     await daily("weekly_report", cfg["weekly_report_enabled"], cfg["weekly_report_time"],
                 lambda: weekly_report(conn, notifier, today), weekday=0)
     await daily("backup", cfg["backup_enabled"], cfg["backup_time"], lambda: backup(conn, notifier))
-    if cfg["fact_request_enabled"]:
-        if await fact_requests(conn, notifier, now, cfg["fact_request_delay"]):
-            ran.append("fact_request")
+    await daily("report_digest", cfg["report_digest_enabled"], cfg["report_digest_time"],
+                lambda: report_digest(conn, notifier, today, cfg["report_digest_to"]))
+    since = reports_since(conn, today)
+    if cfg["fact_request_enabled"] and await fact_requests(conn, notifier, now, cfg["fact_request_delay"], since):
+        ran.append("fact_request")
+    if cfg["report_reminder_enabled"] and await report_reminders(conn, notifier, now, cfg["report_reminder_lead"], since):
+        ran.append("report_reminder")
+    if await no_shows(conn, notifier, now, since):
+        ran.append("no_show")
     return ran
+
+
+def reports_since(conn, today: date) -> date:
+    """Reports became mandatory on the day this version first ran: older shifts never turn into no-shows."""
+    raw = app_settings.get_raw(conn, "reports_since")
+    if raw is None:
+        app_settings.set_raw(conn, "reports_since", today.isoformat())
+        return today
+    return date.fromisoformat(raw)
 
 
 async def run_scheduler(conn: sqlite3.Connection, notifier: Notifier, interval: int = 30) -> None:
@@ -145,36 +160,100 @@ async def week_reminders(conn, notifier: Notifier, today: date) -> int:
     return sent
 
 
-def fact_keyboard(shift: dict) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"✅ {shift['volume']} шт., как план", callback_data=f"fact:{shift['id']}:{shift['volume']}")],
-            [InlineKeyboardButton(text="✏️ Другое число", callback_data=f"factc:{shift['id']}")]]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def fact_requests(conn, notifier: Notifier, now: datetime, delay_min: int) -> int:
-    today = now.date()
-    rows = [
+def _open_shifts(conn, since: date, extra: str) -> list[dict]:
+    """Held shifts since `since` that still have no report, joined with the employee."""
+    return [
         dict(r)
         for r in conn.execute(
             f"""SELECT s.*, u.telegram_id FROM shifts s JOIN users u ON u.id = s.user_id
-                WHERE s.status IN {svc.ACTIVE} AND s.fact_volume IS NULL AND s.fact_asked_at IS NULL
-                  AND s.shift_date BETWEEN ? AND ? AND u.status = 'approved'""",
-            ((today - timedelta(days=1)).isoformat(), today.isoformat()),
+                WHERE s.status IN {svc.ACTIVE} AND s.start_time IS NOT NULL AND s.report_state IS NULL
+                  AND s.shift_date >= ? AND u.status = 'approved' AND u.account_state != 'blocked' {extra}""",
+            (since.isoformat(),),
         )
     ]
+
+
+async def fact_requests(conn, notifier: Notifier, now: datetime, delay_min: int, since: date) -> int:
+    """ТЗ 3.2: after the shift the bot asks for the report (fact + screenshot)."""
     sent = 0
-    for s in rows:
-        day = date.fromisoformat(s["shift_date"])
-        end = datetime.combine(day, time.fromisoformat(s["end_time"]), tzinfo=now.tzinfo) + timedelta(minutes=delay_min)
-        if now < end:
+    for s in _open_shifts(conn, max(since, now.date() - timedelta(days=1)), "AND s.fact_asked_at IS NULL"):
+        if now < reports.shift_end(s) + timedelta(minutes=delay_min) or now >= reports.deadline(s):
             continue
         conn.execute("UPDATE shifts SET fact_asked_at = ? WHERE id = ?", (now_iso(), s["id"]))
         sent += await notifier.send(
             s["telegram_id"],
-            f"Смена {ddmm_wd(day)} {s['start_time']}–{s['end_time']} на точке «{escape(s['location'])}» закончилась.\n"
-            f"Сколько сделал? План был {s['volume']} шт.",
-            fact_keyboard(s),
+            f"Смена {notify.shift_place(s)} закончилась.\nНапиши фактический объём и пришли скриншот результата. "
+            f"План был {s['volume']} шт. Сдать до {reports.deadline(s):%H:%M %d.%m}.",
+            notify.report_keyboard(s),
         )
+    return sent
+
+
+async def report_reminders(conn, notifier: Notifier, now: datetime, lead_min: int, since: date) -> int:
+    """ТЗ 3.3 step 1: a warning some time before the deadline (lead set by admins)."""
+    sent = 0
+    for s in _open_shifts(conn, since, "AND s.report_reminded_at IS NULL"):
+        due = reports.deadline(s)
+        if not (due - timedelta(minutes=lead_min) <= now < due) or now < reports.shift_end(s):
+            continue
+        conn.execute("UPDATE shifts SET report_reminded_at = ? WHERE id = ?", (now_iso(), s["id"]))
+        sent += await notifier.report_reminder(s, f"{due:%H:%M}")
+    return sent
+
+
+async def no_shows(conn, notifier: Notifier, now: datetime, since: date) -> int:
+    """ТЗ 3.3 step 2: no report by the deadline → no_show, to manual review with notifications."""
+    marked = 0
+    for s in _open_shifts(conn, since, ""):
+        if now < reports.deadline(s):
+            continue
+        shift = reports.mark_no_show(conn, s["id"], now)
+        if shift:
+            marked += 1
+            await notifier.no_show(shift)
+    return marked
+
+
+async def report_digest(conn, notifier: Notifier, today: date, audience: str) -> int:
+    """Admins learn who hasn't reported for today yet and what waits for review.
+    audience: owners | admins (owners + admins) | staff (+ trainers, each about their network)."""
+    missing = reports.queue(conn, "missing", today)
+    waiting = reports.queue(conn, "review")
+    no_show = reports.queue(conn, "no_show")
+    if not (missing or waiting or no_show):
+        return 0
+    recipients = set(svc.owner_telegram_ids()) if audience == "owners" else set(svc.admin_telegram_ids(conn))
+    trainers = []
+    if audience == "staff":
+        trainers = [dict(r) for r in conn.execute(
+            """SELECT * FROM users WHERE role = 'trainer' AND status = 'approved' AND account_state != 'blocked'
+               AND network_id IS NOT NULL""")]
+
+    def text(only: set[int] | None) -> str | None:
+        m = [x for x in missing if only is None or x["user_id"] in only]
+        w = [x for x in waiting if only is None or x["user_id"] in only]
+        n = [x for x in no_show if only is None or x["user_id"] in only]
+        if not (m or w or n):
+            return None
+        lines = [f"📋 <b>Отчёты за {ddmm_wd(today)}</b>"]
+        if m:
+            lines.append(f"\nНе сдали ({len(m)}):")
+            lines += [f"• {escape(x['name'])} — {x['start_time']}–{x['end_time']}, до {x['deadline'][11:16]}" for x in m]
+        if w:
+            lines.append(f"\n📝 Ждут проверки: {len(w)}")
+        if n:
+            lines.append(f"🚫 Неявки без решения: {len(n)}")
+        return "\n".join(lines)
+
+    sent = 0
+    full = text(None)
+    for chat in recipients:
+        sent += await notifier.send(chat, full, _open_app())
+    for t in trainers:
+        own = {r[0] for r in conn.execute("SELECT id FROM users WHERE network_id = ? AND id != ?", (t["network_id"], t["id"]))}
+        body = text(own)
+        if body and t["telegram_id"] not in recipients:
+            sent += await notifier.send(t["telegram_id"], body, _open_app())
     return sent
 
 

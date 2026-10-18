@@ -18,7 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
 import { dayMonth } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
-import { haptic, webApp } from "@/lib/telegram";
+import { haptic, openChat, webApp } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
@@ -214,18 +214,6 @@ function Group({
 
 const ROLE_OPTIONS: Exclude<Role, "owner">[] = ["employee", "trainer", "admin"];
 
-function openProfile(user: User) {
-  const tg = webApp();
-  if (user.username) {
-    const link = `https://t.me/${user.username}`;
-    if (tg) tg.openTelegramLink(link);
-    else window.open(link, "_blank");
-  } else {
-    // without a username only the tg:// deep link can open the chat
-    window.location.href = `tg://user?id=${user.telegram_id}`;
-  }
-}
-
 function MemberSheet({
   user,
   me,
@@ -337,7 +325,7 @@ function MemberSheet({
 
               {!isSelf && (
                 <Button variant="secondary" className="press mt-5 h-12 w-full rounded-2xl text-[15px] font-semibold"
-                        onClick={() => openProfile(user)}>
+                        onClick={() => openChat(user)}>
                   <MessageCircle /> Открыть в Telegram
                 </Button>
               )}

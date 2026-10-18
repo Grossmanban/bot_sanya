@@ -24,14 +24,16 @@ import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
 import { TeamSection } from "./team-section";
-import { PlanFactBar, ShortfallInbox } from "./shortfall";
+import { PlanFactBar } from "./shortfall";
+import { ReportsSection } from "./reports";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
-type Section = "raspred" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "raspred" | "reports" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
+  { id: "reports", label: "Отчёты", need: "review" },
   { id: "day", label: "День", need: "schedule" },
   { id: "stats", label: "Отчёт", need: "review" },
   { id: "penalties", label: "Штрафы", need: "review" },
@@ -48,8 +50,8 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
   const [section, setSection] = useState<Section>(sections[0]?.id ?? "day");
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
-  const pendingShort = useLoad(() => api.admin.shortfalls(), [version, section]);
-  const shortCount = pendingShort.data?.items.length ?? 0;
+  const counts = useLoad(() => api.admin.reportCounts(), [version, section]);
+  const waiting = (counts.data?.review ?? 0) + (counts.data?.no_show ?? 0);
 
   return (
     <CapsContext.Provider value={caps}>
@@ -72,10 +74,10 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
               )}
             >
               {s.label}
-              {s.id === "penalties" && shortCount > 0 && (
+              {s.id === "reports" && waiting > 0 && (
                 <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
                   section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
-                  {shortCount}
+                  {waiting}
                 </span>
               )}
             </button>
@@ -85,10 +87,11 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
 
       <div key={section} className="screen-in">
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
+        {section === "reports" && <ReportsSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
         {section === "penalties" && (
-          <PenaltiesSection version={version} onEdit={setEditing} onChanged={() => setVersion((v) => v + 1)} />
+          <PenaltiesSection version={version} onEdit={setEditing} />
         )}
         {section === "team" && <TeamSection me={me} caps={caps} />}
         {section === "points" && <PointsSection />}
@@ -450,7 +453,7 @@ function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; on
   );
 }
 
-function PenaltiesSection({ version, onEdit, onChanged }: { version: number; onEdit: EditFn; onChanged: () => void }) {
+function PenaltiesSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
   const users = useLoad(() => api.admin.users(), [version]);
   const [user, setUser] = useState<User | null>(null);
   const [from, setFrom] = useState("");
@@ -467,7 +470,6 @@ function PenaltiesSection({ version, onEdit, onChanged }: { version: number; onE
 
   return (
     <div className="space-y-4">
-      <ShortfallInbox version={version} onChanged={onChanged} />
       <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
         <h2 className="font-semibold">Журнал штрафов</h2>
         {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-12 rounded-2xl" />}
@@ -506,7 +508,7 @@ function PenaltiesSection({ version, onEdit, onChanged }: { version: number; onE
                           onClick={() => open(p.shift_id, p.date)}>
                     <span className="min-w-0">
                       <span className="block truncate font-medium">{p.name}</span>
-                      <span className={cn("block text-sm", p.kind === "shortfall" ? "text-cancel" : "text-muted-foreground")}>
+                      <span className={cn("block text-sm", p.kind !== "final_cancel" ? "text-cancel" : "text-muted-foreground")}>
                         {p.reason}
                       </span>
                       <span className="block text-xs text-muted-foreground">

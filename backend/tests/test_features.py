@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 import pytest
 from openpyxl import load_workbook
 
-from app import app_settings, export, jobs
+from app import app_settings, export, jobs, reports
 from app import services as svc
 from app.config import settings
 from app.db import connect
@@ -21,6 +21,7 @@ class FakeNotifier(Notifier):
         super().__init__(None, conn)
         self.sent: list[tuple[int, str]] = []
         self.docs: list[tuple[int, str]] = []
+        self.photos: list[tuple[int, str]] = []
 
     async def send(self, chat_id, text, markup=None):
         self.sent.append((chat_id, text))
@@ -28,6 +29,11 @@ class FakeNotifier(Notifier):
 
     async def send_document(self, chat_id, data, filename, caption=None):
         self.docs.append((chat_id, filename))
+        return True
+
+    async def send_photo(self, chat_id, photo, caption, markup=None):
+        self.sent.append((chat_id, caption))
+        self.photos.append((chat_id, photo))
         return True
 
 
@@ -42,6 +48,10 @@ def run(coro):
 
 def shift(conn, user, day=THU, payload=P):
     return svc.create_shift(conn, user, day, dict(payload), svc.new_key(), today=TODAY).shift
+
+
+def report(conn, user, s, value, now=None):
+    return reports.submit(conn, user, s["id"], value, "photo-file-id", "app", svc.new_key(), now=now or at(THU, "19:30"))
 
 
 # ---------------------------------------------------------------- points
@@ -85,21 +95,140 @@ def test_point_rename_moves_upcoming_shifts(conn, make_user):
 # ---------------------------------------------------------------- fact
 
 
-def test_fact_window_and_stats(conn, make_user):
+def test_report_window_auto_approve_and_stats(conn, make_user):
     u = make_user()
     s = shift(conn, u)
+    assert reports.deadline(s) == at(THU + timedelta(days=1), "00:00")
+    late = shift(conn, u, THU + timedelta(days=1), {**P, "start_time": "20:00", "end_time": "23:30"})
+    assert reports.deadline(late) == at(THU + timedelta(days=2), "01:30")  # end + 2h is later than midnight
     with pytest.raises(svc.ServiceError) as e:
-        svc.set_fact(conn, u, s["id"], 20, svc.new_key(), today=TODAY)
+        report(conn, u, s, 20, now=at(THU, "15:00"))
     assert e.value.code == "too_early"
-    res = svc.set_fact(conn, u, s["id"], 30, svc.new_key(), today=THU)
-    assert res.changed and res.shift["fact_volume"] == 30
-    view = svc.serialize_shift(res.shift, THU)
-    assert view["fact_pay"] == 30 * 120 and view["can_set_fact"]
     with pytest.raises(svc.ServiceError) as e:
-        svc.set_fact(conn, u, s["id"], 31, svc.new_key(), today=THU + timedelta(days=4))
-    assert e.value.code == "too_late"
+        reports.submit(conn, u, s["id"], 20, "", "app", svc.new_key(), now=at(THU, "19:30"))
+    assert e.value.code == "photo_required"
+    res = report(conn, u, s, 30)
+    assert res.changed and res.report["status"] == "auto_approved" and res.shift["report_state"] == "approved"
+    view = svc.serialize_shift(res.shift, THU)
+    assert view["fact_pay"] == 30 * 120 and view["report_state"] == "approved"
+    with pytest.raises(svc.ServiceError) as e:
+        report(conn, u, s, 31)
+    assert e.value.code == "report_closed"
     st = svc.stats(conn, u["id"], TODAY, THU)
     assert st["totals"]["fact_volume"] == 30 and st["totals"]["fact_pay"] == 3600
+
+
+def test_report_review_return_and_fine(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    u = make_user()
+    s = shift(conn, u, payload={**P, "volume": 20})
+    n = FakeNotifier(conn)
+    res = report(conn, u, s, 10)
+    assert res.report["status"] == "pending_review" and res.shift["report_state"] == "pending_review"
+    # while waiting the employee may replace the report (same attempt)
+    res = report(conn, u, s, 12)
+    assert res.report["attempt"] == 1 and res.shift["fact_volume"] == 12
+    run(n.report_submitted(res.shift, res.report))
+    assert any("Отчёт отправлен на проверку" in t for chat, t in n.sent if chat == u["telegram_id"])
+    assert (999, "photo-file-id") in n.photos  # reviewers get the screenshot with buttons
+    assert reports.queue(conn, "review")[0]["shift_id"] == s["id"]
+    assert reports.counts(conn) == {"review": 1, "no_show": 0}
+
+    with pytest.raises(svc.ServiceError) as e:
+        reports.review(conn, owner, s["id"], "return", svc.new_key())
+    assert e.value.code == "comment_required"
+    back = reports.review(conn, owner, s["id"], "return", svc.new_key(), comment="Скрин обрезан")
+    assert back.shift["report_state"] == "needs_fix" and back.report["status"] == "rejected_retry"
+    # a returned report has no deadline: next day is fine, attempt 2
+    again = report(conn, u, s, 14, now=at(THU + timedelta(days=2), "12:00"))
+    assert again.report["attempt"] == 2 and again.shift["report_state"] == "pending_review"
+
+    fined = reports.review(conn, owner, s["id"], "fine", svc.new_key(), amount=700, comment="Не выполнена норма")
+    assert fined.shift["report_state"] == "rejected" and fined.shift["shortfall_penalty"] == 700
+    run(n.report_reviewed(fined.shift, fined.report, owner))
+    assert any("штраф 700 ₽" in t for chat, t in n.sent if chat == u["telegram_id"])
+    assert [r["status"] for r in reports.attempts(conn, s["id"])] == ["rejected_retry", "rejected_penalty"]
+
+    penalties = svc.user_penalties(conn, u["id"])
+    assert penalties[0]["kind"] == "shortfall" and penalties[0]["penalty_amount"] == 700
+    assert "Не выполнена норма" in penalties[0]["reason"]
+    st = svc.stats(conn, u["id"], TODAY, THU)
+    assert st["totals"]["penalties"] == 700 and st["totals"]["shortfall_volume"] == 6
+    wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
+    header = list(wb["Итоги"].iter_rows(values_only=True))[0]
+    row = list(wb["Итоги"].iter_rows(values_only=True))[1]
+    assert row[header.index("Недобор, шт.")] == 6 and row[header.index("Штрафы, ₽")] == 700
+
+
+def test_report_permissions(conn, make_user):
+    svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    u = make_user()
+    trainer = make_user(first="Вера", last="Тренер")
+    conn.execute("UPDATE users SET network_id = 1 WHERE id IN (?, ?)", (u["id"], trainer["id"]))
+    conn.execute("UPDATE users SET role = 'trainer' WHERE id = ?", (trainer["id"],))
+    trainer, u = svc.get_user(conn, trainer["id"]), svc.get_user(conn, u["id"])
+    s = shift(conn, u, payload={**P, "volume": 20})
+    report(conn, u, s, 10)
+    assert trainer["telegram_id"] in reports.reviewers(conn, u)
+    with pytest.raises(svc.ServiceError) as e:  # trainers can't fine directly
+        reports.review(conn, trainer, s["id"], "fine", svc.new_key(), amount=500, comment="x")
+    assert e.value.status == 403
+    ok = reports.review(conn, trainer, s["id"], "approve", svc.new_key())
+    assert ok.shift["report_state"] == "approved" and ok.shift["shortfall_status"] == "waived"
+
+    admin = make_user(first="Адм", last="Ин")
+    conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (admin["id"],))
+    own = shift(conn, svc.get_user(conn, admin["id"]), payload={**P, "volume": 20})
+    report(conn, admin, own, 5)
+    with pytest.raises(svc.ServiceError) as e:  # nobody but an owner reviews their own report
+        reports.review(conn, svc.get_user(conn, admin["id"]), own["id"], "approve", svc.new_key())
+    assert e.value.code == "own_report"
+
+
+def test_no_show_reminder_and_resolution(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    app_settings.set_raw(conn, "reports_since", TODAY.isoformat())
+    u = make_user()
+    s = shift(conn, u)
+    other = shift(conn, make_user(first="Пётр", last="Сдал"))
+    n = FakeNotifier(conn)
+    run(jobs.tick(conn, n, at(THU, "21:30")))
+    assert not [t for _, t in n.sent if "Вы не сдали отчёт" in t]
+    run(jobs.tick(conn, n, at(THU, "22:00")))  # 2 hours before the 00:00 deadline
+    reminders = [t for chat, t in n.sent if "Вы не сдали отчёт" in t]
+    assert len(reminders) == 2 and "до 00:00" in reminders[0]
+    report(conn, svc.get_user(conn, other["user_id"]), other, 30, now=at(THU, "23:00"))
+
+    digest = [t for chat, t in n.sent if chat == 999 and "Отчёты за" in t]
+    assert digest and "Иван Петров" in digest[0]  # 22:00 digest: who hasn't reported
+
+    run(jobs.tick(conn, n, at(THU + timedelta(days=1), "00:01")))
+    assert svc.get_shift(conn, s["id"])["report_state"] == "no_show"
+    assert svc.get_shift(conn, other["id"])["report_state"] == "approved"
+    assert any("неявка" in t for chat, t in n.sent if chat == u["telegram_id"])
+    assert any("Неявка" in t for chat, t in n.sent if chat == 999)
+    run(jobs.tick(conn, n, at(THU + timedelta(days=1), "00:30")))
+    assert len([t for chat, t in n.sent if chat == u["telegram_id"] and "неявка" in t]) == 1
+    with pytest.raises(svc.ServiceError) as e:
+        report(conn, u, s, 25, now=at(THU + timedelta(days=1), "08:00"))
+    assert e.value.code == "deadline_passed"
+
+    assert reports.queue(conn, "no_show")[0]["shift_id"] == s["id"]
+    fined = reports.resolve_no_show(conn, owner, s["id"], "fine", svc.new_key(), amount=1000, comment="Не вышел")
+    assert fined.shift["shortfall_penalty"] == 1000 and reports.queue(conn, "no_show") == []
+    assert svc.user_penalties(conn, u["id"])[0]["reason"].startswith("Неявка")
+    # path B: staff enter the result themselves — the fine is cleared, the shift approved
+    fixed = reports.manual_result(conn, owner, s["id"], 25, svc.new_key(), comment="Был на точке, скрин в чате")
+    assert fixed.shift["report_state"] == "approved" and fixed.shift["shortfall_status"] is None
+    assert fixed.report["source"] == "admin" and svc.user_penalties(conn, u["id"]) == []
+
+
+def test_old_shifts_never_become_no_shows(conn, make_user):
+    u = make_user()
+    s = shift(conn, u)
+    n = FakeNotifier(conn)
+    run(jobs.tick(conn, n, at(THU + timedelta(days=3), "12:00")))  # first run after the update
+    assert svc.get_shift(conn, s["id"])["report_state"] is None and n.sent == []
 
 
 # ---------------------------------------------------------------- scheduled jobs
@@ -150,16 +279,17 @@ def test_week_reminder_only_for_empty_next_week(conn, make_user):
 
 
 def test_fact_request_after_shift_end(conn, make_user):
+    app_settings.set_raw(conn, "reports_since", TODAY.isoformat())
     u = make_user()
     s = shift(conn, u)
     n = FakeNotifier(conn)
     run(jobs.tick(conn, n, at(THU, "19:10")))
-    assert not [t for _, t in n.sent if "Сколько сделал" in t]
+    assert not [t for _, t in n.sent if "скриншот" in t]
     run(jobs.tick(conn, n, at(THU, "19:16")))
-    asks = [t for _, t in n.sent if "Сколько сделал" in t]
-    assert len(asks) == 1 and "План был 25" in asks[0]
+    asks = [t for _, t in n.sent if "скриншот" in t]
+    assert len(asks) == 1 and "План был 25" in asks[0] and "Сдать до 00:00" in asks[0]
     run(jobs.tick(conn, n, at(THU, "19:30")))
-    assert len([t for _, t in n.sent if "Сколько сделал" in t]) == 1
+    assert len([t for _, t in n.sent if "скриншот" in t]) == 1
     assert svc.get_shift(conn, s["id"])["fact_asked_at"]
 
 
@@ -167,13 +297,13 @@ def test_weekly_report_with_excel(conn, make_user):
     svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     u = make_user()
     s = shift(conn, u)
-    svc.set_fact(conn, u, s["id"], 22, svc.new_key(), today=THU)
+    report(conn, u, s, 22)
     n = FakeNotifier(conn)
     monday = date(2026, 10, 19)
     ran = run(jobs.tick(conn, n, at(monday, "10:00")))
     assert "weekly_report" in ran
-    report = next(t for _, t in n.sent if "Итоги недели" in t)
-    assert "план 25, факт 22 шт." in report
+    summary = next(t for _, t in n.sent if "Итоги недели" in t)
+    assert "план 25, факт 22 шт." in summary
     assert n.docs and n.docs[0][1].endswith(".xlsx")
 
 
@@ -183,7 +313,7 @@ def test_weekly_report_with_excel(conn, make_user):
 def test_excel_export_contents(conn, make_user):
     u = make_user()
     s = shift(conn, u)
-    svc.set_fact(conn, u, s["id"], 20, svc.new_key(), today=THU)
+    report(conn, u, s, 20)
     wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
     assert wb.sheetnames == ["Итоги", "Смены", "Штрафы"]
     totals = list(wb["Итоги"].iter_rows(values_only=True))
@@ -278,69 +408,6 @@ def test_sanitizer_closes_open_tags_and_rejects_empty():
 
 
 # ---------------------------------------------------------------- plan vs fact shortfall
-
-
-def test_shortfall_flow_notifies_and_fines(conn, make_user):
-    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
-    u = make_user()
-    s = shift(conn, u, payload={**P, "volume": 20})
-    res = svc.set_fact(conn, u, s["id"], 10, svc.new_key(), today=THU)
-    assert svc.shortfall(res.shift) == 10 and svc.shortfall_percent(res.shift) == 50
-    view = svc.serialize_shift(res.shift, THU)
-    assert view["shortfall"] == 10 and view["shortfall_status"] is None
-
-    n = FakeNotifier(conn)
-    run(n.fact_result(res.shift))
-    to_user = [t for chat, t in n.sent if chat == u["telegram_id"]]
-    to_admin = [t for chat, t in n.sent if chat == 999]
-    assert to_user and "Не по норме" in to_user[0] and "План 20, факт 10 шт. — 50% (−10 шт.)" in to_user[0]
-    assert to_admin and "Назначить штраф" in to_admin[0]
-
-    assert svc.shortfalls(conn)[0]["shift_id"] == s["id"]
-    fined = svc.decide_shortfall(conn, owner, s["id"], 700)
-    assert fined.changed and fined.shift["shortfall_penalty"] == 700
-    assert not svc.decide_shortfall(conn, owner, s["id"], 2000).changed  # first decision wins in the bot
-    assert svc.shortfalls(conn) == []
-    # the employee can no longer rewrite the fact to dodge the fine
-    with pytest.raises(svc.ServiceError) as e:
-        svc.set_fact(conn, u, s["id"], 20, svc.new_key(), today=THU)
-    assert e.value.code == "fact_locked"
-
-    penalties = svc.user_penalties(conn, u["id"])
-    assert penalties[0]["kind"] == "shortfall" and penalties[0]["penalty_amount"] == 700
-    st = svc.stats(conn, u["id"], TODAY, THU)
-    assert st["totals"]["penalties"] == 700 and st["totals"]["shortfall_volume"] == 10
-    log = svc.penalty_log(conn, None, None, None)
-    assert log[0]["kind"] == "shortfall" and log[0]["amount"] == 700
-
-    run(n.shortfall_decided(fined.shift, "Саня", 999))
-    assert any("Штраф 700 ₽" in t for chat, t in n.sent if chat == u["telegram_id"])
-
-    wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
-    header = list(wb["Итоги"].iter_rows(values_only=True))[0]
-    row = list(wb["Итоги"].iter_rows(values_only=True))[1]
-    assert row[header.index("Недобор, шт.")] == 10 and row[header.index("Штрафы, ₽")] == 700
-
-
-def test_shortfall_waive_and_admin_correction(conn, make_user):
-    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
-    u = make_user()
-    s = shift(conn, u, payload={**P, "volume": 20})
-    svc.set_fact(conn, u, s["id"], 20, svc.new_key(), today=THU)
-    with pytest.raises(svc.ServiceError) as e:
-        svc.decide_shortfall(conn, owner, s["id"], 500)
-    assert e.value.code == "no_shortfall"
-    n = FakeNotifier(conn)
-    run(n.fact_result(svc.get_shift(conn, s["id"])))
-    assert n.sent == []  # plan met: nobody is bothered
-
-    svc.admin_edit_shift(conn, owner, s["id"], {"fact_volume": 15, "reason": "пересчитали"}, svc.new_key())
-    waived = svc.decide_shortfall(conn, owner, s["id"], None)
-    assert waived.shift["shortfall_status"] == "waived"
-    assert svc.penalty_log(conn, None, None, None) == []
-    # admin raises the fact back to the plan: the decision is cleared
-    fixed = svc.admin_edit_shift(conn, owner, s["id"], {"fact_volume": 20, "reason": "нашли ещё"}, svc.new_key())
-    assert fixed.shift["shortfall_status"] is None
 
 
 def test_archive_posts_with_hashtags_and_retries(conn, make_user):

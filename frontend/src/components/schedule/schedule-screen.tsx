@@ -50,7 +50,7 @@ export function ScheduleScreen({
   }, [reload]);
 
   // on wide screens a day is always selected in the side panel
-  const firstOpen = week?.days.find((d) => !d.is_past || d.my_shift?.can_set_fact)?.date ?? null;
+  const firstOpen = week?.days.find((d) => !d.is_past || d.my_shift?.report?.can_submit)?.date ?? null;
   const selected = week?.days.find((d) => d.date === openDate) ?? null;
   useEffect(() => {
     if (wide && week && (!openDate || !week.days.some((d) => d.date === openDate))) setOpenDate(firstOpen);
@@ -281,6 +281,18 @@ function WorkToggle({ onUserChange }: { onUserChange: (u: User) => void }) {
   );
 }
 
+const REPORT_FLAG: Record<string, { label: string; tone: "wait" | "cancel" }> = {
+  pending_review: { label: "Отчёт на проверке", tone: "wait" },
+  needs_fix: { label: "Исправить отчёт", tone: "wait" },
+  rejected: { label: "Отчёт отклонён", tone: "cancel" },
+  no_show: { label: "Неявка", tone: "cancel" },
+};
+
+const FLAG_TONE = {
+  wait: { text: "text-wait", dot: "bg-wait" },
+  cancel: { text: "text-cancel", dot: "bg-cancel" },
+};
+
 function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; selected: boolean; onOpen: () => void }) {
   const state = dayState(day.my_shift);
   const meta = STATUS_META[state];
@@ -288,9 +300,12 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
   const { d, weekday } = parseDay(day.date);
   const withTime = mine?.start_time && state !== "pre_declared_off";
   const names = day.colleagues.map((c) => c.first_name);
-  const short = (mine?.shortfall ?? 0) > 0;
-  const needsFact =
-    !!mine?.can_set_fact && mine.fact_volume == null && (day.is_past || (day.is_today && !!mine.end_time && mine.end_time <= moscowTime()));
+  const report = mine?.report;
+  const needsReport =
+    !!report?.can_submit && (report.state === "needs_fix" ||
+      (report.state === null && (day.is_past || (day.is_today && !!mine?.end_time && mine.end_time <= moscowTime()))));
+  const flag = REPORT_FLAG[report?.state ?? ""];
+  const short = (mine?.shortfall ?? 0) > 0 || flag?.tone === "cancel";
 
   return (
     <button
@@ -302,7 +317,7 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
         "row-in grid w-full grid-cols-[3rem_1fr] gap-4 px-4 py-3.5 text-left transition-colors md:px-5",
         (!day.is_past || mine) && "hover:bg-muted/60 active:bg-muted",
         selected && "bg-muted",
-        day.is_past && !needsFact && !short && "opacity-45",
+        day.is_past && !needsReport && !short && !flag && "opacity-45",
       )}
     >
       <span className="flex flex-col items-center gap-0.5 pt-0.5">
@@ -319,9 +334,10 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
 
       <span className="min-w-0">
         <span className="flex items-baseline justify-between gap-3">
-          <span className={cn("flex items-center gap-2 text-sm font-semibold", short ? "text-cancel" : meta.text)}>
-            <span className={cn("size-2 rounded-full", short ? "bg-cancel" : meta.dot)} />
-            {short ? "Не по норме" : meta.label}
+          <span className={cn("flex items-center gap-2 text-sm font-semibold",
+            flag ? FLAG_TONE[flag.tone].text : short ? "text-cancel" : meta.text)}>
+            <span className={cn("size-2 rounded-full", flag ? FLAG_TONE[flag.tone].dot : short ? "bg-cancel" : meta.dot)} />
+            {flag ? flag.label : short ? "Не по норме" : meta.label}
           </span>
           {withTime && (
             <span className={cn("text-sm font-semibold tabular", state === "cancelled" || state === "finally_cancelled" ? "text-muted-foreground line-through" : "")}>
@@ -338,8 +354,8 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
         />
         <span className="mt-2 flex justify-between gap-3 text-xs text-muted-foreground">
           <span className="truncate">
-            {needsFact ? (
-              <span className="font-semibold text-wait">Внеси факт: сколько сделал</span>
+            {needsReport ? (
+              <span className="font-semibold text-wait">Сдай отчёт: факт и скриншот</span>
             ) : mine?.fact_volume != null ? (
               mine.shortfall > 0 ? (
                 <span className="font-semibold text-cancel">

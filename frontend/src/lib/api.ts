@@ -87,28 +87,62 @@ export interface Shift {
   lazy?: boolean;
   fact_volume: number | null;
   fact_pay?: number;
-  can_set_fact: boolean;
+  report_state: ReportState | null;
+  /** present on the employee's own cards and in the admin day view */
+  report?: ReportView | null;
   shortfall: number;
   shortfall_status: "fined" | "waived" | null;
   shortfall_penalty: number | null;
 }
 
-export interface Shortfall {
+export type ReportState = "pending_review" | "approved" | "needs_fix" | "rejected" | "no_show";
+
+export interface ReportAttempt {
+  id: number;
+  attempt: number;
+  fact_volume: number;
+  status: "pending_review" | "approved" | "auto_approved" | "rejected_penalty" | "rejected_retry";
+  source: "app" | "bot" | "admin" | "legacy";
+  submitted_at: string;
+  review_comment: string | null;
+  penalty_amount: number | null;
+  photo_url: string | null;
+}
+
+export interface ReportView {
+  state: ReportState | null;
+  deadline: string;
+  can_submit: boolean;
+  started: boolean;
+  note: string | null;
+  fine: number | null;
+  decided: "fined" | "waived" | null;
+  last: ReportAttempt | null;
+}
+
+export type QueueKind = "review" | "no_show" | "missing";
+
+export interface QueueItem {
   shift_id: number;
   date: string;
   user_id: number;
+  telegram_id: number;
   name: string;
   username: string | null;
   location: string | null;
-  start_time: string | null;
-  end_time: string | null;
+  start_time: string;
+  end_time: string;
   volume: number;
-  fact_volume: number;
-  shortfall: number;
-  percent: number;
-  status: "fined" | "waived" | null;
-  penalty: number | null;
+  fact_volume: number | null;
+  state: ReportState | null;
+  decided: "fined" | "waived" | null;
+  fine: number | null;
+  note: string | null;
+  deadline: string;
+  attempts: ReportAttempt[];
 }
+
+export type ReportCounts = { review: number; no_show: number };
 
 export interface Point {
   id: number;
@@ -206,7 +240,7 @@ export interface Stats {
 
 export interface PenaltyRow {
   shift_id: number;
-  kind: "final_cancel" | "shortfall";
+  kind: "final_cancel" | "shortfall" | "no_show";
   status: "fined" | "waived" | null;
   date: string;
   user_id: number;
@@ -232,6 +266,11 @@ export interface ScheduleSettings {
   weekly_report_time: string;
   backup_enabled: boolean;
   backup_time: string;
+  report_reminder_enabled: boolean;
+  report_reminder_lead: number;
+  report_digest_enabled: boolean;
+  report_digest_time: string;
+  report_digest_to: "owners" | "admins" | "staff";
 }
 
 export interface Broadcast {
@@ -286,6 +325,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+/** Raw file body (a compressed screenshot); parameters go in the query string. */
+const upload = <T>(path: string, file: Blob | null) =>
+  request<T>(path, { method: "POST", body: file ?? undefined, headers: { "Content-Type": file?.type || "application/octet-stream" } });
+
 const post = <T>(path: string, body: object) => request<T>(path, { method: "POST", body: JSON.stringify(body) });
 const patch = <T>(path: string, body: object) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) });
 
@@ -297,11 +340,11 @@ export const api = {
     patch<{ user: User }>("/api/me/work-status", { work_status, idempotency_key: newKey() }),
   setNotify: (enabled: boolean) => patch<{ user: User }>("/api/me/notifications", { enabled }),
   points: () => request<{ items: Point[] }>("/api/points"),
-  setFact: (id: number, fact_volume: number, key: string) =>
-    post<ShiftResponse>(`/api/shifts/${id}/fact`, { fact_volume, idempotency_key: key }),
+  submitReport: (id: number, fact_volume: number, photo: Blob, key: string) =>
+    upload<ShiftResponse>(`/api/shifts/${id}/report?fact_volume=${fact_volume}&idempotency_key=${key}`, photo),
   myPenalties: () =>
     request<{
-      items: { id: number; kind: "final_cancel" | "shortfall"; shift_date: string; penalty_amount: number | null; reason: string }[];
+      items: { id: number; kind: "final_cancel" | "shortfall" | "no_show"; shift_date: string; penalty_amount: number | null; reason: string }[];
     }>("/api/me/penalties"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -339,9 +382,18 @@ export const api = {
     broadcastTest: (html: string, signed: boolean) => post<{ ok: boolean }>("/api/admin/broadcasts/test", { html, signed }),
     exportXlsx: (date_from: string, date_to: string, user_id?: number) =>
       post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
-    shortfalls: () => request<{ items: Shortfall[] }>("/api/admin/shortfalls"),
-    decideShortfall: (shiftId: number, amount: number | null) =>
-      post<{ shift: Shift; changed: boolean }>(`/api/admin/shifts/${shiftId}/shortfall`, { amount, override: true }),
+    reports: (kind: QueueKind, day?: string) =>
+      request<{ items: QueueItem[]; counts: ReportCounts }>(`/api/admin/reports?kind=${kind}${day ? `&day=${day}` : ""}`),
+    reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
+    review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
+      post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),
+    noShow: (shiftId: number, action: "fine" | "excuse", extra: { amount?: number; comment?: string }, key: string) =>
+      post<ShiftResponse>(`/api/admin/shifts/${shiftId}/no-show`, { action, ...extra, idempotency_key: key }),
+    manualResult: (shiftId: number, fact_volume: number, comment: string, photo: Blob | null, key: string) =>
+      upload<ShiftResponse>(
+        `/api/admin/shifts/${shiftId}/result?fact_volume=${fact_volume}&idempotency_key=${key}&comment=${encodeURIComponent(comment)}`,
+        photo,
+      ),
     team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),
     setRole: (userId: number, role: Exclude<Role, "owner">, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/role`, { role, idempotency_key: key }),

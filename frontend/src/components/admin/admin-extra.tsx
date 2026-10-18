@@ -167,14 +167,26 @@ type Row = {
   time?: keyof ScheduleSettings;
   weekday?: keyof ScheduleSettings;
   delay?: keyof ScheduleSettings;
+  /** minutes before the report deadline */
+  lead?: keyof ScheduleSettings;
+  /** who receives it */
+  audience?: keyof ScheduleSettings;
   fixedDay?: string;
 };
+
+const AUDIENCES: { value: ScheduleSettings["report_digest_to"]; label: string }[] = [
+  { value: "owners", label: "Владельцам" },
+  { value: "admins", label: "Владельцам и администраторам" },
+  { value: "staff", label: "+ тренерам (по своей сети)" },
+];
 
 const ROWS: Row[] = [
   { title: "Напоминание накануне", text: "Сотруднику: завтра выход, время, точка и кто ещё на точке.", enabled: "eve_reminder_enabled", time: "eve_reminder_time" },
   { title: "Распред на завтра", text: "Админам: готовый текст распреда для рабочего чата.", enabled: "auto_raspred_enabled", time: "auto_raspred_time" },
   { title: "График на следующую неделю", text: "Тем, кто работает, но ещё ничего не отметил на следующую неделю.", enabled: "week_reminder_enabled", time: "week_reminder_time", weekday: "week_reminder_weekday" },
-  { title: "Запрос факта", text: "После конца смены бот спросит, сколько сделано.", enabled: "fact_request_enabled", delay: "fact_request_delay" },
+  { title: "Запрос отчёта", text: "После конца смены бот попросит факт и скриншот.", enabled: "fact_request_enabled", delay: "fact_request_delay" },
+  { title: "Напоминание об отчёте", text: "Сотруднику, если отчёт ещё не сдан: за отсутствие отчёта может быть штраф.", enabled: "report_reminder_enabled", lead: "report_reminder_lead" },
+  { title: "Кто не сдал отчёт", text: "Список несданных отчётов за день, ожидающих проверки и неявок.", enabled: "report_digest_enabled", time: "report_digest_time", audience: "report_digest_to" },
   { title: "Итоги недели", text: "Админам: план и факт по каждому и файл Excel за прошлую неделю.", enabled: "weekly_report_enabled", time: "weekly_report_time", fixedDay: "по понедельникам" },
   { title: "Резервная копия базы", text: "Владельцам: файл базы данных каждый день.", enabled: "backup_enabled", time: "backup_time" },
 ];
@@ -243,6 +255,26 @@ export function SettingsSection() {
                                onChange={(e) => set({ [r.delay!]: Math.min(240, Number(e.target.value.replace(/\D/g, "") || 0)) } as Partial<ScheduleSettings>)} />
                         мин после конца смены
                       </label>
+                    )}
+                    {r.lead && (
+                      <label className="flex items-center gap-2 text-muted-foreground">
+                        за
+                        <select className="h-10 rounded-xl border-0 bg-muted px-3 text-foreground outline-none" value={cfg[r.lead] as number}
+                                onChange={(e) => set({ [r.lead!]: Number(e.target.value) } as Partial<ScheduleSettings>)}>
+                          {[30, 60, 120, 180, 240, 360].map((m) => (
+                            <option key={m} value={m}>{m < 60 ? `${m} мин` : `${m / 60} ч`}</option>
+                          ))}
+                        </select>
+                        до срока сдачи
+                      </label>
+                    )}
+                    {r.audience && (
+                      <select className="h-10 rounded-xl border-0 bg-muted px-3 outline-none" value={cfg[r.audience] as string}
+                              onChange={(e) => set({ [r.audience!]: e.target.value } as Partial<ScheduleSettings>)}>
+                        {AUDIENCES.map((a) => (
+                          <option key={a.value} value={a.value}>{a.label}</option>
+                        ))}
+                      </select>
                     )}
                   </div>
                 )}

@@ -4,6 +4,7 @@ os.environ["BOT_TOKEN"] = "123456:TEST-TOKEN"
 os.environ["ADMIN_IDS"] = "999"
 os.environ["RUN_BOT"] = "0"
 os.environ["FRONTEND_DIST"] = "/nonexistent"
+os.environ["MEDIA_DIR"] = __import__("tempfile").mkdtemp(prefix="media-")
 
 import pytest  # noqa: E402
 

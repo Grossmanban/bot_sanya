@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { LoaderCircle, MapPin, Minus, Plus } from "lucide-react";
+import { LoaderCircle, MapPin } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -21,7 +21,7 @@ import { readLocal, useAction, writeLocal } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { DayLanes, type Lane } from "../day-line";
 import { initialForm, prefillFrom, ShiftForm, validateForm, type FormState } from "./shift-form";
-import { PlanFactBar } from "../admin/shortfall";
+import { ReportBlock } from "../report/report-block";
 
 type Mode = "view" | "create" | "edit" | "restore";
 
@@ -182,9 +182,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
         shift && <ShiftView shift={shift} />
       )}
 
-      {!formMode && shift && (shift.can_set_fact || shift.fact_volume != null) && (
-        <FactBlock shift={shift} pricing={pricing} onChanged={onChanged} />
-      )}
+      {!formMode && shift && <ReportBlock shift={shift} pricing={pricing} onChanged={onChanged} />}
 
       <div className="space-y-2.5">
         {formMode && (
@@ -353,95 +351,9 @@ function ShiftView({ shift }: { shift: Shift }) {
         </Notice>
       )}
       {status === "rejected_by_admin" && <Notice tone="muted">Администратор не подтвердил выход на этот день.</Notice>}
-      {(status === "active" || status === "restored") && !shift.can_edit && shift.edit_count > 0 && !shift.can_set_fact && (
+      {(status === "active" || status === "restored") && !shift.can_edit && shift.edit_count > 0 && !shift.report?.started && (
         <p className="text-sm text-muted-foreground">Изменение уже использовано. Дальше через администратора.</p>
       )}
-    </div>
-  );
-}
-
-function FactBlock({ shift, pricing, onChanged }: { shift: Shift; pricing: Pricing; onChanged: () => Promise<void> | void }) {
-  const [editing, setEditing] = useState(shift.fact_volume == null);
-  const [value, setValue] = useState(String(shift.fact_volume ?? shift.volume ?? ""));
-  const { busy, run } = useAction();
-  const n = Number(value) || 0;
-  const rate = n > 0 && n < pricing.lazy_threshold ? pricing.lazy_rate : pricing.base_rate;
-
-  async function save() {
-    if (!/^\d+$/.test(value)) {
-      toast.error("Факт — целое число");
-      return;
-    }
-    try {
-      await run("fact", (k) => api.setFact(shift.id, n, k), "Факт сохранён");
-      setEditing(false);
-      await onChanged();
-    } catch {
-      /* toast shown */
-    }
-  }
-
-  if ((!editing || !shift.can_set_fact) && shift.fact_volume != null) {
-    const short = shift.shortfall > 0;
-    return (
-      <div className={cn("space-y-3 rounded-2xl px-4 py-3.5", short ? "bg-cancel-soft" : "bg-go-soft")}>
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className={cn("text-xs", short ? "font-semibold text-cancel" : "text-muted-foreground")}>
-              {short ? "Не по норме" : "Норма выполнена"}
-            </p>
-            <p className="font-display text-xl font-semibold whitespace-nowrap">
-              {shift.fact_volume} из {shift.volume} шт.
-            </p>
-            {shift.fact_pay != null && <p className="text-sm text-muted-foreground">заработок по факту {rub(shift.fact_pay)}</p>}
-          </div>
-          {shift.can_set_fact && (
-            <Button variant="ghost" className="rounded-xl" onClick={() => setEditing(true)}>
-              Изменить
-            </Button>
-          )}
-        </div>
-        {short && shift.volume != null && <PlanFactBar plan={shift.volume} fact={shift.fact_volume} />}
-        {short && (
-          <p className="text-sm">
-            {shift.shortfall_status === "fined"
-              ? `Назначен штраф ${rub(shift.shortfall_penalty ?? 0)} за недобор ${shift.shortfall} шт.`
-              : shift.shortfall_status === "waived"
-                ? "Администратор учёл недобор без штрафа."
-                : `Недобор ${shift.shortfall} шт. Администраторы это видят и могут назначить штраф.`}
-          </p>
-        )}
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-3 rounded-2xl bg-muted/60 p-4">
-      <div>
-        <p className="font-semibold">Сколько сделал по факту?</p>
-        <p className="text-sm text-muted-foreground">План был {shift.volume} шт. Факт попадёт в отчёт и расчёт заработка.</p>
-      </div>
-      <div className="flex items-center gap-2">
-        <button type="button" aria-label="Минус 1" onClick={() => setValue(String(Math.max(0, n - 1)))}
-                className="press grid size-12 shrink-0 place-items-center rounded-2xl bg-card">
-          <Minus className="size-5" />
-        </button>
-        <input inputMode="numeric" aria-label="Факт" value={value}
-               onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 5))}
-               className="h-12 w-full rounded-2xl border-0 bg-card text-center font-display text-xl font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
-        <button type="button" aria-label="Плюс 1" onClick={() => setValue(String(n + 1))}
-                className="press grid size-12 shrink-0 place-items-center rounded-2xl bg-card">
-          <Plus className="size-5" />
-        </button>
-      </div>
-      {n > 0 && <p className="text-sm text-muted-foreground">{n} × {rate} ₽ = {rub(n * rate)}</p>}
-      {shift.volume != null && value !== "" && n < shift.volume && (
-        <p className="rounded-xl bg-cancel-soft px-3 py-2 text-sm text-cancel">
-          Это меньше плана на {shift.volume - n} шт. Администраторы получат уведомление о недоборе.
-        </p>
-      )}
-      <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy} onClick={save}>
-        {busy && <LoaderCircle className="animate-spin" />} Сохранить факт
-      </Button>
     </div>
   );
 }
