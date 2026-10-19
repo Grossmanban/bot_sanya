@@ -187,6 +187,8 @@ const ROWS: Row[] = [
   { title: "Запрос отчёта", text: "После конца смены бот попросит факт и скриншот.", enabled: "fact_request_enabled", delay: "fact_request_delay" },
   { title: "Напоминание об отчёте", text: "Сотруднику, если отчёт ещё не сдан: за отсутствие отчёта может быть штраф.", enabled: "report_reminder_enabled", lead: "report_reminder_lead" },
   { title: "Кто не сдал отчёт", text: "Список несданных отчётов за день, ожидающих проверки и неявок.", enabled: "report_digest_enabled", time: "report_digest_time", audience: "report_digest_to" },
+  { title: "Общий факт: вечером", text: "Владельцам, если общий факт за сегодня ещё не введён.", enabled: "global_actual_evening_enabled", time: "global_actual_evening_time" },
+  { title: "Общий факт: утром", text: "Владельцам, если общий факт за вчера так и не введён.", enabled: "global_actual_morning_enabled", time: "global_actual_morning_time" },
   { title: "Итоги недели", text: "Админам: план и факт по каждому и файл Excel за прошлую неделю.", enabled: "weekly_report_enabled", time: "weekly_report_time", fixedDay: "по понедельникам" },
   { title: "Резервная копия базы", text: "Владельцам: файл базы данных каждый день.", enabled: "backup_enabled", time: "backup_time" },
 ];

@@ -55,7 +55,9 @@ export function ReportBlock({ shift, pricing, onChanged }: { shift: Shift; prici
   if (state === "pending_review") {
     return (
       <Status tone="wait" icon={Clock3} title="Отчёт на проверке" photo={last?.photo_url}
-              text={`${fact} из ${plan} шт. Меньше плана — решение за администратором.`}>
+              text={`${fact} из ${plan} шт. ${report.team
+                ? "Команда не выполнила общий план — решение за администратором."
+                : "Если команда выполнит общий план дня, отчёт примут автоматически."}`}>
         <PlanFactBar plan={plan} fact={fact} />
         {report.can_submit && (
           <Button variant="secondary" className="press h-11 w-full rounded-xl bg-card font-semibold" onClick={() => setReplacing(true)}>

@@ -101,7 +101,7 @@ export interface ReportAttempt {
   id: number;
   attempt: number;
   fact_volume: number;
-  status: "pending_review" | "approved" | "auto_approved" | "rejected_penalty" | "rejected_retry";
+  status: "pending_review" | "approved" | "auto_approved" | "approved_team" | "rejected_penalty" | "rejected_retry";
   source: "app" | "bot" | "admin" | "legacy";
   submitted_at: string;
   review_comment: string | null;
@@ -118,6 +118,31 @@ export interface ReportView {
   fine: number | null;
   decided: "fined" | "waived" | null;
   last: ReportAttempt | null;
+  team: TeamDay | null;
+  /** why a shortfall fine can't be given now (no global actual yet, or the team met the plan) */
+  fine_block: string | null;
+}
+
+export interface TeamDay {
+  plan: number;
+  actual: number;
+  met: boolean;
+}
+
+export interface DayActual {
+  date: string;
+  is_today: boolean;
+  shifts: number;
+  plan: number;
+  facts: number;
+  reported: number;
+  pending: number;
+  actual: number | null;
+  met: boolean | null;
+  set_by: string | null;
+  set_at: string | null;
+  fined: { shift_id: number; user_id: number; amount: number; name: string }[];
+  log: { id: number; old_value: number | null; new_value: number; plan: number; actor_name: string; created_at: string }[];
 }
 
 export type QueueKind = "review" | "no_show" | "missing";
@@ -140,9 +165,11 @@ export interface QueueItem {
   note: string | null;
   deadline: string;
   attempts: ReportAttempt[];
+  team: TeamDay | null;
+  fine_block: string | null;
 }
 
-export type ReportCounts = { review: number; no_show: number };
+export type ReportCounts = { review: number; no_show: number; actual_missing?: number };
 
 export interface Point {
   id: number;
@@ -271,6 +298,10 @@ export interface ScheduleSettings {
   report_digest_enabled: boolean;
   report_digest_time: string;
   report_digest_to: "owners" | "admins" | "staff";
+  global_actual_evening_enabled: boolean;
+  global_actual_evening_time: string;
+  global_actual_morning_enabled: boolean;
+  global_actual_morning_time: string;
 }
 
 export interface Broadcast {
@@ -384,6 +415,12 @@ export const api = {
       post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
     reports: (kind: QueueKind, day?: string) =>
       request<{ items: QueueItem[]; counts: ReportCounts }>(`/api/admin/reports?kind=${kind}${day ? `&day=${day}` : ""}`),
+    dayActuals: () => request<{ items: DayActual[]; missing: string[] }>("/api/admin/day-actuals"),
+    setDayActual: (day: string, actual: number, key: string) =>
+      post<{ changed: boolean; met: boolean; approved: number; fined: { shift_id: number; amount: number }[] }>(
+        `/api/admin/day-actuals/${day}`, { actual, idempotency_key: key }),
+    annulDayFines: (day: string, shiftIds: number[] | null, key: string) =>
+      post<{ annulled: number }>(`/api/admin/day-actuals/${day}/annul`, { shift_ids: shiftIds, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
     review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),

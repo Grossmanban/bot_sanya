@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 import pytest
 from openpyxl import load_workbook
 
-from app import app_settings, export, jobs, reports
+from app import app_settings, day_actual, export, jobs, reports
 from app import services as svc
 from app.config import settings
 from app.db import connect
@@ -143,6 +143,10 @@ def test_report_review_return_and_fine(conn, make_user):
     again = report(conn, u, s, 14, now=at(THU + timedelta(days=2), "12:00"))
     assert again.report["attempt"] == 2 and again.shift["report_state"] == "pending_review"
 
+    with pytest.raises(svc.ServiceError) as e:  # no fine for a shortfall before the day's global actual
+        reports.review(conn, owner, s["id"], "fine", svc.new_key(), amount=700, comment="Не выполнена норма")
+    assert e.value.code == "shortfall_fine_blocked"
+    day_actual.set_actual(conn, owner, THU, 10, svc.new_key(), today=THU + timedelta(days=2))  # team missed the plan
     fined = reports.review(conn, owner, s["id"], "fine", svc.new_key(), amount=700, comment="Не выполнена норма")
     assert fined.shift["report_state"] == "rejected" and fined.shift["shortfall_penalty"] == 700
     run(n.report_reviewed(fined.shift, fined.report, owner))
@@ -249,7 +253,7 @@ def test_eve_reminder_auto_raspred_once(conn, make_user):
     assert any(chat == 999 and "Распред на" in t for chat, t in n.sent)
     # second tick the same evening sends nothing again
     n.sent.clear()
-    assert run(jobs.tick(conn, n, at(TODAY, "21:30"))) == []
+    assert run(jobs.tick(conn, n, at(TODAY, "21:20"))) == []
     assert n.sent == []
 
 
@@ -431,3 +435,108 @@ def test_archive_posts_with_hashtags_and_retries(conn, make_user):
         return "ok"
 
     assert run(Notifier._retry(flaky)) == "ok" and len(calls) == 2
+
+
+# ---------------------------------------------------------------- the day's global actual (ТЗ 3.5)
+
+
+def test_global_actual_recalculation(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a, b, c = make_user(first="Аня"), make_user(first="Боря"), make_user(first="Вика")
+    sa = shift(conn, a, payload={**P, "volume": 20})
+    sb = shift(conn, b, payload={**P, "volume": 20})
+    sc = shift(conn, c, payload={**P, "volume": 20})
+    assert day_actual.day_plan(conn, THU) == 60
+    report(conn, a, sa, 10)  # below plan → review
+    report(conn, b, sb, 15)  # below plan → review
+    later = THU + timedelta(days=1)
+
+    # the team missed the plan: below-plan reports stay for manual review, fines allowed
+    miss = day_actual.set_actual(conn, owner, THU, 50, svc.new_key(), today=later)
+    assert miss.changed and not miss.row["met"] and miss.approved == []
+    reports.review(conn, owner, sb["id"], "fine", svc.new_key(), amount=500, comment="Не выполнена норма")
+    assert svc.get_shift(conn, sa["id"])["report_state"] == "pending_review"
+
+    # corrected upwards: the team met it → pending approved, the fine offered for annulment
+    met = day_actual.set_actual(conn, owner, THU, 64, svc.new_key(), today=later)
+    assert met.row["met"] and [s["id"] for s in met.approved] == [sa["id"]]
+    assert reports.latest(conn, sa["id"])["status"] == "approved_team"
+    assert svc.get_shift(conn, sa["id"])["shortfall_status"] == "waived"
+    assert [s["id"] for s in met.fined] == [sb["id"]]
+    assert [h["new_value"] for h in day_actual.history(conn, THU)] == [64, 50]  # every change is logged
+
+    n = FakeNotifier(conn)
+    run(n.global_actual_set(THU, met, owner))
+    assert any("принят автоматически" in t for chat, t in n.sent if chat == a["telegram_id"])
+
+    # a report sent after the actual on a day the team met the plan is approved at once; fines are blocked
+    late = report(conn, c, sc, 5, now=at(THU, "21:00"))
+    assert late.report["status"] == "approved_team" and late.shift["report_state"] == "approved"
+    with pytest.raises(svc.ServiceError) as e:
+        reports.review(conn, owner, sc["id"], "fine", svc.new_key(), amount=500, comment="x")
+    assert "выполнила" in e.value.message
+
+    done = day_actual.annul_fines(conn, owner, THU, None, svc.new_key())
+    assert [s["id"] for s in done] == [sb["id"]] and done[0]["annulled_amount"] == 500
+    assert svc.get_shift(conn, sb["id"])["shortfall_penalty"] is None
+    assert svc.user_penalties(conn, b["id"]) == []
+    run(n.fines_annulled(done, owner))
+    assert any("аннулирован" in t for chat, t in n.sent if chat == b["telegram_id"])
+
+
+def test_global_actual_is_owner_only_and_not_for_the_future(conn, make_user):
+    svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    admin = make_user(first="Адм")
+    conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (admin["id"],))
+    shift(conn, make_user())
+    with pytest.raises(svc.ServiceError) as e:
+        day_actual.set_actual(conn, svc.get_user(conn, admin["id"]), THU, 30, svc.new_key(), today=THU)
+    assert e.value.status == 403
+    owner = svc.get_user_by_tg(conn, 999)
+    with pytest.raises(svc.ServiceError) as e:
+        day_actual.set_actual(conn, owner, THU, 30, svc.new_key(), today=TODAY)
+    assert e.value.code == "future_day"
+
+
+def test_global_actual_reminders_and_missing_days(conn, make_user):
+    svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    shift(conn, make_user())
+    n = FakeNotifier(conn)
+    run(jobs.tick(conn, n, at(THU, "21:30")))
+    evening = [t for chat, t in n.sent if chat == 999 and "Не введён общий факт за сегодня" in t]
+    assert len(evening) == 1 and "План команды 25" in evening[0]
+    assert day_actual.missing_days(conn, THU + timedelta(days=1)) == [THU]
+    run(jobs.tick(conn, n, at(THU + timedelta(days=1), "09:30")))
+    assert any("за вчера" in t for chat, t in n.sent if chat == 999)
+    day_actual.set_actual(conn, svc.get_user_by_tg(conn, 999), THU, 25, svc.new_key(), today=THU + timedelta(days=1))
+    assert day_actual.missing_days(conn, THU + timedelta(days=1)) == []
+    view = day_actual.overview(conn, THU + timedelta(days=1))
+    assert view[0]["date"] == THU.isoformat() and view[0]["met"] is True and view[0]["plan"] == 25
+
+
+def test_migration_keeps_reports_when_adding_team_status(tmp_path):
+    import sqlite3
+
+    from app import db
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path, isolation_level=None)
+    old.row_factory = sqlite3.Row
+    old.executescript(db.SCHEMA)
+    saved = db.MIGRATIONS[:]
+    try:
+        db.MIGRATIONS[:] = saved[:6]
+        db.migrate(old)
+        old.execute("INSERT INTO users (telegram_id, first_name, last_name, status, created_at) VALUES (1,'a','b','approved','x')")
+        old.execute("INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, created_at, "
+                    "updated_at, fact_volume, report_state) VALUES (1,'2026-10-01','10:00','12:00',20,'x','active','t','t',5,"
+                    "'pending_review')")
+        old.execute("INSERT INTO reports (shift_id, user_id, attempt, fact_volume, photo_file_id, source, status, "
+                    "submitted_by, submitted_at) VALUES (1, 1, 1, 5, 'f', 'app', 'pending_review', 1, 't')")
+        db.MIGRATIONS[:] = saved
+        db.migrate(old)
+    finally:
+        db.MIGRATIONS[:] = saved
+    assert old.execute("PRAGMA user_version").fetchone()[0] == len(saved)
+    assert old.execute("SELECT status, photo_file_id FROM reports").fetchone()[:] == ("pending_review", "f")
+    old.execute("UPDATE reports SET status = 'approved_team'")  # the new status is accepted

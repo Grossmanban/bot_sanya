@@ -19,7 +19,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import app_settings, media
+from . import app_settings, day_actual, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -506,6 +506,9 @@ class Notifier:
             await self._archive_report(["отчёт", "принят"], f"✅ ОТЧЁТ ПРИНЯТ (план выполнен) — {who(user)}\n"
                                        f"{shift_place(shift)}\n{plan_fact}", user, report)
             return
+        if report["status"] == "approved_team":
+            await self.team_approved(shift, report)
+            return
         await self.send(
             user["telegram_id"],
             f"📝 Отчёт отправлен на проверку: {shift_place(shift)}\n{_shortfall_line(shift)}\n"
@@ -513,10 +516,14 @@ class Notifier:
         )
         attempt = f" (попытка {report['attempt']})" if report["attempt"] > 1 else ""
         caption = f"📝 <b>Отчёт на проверку</b>{attempt}\n{who(user)}\n{shift_place(shift)}\n{_shortfall_line(shift)}"
+        block = day_actual.shortfall_fine_block(self.conn, shift)
+        if block:
+            caption += f"\n\nℹ️ {block}."
         for chat in reports.reviewers(self.conn, user):
             reviewer = svc.get_user_by_tg(self.conn, chat)
             fine = reviewer is not None and perms.can(reviewer, "fine_direct", user) or chat in settings.admin_ids
-            await self._photo_or_text(chat, report["photo_file_id"], caption, review_keyboard(shift["id"], fine))
+            await self._photo_or_text(chat, report["photo_file_id"], caption,
+                                      review_keyboard(shift["id"], fine and not block))
 
     async def report_reviewed(self, shift: dict, report: dict, actor: dict) -> None:
         from . import reports
@@ -578,6 +585,55 @@ class Notifier:
         await self._archive_report(["отчёт", "ручной"], f"✍️ РЕЗУЛЬТАТ ВНЕСЁН ВРУЧНУЮ — {who(user)}\n{place}\n{text}{note}\n"
                                    f"Внёс: {who(actor)}", user, report)
 
+    # ------------------------------------------------------------ the day's global actual (ТЗ 3.5)
+
+    async def team_approved(self, shift: dict, report: dict | None = None) -> None:
+        user = svc.get_user(self.conn, shift["user_id"])
+        await self.send(user["telegram_id"],
+                        f"✅ Ваш отчет принят автоматически. Общая цель команды выполнена!\n{shift_place(shift)}")
+        await self._archive_report(
+            ["отчёт", "общий_факт"],
+            f"🟢 АВТОМАТИЧЕСКОЕ ОДОБРЕНИЕ: {who(user)}. Причина: Общий план выполнен\n{shift_place(shift)}\n"
+            f"План {shift['volume']}, факт {shift['fact_volume']} шт.", user, report)
+
+    async def global_actual_set(self, day: date, result, actor: dict) -> None:
+        row = result.row
+        verdict = "✅ команда выполнила план" if row["met"] else "⚠️ план не выполнен — недоборы на ручной проверке"
+        was = f" (было {result.old_value})" if result.old_value is not None else ""
+        text = (f"📊 Общий факт за {ddmm_wd(day)}: <b>{row['actual']}</b>{was} из плана {row['plan']} шт.\n{verdict}"
+                + (f"\nПринято автоматически: {len(result.approved)}" if result.approved else ""))
+        await self.archive(["общий_факт"], f"{text}\nВвёл: {who(actor)}")
+        for chat in svc.owner_telegram_ids():
+            if chat != actor["telegram_id"]:
+                await self.send(chat, f"{text}\nВвёл: {who(actor)}")
+        for shift in result.approved:
+            await self.team_approved(shift, reports_latest(self.conn, shift["id"]))
+
+    async def fines_annulled(self, shifts: list[dict], actor: dict) -> None:
+        for s in shifts:
+            user = svc.get_user(self.conn, s["user_id"])
+            amount = s.get("annulled_amount")
+            await self.send(user["telegram_id"],
+                            f"↩️ Штраф {amount} ₽ за смену {shift_place(s)} аннулирован: команда справилась с общим планом.")
+            await self.archive(["аннулирование", "штраф"],
+                               f"↩️ ШТРАФ АННУЛИРОВАН {amount} ₽ — {who(user)}\n{shift_place(s)}\n"
+                               f"Причина: команда справилась\nАннулировал: {who(actor)}", user)
+
+    async def global_actual_reminder(self, day: date, morning: bool) -> int:
+        plan = day_actual.day_plan(self.conn, day)
+        if not plan or day_actual.get(self.conn, day):
+            return 0
+        when = "вчера" if morning else "сегодня"
+        markup = None
+        if settings.webapp_url.startswith("https://"):
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="Ввести общий факт", web_app=WebAppInfo(url=settings.webapp_url))]])
+        sent = 0
+        for chat in svc.owner_telegram_ids():
+            sent += await self.send(chat, f"📊 Не введён общий факт за {when}, {ddmm_wd(day)}. План команды {plan} шт.\n"
+                                          "Пока его нет, отчёты с недобором ждут, а штрафовать за недобор нельзя.", markup)
+        return sent
+
     async def report_reminder(self, shift: dict, deadline_text: str) -> bool:
         user = svc.get_user(self.conn, shift["user_id"])
         return await self.send(
@@ -587,3 +643,9 @@ class Notifier:
             "чтобы исправить ситуацию.",
             report_keyboard(shift),
         )
+
+
+def reports_latest(conn, shift_id: int) -> dict | None:
+    from . import reports
+
+    return reports.latest(conn, shift_id)

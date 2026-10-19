@@ -245,3 +245,24 @@ def test_blocked_account_loses_access_and_archive_logs(client, conn):
     rows = conn.execute("SELECT tags, sent, error FROM archive_log").fetchall()
     assert rows and rows[-1]["tags"] == "блок" and rows[-1]["sent"] == 0 and rows[-1]["error"]
     assert client.get("/api/admin/settings", headers=owner).json()["archive"] == {"connected": False, "title": None}
+
+
+def test_day_actual_endpoints(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    u, _ = svc.create_registration(conn, 80, None, "Адм", "Ин")
+    svc.decide_registration(conn, u["id"], True, 999)
+    conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (u["id"],))
+    admin = headers(80, "Адм", "Ин")
+    yesterday = (today_local() - timedelta(days=1)).isoformat()
+    conn.execute("INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, created_at, "
+                 "updated_at) VALUES (?, ?, '10:00', '12:00', 20, 'x', 'active', 't', 't')", (u["id"], yesterday))
+    assert client.get("/api/admin/reports/counts", headers=owner).json()["actual_missing"] == 1
+    assert client.get("/api/admin/reports/counts", headers=admin).json()["actual_missing"] == 0
+    assert client.get("/api/admin/day-actuals", headers=admin).status_code == 403
+    body = {"actual": 25, "idempotency_key": key()}
+    assert client.post(f"/api/admin/day-actuals/{yesterday}", json=body, headers=admin).status_code == 403
+    r = client.post(f"/api/admin/day-actuals/{yesterday}", json=body, headers=owner)
+    assert r.status_code == 200 and r.json()["met"] is True
+    items = client.get("/api/admin/day-actuals", headers=owner).json()["items"]
+    assert items[0]["actual"] == 25 and items[0]["log"][0]["new_value"] == 25
