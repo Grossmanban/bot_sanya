@@ -345,3 +345,21 @@ def test_payment_profile_and_payout_endpoints(client, conn):
     r = client.post("/api/admin/payouts/preview", json=period, headers=owner)
     assert r.status_code == 200 and r.json()["rates"]["rate_base"] == 120
     assert client.get("/api/admin/payouts", headers=owner).json()["items"] == []
+
+
+def test_goal_endpoints(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    u, _ = svc.create_registration(conn, 87, None, "Иван", "Петров")
+    svc.decide_registration(conn, u["id"], True, 999)
+    h = headers(87, "Иван", "Петров")
+    today = today_local()
+    body = {"title": "Неделя рекордов", "kind": "team", "target": 100, "date_from": today.isoformat(),
+            "date_to": (today + timedelta(days=6)).isoformat(), "idempotency_key": key()}
+    assert client.post("/api/admin/goals", json=body, headers=h).status_code == 403
+    goal = client.post("/api/admin/goals", json=body, headers=owner).json()["goal"]
+    mine = client.get("/api/goals", headers=h).json()["items"]
+    assert mine[0]["id"] == goal["id"] and mine[0]["joined"] is False
+    r = client.post(f"/api/goals/{goal['id']}/join", headers=h)
+    assert r.json()["goal"]["joined"] is True and r.json()["goal"]["progress"] == 0
+    assert client.get("/api/admin/goals", headers=owner).json()["items"][0]["participants"][0]["user_id"] == u["id"]

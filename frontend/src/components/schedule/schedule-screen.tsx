@@ -10,6 +10,7 @@ import { moscowTime, readLocal, useAction, useLoad, writeLocal } from "@/lib/hoo
 import { tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
+import { MyGoals } from "../goals/goals";
 import { DayTrack, HourAxis } from "../day-line";
 import { DayDetail, DaySheet } from "./day-sheet";
 
@@ -100,6 +101,8 @@ export function ScheduleScreen({
         ) : (
           user.work_status !== "working" && <WorkToggle onUserChange={onUserChange} />
         )}
+
+        <MyGoals />
 
         {showHint && user.account_state !== "paused" && (
           <div className="flex items-start gap-3 px-1 text-sm text-muted-foreground">

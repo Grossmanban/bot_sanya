@@ -501,6 +501,34 @@ CREATE TABLE broadcast_deliveries (
 """)
 
 
+# 12: goals (ТЗ модуль 5)
+MIGRATIONS.append("""
+CREATE TABLE goals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    title        TEXT NOT NULL,
+    description  TEXT,
+    kind         TEXT NOT NULL CHECK (kind IN ('personal','team','network')),
+    mode         TEXT NOT NULL DEFAULT 'shared' CHECK (mode IN ('shared','each')),
+    target       INTEGER NOT NULL CHECK (target > 0),
+    date_from    TEXT NOT NULL,
+    date_to      TEXT NOT NULL,
+    user_id      INTEGER REFERENCES users(id),
+    network_id   INTEGER REFERENCES networks(id),
+    status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','archived')),
+    created_by   INTEGER NOT NULL,
+    created_at   TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE TABLE goal_participants (
+    goal_id      INTEGER NOT NULL REFERENCES goals(id),
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    joined_at    TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (goal_id, user_id)
+);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

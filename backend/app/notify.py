@@ -775,6 +775,36 @@ class Notifier:
             if it["total"] > 0:
                 await self.send(user["telegram_id"], f"💸 Начислена выплата {it['total']} ₽ за {period}.")
 
+    # ------------------------------------------------------------ goals (ТЗ модуль 5)
+
+    async def goal_created(self, goal: dict) -> int:
+        from . import goals
+
+        period = f"{goal['date_from'][8:10]}.{goal['date_from'][5:7]}–{goal['date_to'][8:10]}.{goal['date_to'][5:7]}"
+        text = (f"🎯 <b>Новая цель: {escape(goal['title'])}</b>\n"
+                f"{'Норма' if goal['mode'] == 'each' or goal['kind'] == 'personal' else 'Общая норма'}: {goal['target']} шт., {period}")
+        if goal["description"]:
+            text += f"\n{escape(goal['description'])}"
+        if goal["kind"] == "personal":
+            user = svc.get_user(self.conn, goal["user_id"])
+            return await self.send(user["telegram_id"], text + "\n\nПрогресс считается по принятым отчётам.")
+        join = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🙋 Участвую", callback_data=f"goal:{goal['id']}")]])
+        sent = 0
+        for user in svc.list_users(self.conn):
+            if user["account_state"] == "active" and goals.eligible(self.conn, goal, user):
+                sent += await self.send(user["telegram_id"], text, join)
+                await asyncio.sleep(0.05)
+        return sent
+
+    async def goals_completed(self, done: list) -> None:
+        for goal, people in done:
+            for p in people:
+                await self.send(p["telegram_id"], f"✅ Цель выполнена: <b>{escape(goal['title'])}</b>! Норма {goal['target']} шт.")
+            creator = svc.get_user_by_tg(self.conn, goal["created_by"])
+            if creator:
+                names = ", ".join(escape(svc.full_name(p)) for p in people)
+                await self.send(creator["telegram_id"], f"🎯 Цель «{escape(goal['title'])}» выполнена: {names}")
+
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5)
 
     async def team_approved(self, shift: dict, report: dict | None = None) -> None:

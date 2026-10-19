@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, finance, networks, payouts, reports
+from . import day_actual, finance, goals, networks, payouts, reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -103,6 +103,19 @@ class PayoutCommit(PayoutPreview):
     choices: list[PayoutChoice]
     proof: list[str] = []
     deduction_proof: list[str] = []
+    idempotency_key: str
+
+
+class GoalBody(BaseModel):
+    title: str
+    kind: str
+    target: int
+    date_from: str
+    date_to: str
+    description: str | None = None
+    user_id: int | None = None
+    network_id: int | None = None
+    mode: str = "shared"
     idempotency_key: str
 
 
@@ -371,6 +384,15 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def save_payment_profile(body: ProfileBody, user: dict = Depends(current_user)):
         profile = payouts.save_profile(conn, user, user["id"], body.phone, body.bank, body.recipient, body.idempotency_key)
         return {"profile": payouts.public_profile(profile, True), "banks": payouts.BANKS}
+
+    @api.get("/goals")
+    async def my_goals(user: dict = Depends(current_user)):
+        return {"items": goals.for_user(conn, user)}
+
+    @api.post("/goals/{goal_id}/join")
+    async def join_goal(goal_id: int, user: dict = Depends(current_user)):
+        goals.join(conn, user, goal_id)
+        return {"goal": goals.view(conn, goals.get(conn, goal_id), user)}
 
     @api.get("/me/finances")
     async def my_finances(user: dict = Depends(current_user)):
@@ -682,6 +704,25 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                 if perms.can(admin, "approve_fines") else 0)
         out["fines_draft"] = len(finance.journal(conn, only=only, statuses=("draft",))) if perms.can(admin, "fine_direct") else 0
         return out
+
+    # ------------------------------------------------------------ goals (ТЗ модуль 5)
+
+    @api.get("/admin/goals")
+    async def admin_goals(admin: dict = Depends(admin_user)):
+        return {"items": goals.listing(conn, admin)}
+
+    @api.post("/admin/goals")
+    async def admin_goal_create(body: GoalBody, admin: dict = Depends(admin_user)):
+        goal = goals.create(conn, admin, title=body.title, kind=body.kind, target=body.target,
+                            date_from=svc.parse_date(body.date_from), date_to=svc.parse_date(body.date_to),
+                            key=body.idempotency_key, description=body.description, user_id=body.user_id,
+                            network_id=body.network_id, mode=body.mode)
+        notifier.spawn(notifier.goal_created(goal))
+        return {"goal": goals.view(conn, goal)}
+
+    @api.post("/admin/goals/{goal_id}/archive")
+    async def admin_goal_archive(goal_id: int, body: KeyOnly, admin: dict = Depends(admin_user)):
+        return {"goal": goals.view(conn, goals.archive(conn, admin, goal_id, body.idempotency_key))}
 
     # ------------------------------------------------------------ networks (ТЗ модуль 8)
 
