@@ -669,3 +669,90 @@ def test_migration_moves_fines_into_the_ledger(tmp_path):
     rows = [tuple(r) for r in old.execute("SELECT source, status, amount FROM financial_transactions ORDER BY shift_id")]
     assert rows == [("final_cancel", "active", 1000), ("final_cancel", "draft", None), ("report", "active", 700),
                     ("no_show", "active", 300)]
+
+
+# ---------------------------------------------------------------- networks (ТЗ модуль 8)
+
+
+def test_networks_trainers_and_scope(conn, make_user):
+    from app import networks
+    from app import permissions as perms
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    admin = _staff(conn, make_user, "admin", "Админ")
+    a, b, c = make_user(first="Аня"), make_user(first="Боря"), make_user(first="Вика")
+    with pytest.raises(svc.ServiceError) as e:
+        networks.create(conn, admin, "Север", svc.new_key())
+    assert e.value.status == 403
+    north = networks.create(conn, owner, "Север", svc.new_key())
+    south = networks.create(conn, owner, "Юг", svc.new_key())
+    with pytest.raises(svc.ServiceError) as e:
+        networks.create(conn, owner, "  север ", svc.new_key())
+    assert e.value.code == "duplicate"
+
+    networks.set_trainer(conn, owner, north["id"], a["id"], svc.new_key())
+    a = svc.get_user(conn, a["id"])
+    assert a["role"] == "trainer" and a["network_id"] == north["id"]
+    networks.set_member(conn, owner, b["id"], north["id"], svc.new_key())
+    networks.set_member(conn, owner, c["id"], south["id"], svc.new_key())
+    b, c = svc.get_user(conn, b["id"]), svc.get_user(conn, c["id"])
+    assert perms.manages(a, b) and not perms.manages(a, c)
+    assert networks.trainer_of(conn, b)["id"] == a["id"] and networks.trainer_of(conn, a) is None
+
+    tree = networks.listing(conn, owner)
+    assert [n["name"] for n in tree] == ["Север", "Юг"] and tree[0]["trainer"]["id"] == a["id"]
+    assert [m["id"] for m in tree[0]["members"]] == [b["id"]]
+    assert [n["name"] for n in networks.listing(conn, a)] == ["Север"]  # a trainer sees only their network
+
+    # a new trainer: the previous one stays in the network as an employee
+    networks.set_trainer(conn, owner, north["id"], b["id"], svc.new_key())
+    assert svc.get_user(conn, a["id"])["role"] == "employee" and svc.get_user(conn, b["id"])["role"] == "trainer"
+    # the trainer role taken away frees the network
+    svc.set_role(conn, owner, b["id"], "employee", svc.new_key())
+    assert networks.get(conn, north["id"])["trainer_id"] is None
+
+    with pytest.raises(svc.ServiceError) as e:
+        networks.archive(conn, owner, south["id"], svc.new_key())
+    assert e.value.code == "not_empty"
+    networks.set_member(conn, owner, c["id"], None, svc.new_key())
+    assert networks.archive(conn, owner, south["id"], svc.new_key())["status"] == "archived"
+
+
+def test_shift_events_reach_the_network_trainer(conn, make_user):
+    from app import networks
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer, u, other = make_user(first="Тренер"), make_user(first="Свой"), make_user(first="Чужой")
+    net = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
+    networks.set_member(conn, owner, u["id"], net["id"], svc.new_key())
+    s1 = shift(conn, svc.get_user(conn, u["id"]))
+    s2 = shift(conn, other)
+    n = FakeNotifier(conn)
+    run(n.shift_event("SHIFT_CREATED", s1["id"]))
+    run(n.shift_event("SHIFT_CREATED", s2["id"]))
+    to_trainer = [t for chat, t in n.sent if chat == trainer["telegram_id"]]
+    assert len(to_trainer) == 1 and "Свой" in to_trainer[0]
+
+
+def test_migration_creates_networks_for_existing_ids(tmp_path):
+    import sqlite3
+
+    from app import db
+
+    old = sqlite3.connect(tmp_path / "old.db", isolation_level=None)
+    old.row_factory = sqlite3.Row
+    old.executescript(db.SCHEMA)
+    saved = db.MIGRATIONS[:]
+    try:
+        db.MIGRATIONS[:] = saved[:8]
+        db.migrate(old)
+        for tg, role in ((1, "trainer"), (2, "employee")):
+            old.execute("INSERT INTO users (telegram_id, first_name, last_name, status, role, network_id, created_at) "
+                        "VALUES (?, 'a', 'b', 'approved', ?, 3, 'x')", (tg, role))
+        db.MIGRATIONS[:] = saved
+        db.migrate(old)
+    finally:
+        db.MIGRATIONS[:] = saved
+    row = old.execute("SELECT id, name, trainer_id FROM networks").fetchone()
+    assert tuple(row) == (3, "Сеть 3", 1)

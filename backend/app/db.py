@@ -401,6 +401,30 @@ def _finance(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_finance)
 
 
+def _networks(conn: sqlite3.Connection) -> None:
+    """9: networks (ТЗ модуль 8). users.network_id already exists; one trainer per network.
+    Network ids already given to people get a network row, and their trainer becomes its trainer."""
+    _run_script(conn, """
+    CREATE TABLE networks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT NOT NULL,
+        trainer_id  INTEGER REFERENCES users(id),
+        status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived')),
+        created_by  INTEGER NOT NULL,
+        created_at  TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX ux_networks_trainer ON networks (trainer_id) WHERE trainer_id IS NOT NULL AND status = 'active';
+    """)
+    for (nid,) in conn.execute("SELECT DISTINCT network_id FROM users WHERE network_id IS NOT NULL").fetchall():
+        trainer = conn.execute("SELECT id FROM users WHERE network_id = ? AND role = 'trainer' ORDER BY id LIMIT 1",
+                               (nid,)).fetchone()
+        conn.execute("INSERT INTO networks (id, name, trainer_id, created_by, created_at) VALUES (?, ?, ?, 0, datetime('now'))",
+                     (nid, f"Сеть {nid}", trainer[0] if trainer else None))
+
+
+MIGRATIONS.append(_networks)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

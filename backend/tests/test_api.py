@@ -296,3 +296,28 @@ def test_finance_endpoints(client, conn):
     assert r.status_code == 403
     r = client.post("/api/admin/finances/pay-all", json={"user_id": ids["Иван"], "idempotency_key": key()}, headers=owner)
     assert r.json() == {"paid": 1, "total": 400}
+
+
+def test_network_endpoints(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    ids = {}
+    for tg, name in ((95, "Тренер"), (96, "Свой"), (97, "Чужой")):
+        u, _ = svc.create_registration(conn, tg, None, name, "Тест")
+        svc.decide_registration(conn, u["id"], True, 999)
+        ids[name] = u["id"]
+    net = client.post("/api/admin/networks", json={"name": "Север", "idempotency_key": key()}, headers=owner).json()["network"]
+    r = client.patch(f"/api/admin/networks/{net['id']}", json={"trainer_id": ids["Тренер"], "idempotency_key": key()},
+                     headers=owner)
+    assert r.json()["network"]["trainer_id"] == ids["Тренер"]
+    r = client.post(f"/api/admin/team/{ids['Свой']}/network", json={"network_id": net["id"], "idempotency_key": key()},
+                    headers=owner)
+    assert r.json()["user"]["network_id"] == net["id"]
+    th = headers(95, "Тренер", "Тест")
+    me = client.get("/api/me", headers=th).json()
+    assert me["user"]["role"] == "trainer" and me["network"] == "Север"
+    team = {u["id"] for u in client.get("/api/admin/team", headers=th).json()["items"]}
+    assert ids["Свой"] in team and ids["Чужой"] not in team
+    assert client.post("/api/admin/networks", json={"name": "Юг", "idempotency_key": key()}, headers=th).status_code == 403
+    tree = client.get("/api/admin/networks", headers=th).json()["items"]
+    assert len(tree) == 1 and tree[0]["members"][0]["id"] == ids["Свой"]

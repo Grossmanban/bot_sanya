@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
 import { TxForm } from "../finance/money";
 
-export function TeamSection({ me, caps }: { me: User; caps: Capability[] }) {
+export function TeamSection({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
   const { data, reload } = useLoad(() => api.admin.team(), []);
   const [selected, setSelected] = useState<User | null>(null);
   const { busy, run } = useAction();
@@ -51,6 +51,15 @@ export function TeamSection({ me, caps }: { me: User; caps: Capability[] }) {
   return (
     <div className="space-y-4">
       {canDecide && <Invite botUsername={data.bot_username} />}
+      {me.role === "trainer" && (
+        <section className="rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
+          <p className="text-sm text-hero-muted">Ваша сеть</p>
+          <h2 className="font-display text-xl font-semibold">{network ?? "не назначена"}</h2>
+          <p className="mt-1 text-sm text-hero-muted">
+            {network ? "Вы видите и ведёте только людей своей сети." : "Попросите владельца добавить вас в сеть — тогда здесь появится команда."}
+          </p>
+        </section>
+      )}
 
       {canDecide && pending.length > 0 && (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
@@ -191,6 +200,7 @@ function Group({
                   </span>
                   <span className="block text-sm text-muted-foreground">
                     {u.role !== "employee" ? ROLE_TITLES[u.role] : u.username ? `@${u.username}` : `ID ${u.telegram_id}`}
+                    {u.network && <span> · {u.network}</span>}
                   </span>
                 </span>
                 {u.account_state === "paused" ? (
@@ -318,6 +328,12 @@ function MemberSheet({
                   <dt className="text-xs text-muted-foreground">Роль</dt>
                   <dd className="mt-0.5 font-semibold">{statusText}</dd>
                 </div>
+                {user.network && (
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Сеть</dt>
+                    <dd className="mt-0.5 font-semibold">{user.network}</dd>
+                  </div>
+                )}
                 {user.created_at && (
                   <div>
                     <dt className="text-xs text-muted-foreground">В системе с</dt>

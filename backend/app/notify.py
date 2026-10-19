@@ -392,27 +392,50 @@ class Notifier:
             if admin_id != exclude:
                 await self.send(admin_id, text, markup)
 
+    async def to_managers(self, user: dict, text: str, markup: InlineKeyboardMarkup | None = None,
+                          exclude: int | None = None, trainer_buttons: bool = True) -> None:
+        """Owners, admins and the trainer of the person's network (ТЗ модуль 8)."""
+        from . import networks
+
+        await self.to_admins(text, markup, exclude)
+        trainer = networks.trainer_of(self.conn, user)
+        if trainer and trainer["telegram_id"] != exclude and trainer["telegram_id"] not in svc.admin_telegram_ids(self.conn):
+            await self.send(trainer["telegram_id"], text, markup if trainer_buttons else None)
+
     async def shift_event(self, event: str, shift_id: int, old: dict | None = None) -> None:
         shift = svc.get_shift(self.conn, shift_id)
         if shift is None:
             return
         user = svc.get_user(self.conn, shift["user_id"])
         if event == "SHIFT_CREATED":
-            await self.to_admins(shift_created_text(self.conn, user, shift))
+            await self.to_managers(user, shift_created_text(self.conn, user, shift))
         elif event == "SHIFT_URGENT_REQUESTED":
-            await self.to_admins(urgent_text(user, shift), urgent_keyboard(shift_id))
+            await self.to_managers(user, urgent_text(user, shift), urgent_keyboard(shift_id))
         elif event == "SHIFT_CANCELLED":
-            await self.to_admins(cancelled_text(self.conn, user, shift))
+            await self.to_managers(user, cancelled_text(self.conn, user, shift))
         elif event == "SHIFT_RESTORED":
-            await self.to_admins(restored_text(self.conn, user, shift))
+            await self.to_managers(user, restored_text(self.conn, user, shift))
         elif event == "SHIFT_FINAL_CANCELLED":
-            await self.to_admins(final_cancel_text(self.conn, user, shift), penalty_keyboard(shift_id))
+            # trainers can't fine directly: no penalty buttons for them
+            await self.to_managers(user, final_cancel_text(self.conn, user, shift), penalty_keyboard(shift_id),
+                                   trainer_buttons=False)
         elif event == "SHIFT_EDITED_BY_USER" and old:
-            await self.to_admins(edited_text(user, shift, old))
+            await self.to_managers(user, edited_text(user, shift, old))
 
     async def admin_edit(self, admin: dict, shift: dict, reason: str) -> None:
         user = svc.get_user(self.conn, shift["user_id"])
-        await self.to_admins(admin_edited_text(admin, user, shift, reason), exclude=admin["telegram_id"])
+        await self.to_managers(user, admin_edited_text(admin, user, shift, reason), exclude=admin["telegram_id"])
+
+    async def network_changed(self, user: dict, network_name: str | None, actor: dict, trainer: bool = False) -> None:
+        if trainer:
+            text = f"🧭 Вы назначены тренером сети «{escape(network_name or '')}». В приложении во вкладке «Админ» — ваша команда."
+        elif network_name:
+            text = f"🧭 Вы в сети «{escape(network_name)}»."
+        else:
+            text = "🧭 Вы больше не состоите в сети."
+        await self.send(user["telegram_id"], text)
+        await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
+                           f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
 
     async def urgent_decided(self, shift: dict, approved: bool) -> None:
         user = svc.get_user(self.conn, shift["user_id"])

@@ -22,6 +22,8 @@ export interface User {
   account_state: "active" | "paused" | "blocked";
   state_reason: string | null;
   network_id: number | null;
+  /** network name (team listing) */
+  network?: string | null;
   is_owner?: boolean;
   created_at?: string;
   notify_reminders?: boolean;
@@ -57,6 +59,25 @@ export interface Me {
   bot_username?: string | null;
   role_title?: string;
   capabilities?: Capability[];
+  network?: string | null;
+}
+
+export interface NetworkMember {
+  id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+  role: Role;
+  work_status: User["work_status"];
+  account_state: User["account_state"];
+}
+
+export interface Network {
+  id: number;
+  name: string;
+  status: "active" | "archived";
+  trainer: { id: number; name: string; username: string | null; telegram_id: number } | null;
+  members: NetworkMember[];
 }
 
 export interface SettingsResponse {
@@ -490,6 +511,12 @@ export const api = {
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/amount`, { amount, idempotency_key: key }),
     payAll: (user_id: number, key: string) =>
       post<{ paid: number; total: number }>("/api/admin/finances/pay-all", { user_id, idempotency_key: key }),
+    networks: () => request<{ items: Network[] }>("/api/admin/networks"),
+    createNetwork: (name: string, key: string) => post<{ network: Network }>("/api/admin/networks", { name, idempotency_key: key }),
+    updateNetwork: (id: number, body: { name?: string; trainer_id?: number; clear_trainer?: boolean; archive?: boolean }, key: string) =>
+      patch<{ network: Network }>(`/api/admin/networks/${id}`, { ...body, idempotency_key: key }),
+    setMemberNetwork: (userId: number, networkId: number | null, key: string) =>
+      post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/network`, { network_id: networkId, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
     review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),

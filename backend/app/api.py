@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, finance, reports
+from . import day_actual, finance, networks, reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -67,6 +67,24 @@ class AccessBody(BaseModel):
 class StateBody(BaseModel):
     state: str
     reason: str | None = None
+    idempotency_key: str
+
+
+class NetworkBody(BaseModel):
+    name: str
+    idempotency_key: str
+
+
+class NetworkPatch(BaseModel):
+    name: str | None = None
+    trainer_id: int | None = None
+    clear_trainer: bool = False
+    archive: bool = False
+    idempotency_key: str
+
+
+class MemberNetwork(BaseModel):
+    network_id: int | None = None
     idempotency_key: str
 
 
@@ -276,6 +294,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "registered": True,
             "user": public_user(user),
             "role_title": perms.ROLE_TITLES[perms.role_of(user)],
+            "network": (networks.get(conn, user["network_id"]) or {}).get("name") if user["network_id"] else None,
             "capabilities": perms.capabilities(user),
             "pricing": pricing.pricing_info(),
             "bot_username": app.state.bot_username,
@@ -383,7 +402,9 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         people = svc.team(conn)
         if not perms.can(admin, "registrations"):
             people = [u for u in people if u["status"] == "approved"]
-        return {"items": [public_user(u) for u in visible(admin, people)], "bot_username": app.state.bot_username}
+        nets = networks.names(conn)
+        items = [{**public_user(u), "network": nets.get(u["network_id"])} for u in visible(admin, people)]
+        return {"items": items, "bot_username": app.state.bot_username}
 
     @api.post("/admin/team/{user_id}/role")
     async def admin_set_role(user_id: int, body: RoleBody, admin: dict = Depends(staff("roles"))):
@@ -568,6 +589,42 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                 if perms.can(admin, "approve_fines") else 0)
         out["fines_draft"] = len(finance.journal(conn, only=only, statuses=("draft",))) if perms.can(admin, "fine_direct") else 0
         return out
+
+    # ------------------------------------------------------------ networks (ТЗ модуль 8)
+
+    @api.get("/admin/networks")
+    async def admin_networks(archived: bool = False, admin: dict = Depends(admin_user)):
+        return {"items": networks.listing(conn, admin, archived)}
+
+    @api.post("/admin/networks")
+    async def admin_network_create(body: NetworkBody, owner: dict = Depends(staff("networks"))):
+        return {"network": networks.create(conn, owner, body.name, body.idempotency_key)}
+
+    @api.patch("/admin/networks/{network_id}")
+    async def admin_network_update(network_id: int, body: NetworkPatch, owner: dict = Depends(staff("networks"))):
+        if body.archive:
+            return {"network": networks.archive(conn, owner, network_id, body.idempotency_key)}
+        net = None
+        if body.name is not None:
+            net = networks.rename(conn, owner, network_id, body.name, body.idempotency_key)
+        if body.trainer_id is not None or body.clear_trainer:
+            key = body.idempotency_key + (":trainer" if body.name is not None else "")
+            net, previous = networks.set_trainer(conn, owner, network_id, None if body.clear_trainer else body.trainer_id, key)
+            if body.trainer_id is not None:
+                notifier.spawn(notifier.network_changed(svc.get_user(conn, body.trainer_id), net["name"], owner, trainer=True))
+            if previous:
+                notifier.spawn(notifier.role_changed(svc.get_user(conn, previous["id"]), owner, "trainer"))
+        if net is None:
+            raise svc.ServiceError("Нет изменений", 422, "no_changes")
+        return {"network": net}
+
+    @api.post("/admin/team/{user_id}/network")
+    async def admin_member_network(user_id: int, body: MemberNetwork, owner: dict = Depends(staff("networks"))):
+        user, changed = networks.set_member(conn, owner, user_id, body.network_id, body.idempotency_key)
+        if changed:
+            name = networks.get(conn, body.network_id)["name"] if body.network_id else None
+            notifier.spawn(notifier.network_changed(user, name, owner))
+        return {"user": public_user(user), "changed": changed}
 
     # ------------------------------------------------------------ money (ТЗ модуль 4)
 
