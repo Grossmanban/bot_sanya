@@ -441,6 +441,40 @@ export interface Broadcast {
   created_at: string;
   first_name: string | null;
   last_name: string | null;
+  require_ack: number;
+  media_file_id: string | null;
+  network_id: number | null;
+  read: number;
+}
+
+export interface BroadcastPerson {
+  id: number;
+  name: string;
+  working: boolean;
+  admin: boolean;
+  network_id: number | null;
+  network: string | null;
+}
+
+export interface Receipt {
+  user_id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+  delivered: boolean;
+  read_at: string | null;
+  reminders: number;
+  reminded_at: string | null;
+}
+
+export interface BroadcastDraft {
+  audiences: string[];
+  html: string;
+  signed: boolean;
+  network_id: number | null;
+  user_ids: number[] | null;
+  require_ack: boolean;
+  media_file_id: string | null;
 }
 
 export type AdminAction = "force_cancel" | "force_restore" | "approve_urgent" | "reject_urgent";
@@ -538,12 +572,19 @@ export const api = {
     settings: () => request<SettingsResponse>("/api/admin/settings"),
     saveSettings: (body: Partial<ScheduleSettings>) => patch<SettingsResponse>("/api/admin/settings", body),
     broadcasts: () =>
-      request<{ items: Broadcast[]; audiences: Record<string, string>; people: { id: number; working: boolean; admin: boolean }[] }>(
-        "/api/admin/broadcasts",
-      ),
-    broadcast: (audiences: string[], html: string, signed: boolean) =>
-      post<{ broadcast: Broadcast }>("/api/admin/broadcasts", { audiences, html, signed }),
-    broadcastTest: (html: string, signed: boolean) => post<{ ok: boolean }>("/api/admin/broadcasts/test", { html, signed }),
+      request<{
+        items: Broadcast[];
+        audiences: Record<string, string>;
+        people: BroadcastPerson[];
+        networks: { id: number; name: string }[];
+        scope: "all" | "network";
+      }>("/api/admin/broadcasts"),
+    broadcast: (draft: BroadcastDraft) => post<{ broadcast: Broadcast }>("/api/admin/broadcasts", draft),
+    broadcastTest: (html: string, signed: boolean, require_ack: boolean, media_file_id: string | null) =>
+      post<{ ok: boolean }>("/api/admin/broadcasts/test", { html, signed, require_ack, media_file_id }),
+    receipts: (id: number) => request<{ broadcast: Broadcast; items: Receipt[] }>(`/api/admin/broadcasts/${id}`),
+    remind: (id: number, userIds: number[] | null) =>
+      post<{ sent: number }>(`/api/admin/broadcasts/${id}/remind`, { user_ids: userIds }),
     exportXlsx: (date_from: string, date_to: string, user_id?: number) =>
       post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
     reports: (kind: QueueKind, day?: string) =>

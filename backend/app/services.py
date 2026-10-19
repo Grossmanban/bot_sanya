@@ -1151,19 +1151,36 @@ AUDIENCES = {
 }
 
 
-def broadcast_recipients(conn, audiences: list[str] | str) -> list[dict]:
-    """Union of the chosen groups among people with access; each person once."""
+def broadcast_recipients(conn, audiences: list[str] | str, network_id: int | None = None,
+                         user_ids: list[int] | None = None, actor: dict | None = None) -> list[dict]:
+    """Union of the chosen groups, a network and hand-picked people, among people with access; each once.
+    A trainer reaches only their own network (ТЗ 7.1)."""
     if isinstance(audiences, str):
         audiences = ["working", "not_working"] if audiences == "all" else [audiences]
-    if not audiences or any(a not in AUDIENCES for a in audiences):
+    audiences = audiences or []
+    if any(a not in AUDIENCES for a in audiences):
+        raise ServiceError("Выберите, кому отправить", 422, "bad_audience")
+    if not audiences and network_id is None and not user_ids:
         raise ServiceError("Выберите, кому отправить", 422, "bad_audience")
     rules = {
         "working": "work_status = 'working'",
         "not_working": "work_status = 'not_working'",
         "admins": "role = 'admin'",
     }
-    where = " OR ".join(f"({rules[a]})" for a in dict.fromkeys(audiences))
-    return [dict(r) for r in conn.execute(f"SELECT * FROM users WHERE status = 'approved' AND ({where}) ORDER BY id")]
+    parts = [f"({rules[a]})" for a in dict.fromkeys(audiences)]
+    params: list = []
+    if network_id is not None:
+        parts.append("(network_id = ?)")
+        params.append(network_id)
+    if user_ids:
+        parts.append(f"(id IN ({','.join('?' * len(user_ids))}))")
+        params += list(user_ids)
+    people = [dict(r) for r in conn.execute(
+        f"""SELECT * FROM users WHERE status = 'approved' AND account_state != 'blocked' AND ({' OR '.join(parts)})
+            ORDER BY id""", params)]
+    if actor is not None and not perms.sees_everyone(actor):
+        people = [u for u in people if perms.manages(actor, u)]
+    return people
 
 
 def prepare_message(html: str) -> tuple[str, str]:
@@ -1177,25 +1194,51 @@ def prepare_message(html: str) -> tuple[str, str]:
     return clean, text
 
 
-def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True) -> tuple[dict, list[dict]]:
+def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True,
+                     network_id: int | None = None, user_ids: list[int] | None = None, require_ack: bool = False,
+                     media: str | None = None) -> tuple[dict, list[dict]]:
     clean, text = prepare_message(html)
-    recipients = broadcast_recipients(conn, audiences)
+    if media and len(clean) > 4000:
+        raise ServiceError("Слишком длинный текст", 422, "too_long")
+    recipients = broadcast_recipients(conn, audiences, network_id, user_ids, admin)
     if not recipients:
         raise ServiceError("В выбранных группах никого нет", 422, "no_recipients")
     audience = ",".join(audiences) if isinstance(audiences, list) else audiences
     with transaction(conn):
         cur = conn.execute(
-            """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (admin["telegram_id"], audience, text, clean, int(signed), len(recipients), now_iso()),
+            """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at, media_file_id,
+                                       require_ack, network_id, people)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (admin["telegram_id"], audience, text, clean, int(signed), len(recipients), now_iso(), media,
+             int(require_ack), network_id, json.dumps(user_ids) if user_ids else None),
         )
     return dict(conn.execute("SELECT * FROM broadcasts WHERE id = ?", (cur.lastrowid,)).fetchone()), recipients
 
 
-def list_broadcasts(conn, limit: int = 20) -> list[dict]:
+def list_broadcasts(conn, limit: int = 20, author_tg: int | None = None) -> list[dict]:
+    """author_tg: only this person's broadcasts (trainers see their own)."""
     rows = conn.execute(
-        """SELECT b.*, u.first_name, u.last_name FROM broadcasts b
-           LEFT JOIN users u ON u.telegram_id = b.author_id ORDER BY b.id DESC LIMIT ?""",
-        (limit,),
+        """SELECT b.*, u.first_name, u.last_name,
+                  (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id = b.id AND d.read_at IS NOT NULL) AS read
+           FROM broadcasts b LEFT JOIN users u ON u.telegram_id = b.author_id
+           WHERE (? IS NULL OR b.author_id = ?) ORDER BY b.id DESC LIMIT ?""",
+        (author_tg, author_tg, limit),
     )
     return [dict(r) for r in rows]
+
+
+def broadcast_deliveries(conn, broadcast_id: int) -> list[dict]:
+    return [{**dict(r), "name": full_name(dict(r))} for r in conn.execute(
+        """SELECT d.*, u.first_name, u.last_name, u.username, u.telegram_id FROM broadcast_deliveries d
+           JOIN users u ON u.id = d.user_id WHERE d.broadcast_id = ? ORDER BY d.read_at IS NOT NULL, u.first_name""",
+        (broadcast_id,))]
+
+
+def acknowledge(conn, broadcast_id: int, telegram_id: int) -> bool:
+    """«Я ознакомился»: returns True the first time."""
+    user = get_user_by_tg(conn, telegram_id)
+    if user is None:
+        return False
+    cur = conn.execute("UPDATE broadcast_deliveries SET read_at = ? WHERE broadcast_id = ? AND user_id = ? AND read_at IS NULL",
+                       (now_iso(), broadcast_id, user["id"]))
+    return cur.rowcount == 1

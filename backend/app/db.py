@@ -480,6 +480,27 @@ CREATE INDEX ix_payout_items_batch ON payout_items (batch_id);
 """)
 
 
+# 11: broadcasts with media, audiences by network / people, read receipts (ТЗ модуль 6)
+MIGRATIONS.append("""
+ALTER TABLE broadcasts ADD COLUMN media_file_id TEXT;
+ALTER TABLE broadcasts ADD COLUMN require_ack INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE broadcasts ADD COLUMN network_id INTEGER;
+ALTER TABLE broadcasts ADD COLUMN people TEXT;
+CREATE TABLE broadcast_deliveries (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    broadcast_id   INTEGER NOT NULL REFERENCES broadcasts(id),
+    user_id        INTEGER NOT NULL REFERENCES users(id),
+    message_id     INTEGER,
+    delivered      INTEGER NOT NULL DEFAULT 0,
+    sent_at        TEXT NOT NULL,
+    read_at        TEXT,
+    reminded_at    TEXT,
+    reminders      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (broadcast_id, user_id)
+);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):
