@@ -529,6 +529,43 @@ CREATE TABLE goal_participants (
 """)
 
 
+# 13: live events with a leaderboard (ТЗ модуль 7)
+MIGRATIONS.append("""
+CREATE TABLE events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    title         TEXT NOT NULL,
+    description   TEXT,
+    prize         TEXT,
+    mode          TEXT NOT NULL CHECK (mode IN ('first_to_reach','accumulative')),
+    target        INTEGER,
+    max_winners   INTEGER NOT NULL DEFAULT 1 CHECK (max_winners > 0),
+    max_attempts  INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+    starts_at     TEXT NOT NULL,
+    ends_at       TEXT NOT NULL,
+    buffer_min    INTEGER NOT NULL DEFAULT 15,
+    network_id    INTEGER REFERENCES networks(id),
+    status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','finished','cancelled')),
+    created_by    INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    finished_at   TEXT
+);
+CREATE TABLE event_entries (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id       INTEGER NOT NULL REFERENCES events(id),
+    user_id        INTEGER NOT NULL REFERENCES users(id),
+    attempt        INTEGER NOT NULL,
+    value          INTEGER NOT NULL CHECK (value > 0),
+    photo_file_id  TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending_review' CHECK (status IN ('pending_review','confirmed','rejected')),
+    reason         TEXT,
+    submitted_at   TEXT NOT NULL,
+    reviewed_by    INTEGER,
+    reviewed_at    TEXT
+);
+CREATE INDEX ix_event_entries_event ON event_entries (event_id, status);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

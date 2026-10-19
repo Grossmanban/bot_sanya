@@ -60,6 +60,49 @@ export interface Me {
   role_title?: string;
   capabilities?: Capability[];
   network?: string | null;
+  events?: number;
+}
+
+export interface LiveEvent {
+  id: number;
+  title: string;
+  description: string | null;
+  prize: string | null;
+  mode: "first_to_reach" | "accumulative";
+  target: number | null;
+  max_winners: number;
+  max_attempts: number;
+  starts_at: string;
+  ends_at: string;
+  buffer_min: number;
+  status: "active" | "finished" | "cancelled";
+  phase: "upcoming" | "live" | "review" | "finished" | "cancelled";
+  network: string | null;
+  leaderboard: { user_id: number; name: string; score: number; confirmed: number; pending: number; place: number; winner: boolean; out: boolean }[];
+  winners_count: number;
+  my: {
+    score: number;
+    confirmed: number;
+    winner: boolean;
+    attempts_left: number;
+    pending: boolean;
+    can_submit: boolean;
+    entries: { id: number; attempt: number; value: number; status: "pending_review" | "confirmed" | "rejected"; reason: string | null; submitted_at: string }[];
+  };
+}
+
+export interface PendingEntry {
+  id: number;
+  event_id: number;
+  event: string;
+  mode: LiveEvent["mode"];
+  target: number | null;
+  user_id: number;
+  name: string;
+  value: number;
+  attempt: number;
+  submitted_at: string;
+  photo_url: string;
 }
 
 export interface Goal {
@@ -563,6 +606,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ ...body, idempotency_key: key }),
     }),
+  events: () => request<{ items: LiveEvent[] }>("/api/events"),
+  event: (id: number) => request<{ event: LiveEvent }>(`/api/events/${id}`),
+  submitEntry: (id: number, value: number, photo: Blob, key: string) =>
+    upload<{ event: LiveEvent; changed: boolean }>(`/api/events/${id}/entries?value=${value}&idempotency_key=${key}`, photo),
   goals: () => request<{ items: Goal[] }>("/api/goals"),
   joinGoal: (id: number) => post<{ goal: Goal }>(`/api/goals/${id}/join`, {}),
   myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
@@ -635,6 +682,15 @@ export const api = {
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/amount`, { amount, idempotency_key: key }),
     payAll: (user_id: number, key: string) =>
       post<{ paid: number; total: number }>("/api/admin/finances/pay-all", { user_id, idempotency_key: key }),
+    events: () => request<{ items: LiveEvent[]; pending: PendingEntry[] }>("/api/admin/events"),
+    createEvent: (
+      body: { title: string; mode: LiveEvent["mode"]; starts_at: string; ends_at: string; description?: string; prize?: string;
+        target?: number | null; max_winners: number; max_attempts: number; network_id?: number | null },
+      key: string,
+    ) => post<{ event: LiveEvent }>("/api/admin/events", { ...body, idempotency_key: key }),
+    cancelEvent: (id: number, key: string) => post<{ event: LiveEvent }>(`/api/admin/events/${id}/cancel`, { idempotency_key: key }),
+    reviewEntry: (id: number, approve: boolean, reason: string | null, key: string) =>
+      post<{ event: LiveEvent; changed: boolean }>(`/api/admin/event-entries/${id}/review`, { approve, reason, idempotency_key: key }),
     goals: () => request<{ items: Goal[] }>("/api/admin/goals"),
     createGoal: (
       body: { title: string; kind: Goal["kind"]; mode: Goal["mode"]; target: number; date_from: string; date_to: string;

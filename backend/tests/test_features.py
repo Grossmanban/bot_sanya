@@ -956,3 +956,104 @@ def test_goals_progress_and_completion(conn, make_user):
     assert goals.check_completions(conn, THU) == []
     goals.archive(conn, trainer, shared["id"], svc.new_key())
     assert all(g["title"] != "Северу 50" for g in goals.for_user(conn, a, TODAY))
+
+
+# ---------------------------------------------------------------- live events (ТЗ модуль 7)
+
+
+def _event(conn, actor, **kw):
+    from app import events
+
+    base = dict(title="Гонка", mode="first_to_reach", target=30, max_winners=1, max_attempts=2,
+                starts_at=at(THU, "10:00"), ends_at=at(THU, "18:00"), key=svc.new_key())
+    return events.create(conn, actor, **{**base, **kw})
+
+
+def test_first_to_reach_race(conn, make_user):
+    from app import events
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a, b, c = make_user(first="Аня"), make_user(first="Боря"), make_user(first="Вика")
+    ev = _event(conn, owner, max_winners=2)
+    noon = at(THU, "12:00")
+    with pytest.raises(svc.ServiceError) as e:
+        events.submit(conn, a, ev["id"], 31, "p", svc.new_key(), now=at(THU, "09:00"))
+    assert e.value.code == "closed"
+    with pytest.raises(svc.ServiceError) as e:
+        events.submit(conn, a, ev["id"], 20, "p", svc.new_key(), now=noon)
+    assert e.value.code == "below_target"
+    ea, _ = events.submit(conn, a, ev["id"], 31, "p", svc.new_key(), now=noon)
+    with pytest.raises(svc.ServiceError) as e:  # one entry under review at a time
+        events.submit(conn, a, ev["id"], 32, "p", svc.new_key(), now=noon)
+    assert e.value.code == "pending"
+    board = events.view(conn, ev, a, noon)["leaderboard"]
+    assert board[0]["name"].startswith("Аня") and board[0]["score"] == 31 and not board[0]["winner"]  # soft score
+
+    eb, _ = events.submit(conn, b, ev["id"], 30, "p", svc.new_key(), now=noon)
+    with pytest.raises(svc.ServiceError) as e:
+        events.review(conn, owner, eb["id"], False, "", svc.new_key())
+    assert e.value.code == "reason_required"
+    events.review(conn, owner, eb["id"], False, "Скрин не тот", svc.new_key())
+    eb2, _ = events.submit(conn, b, ev["id"], 30, "p", svc.new_key(), now=noon)
+    events.review(conn, owner, eb2["id"], False, "Опять не тот", svc.new_key())
+    vb = events.view(conn, events.get(conn, ev["id"]), b, noon)
+    assert vb["my"]["attempts_left"] == 0 and not vb["my"]["can_submit"]
+    with pytest.raises(svc.ServiceError) as e:
+        events.submit(conn, b, ev["id"], 40, "p", svc.new_key(), now=noon)
+    assert e.value.code == "no_attempts"
+
+    first = events.review(conn, owner, ea["id"], True, None, svc.new_key())
+    assert first.changed and not first.finished
+    ec, _ = events.submit(conn, c, ev["id"], 35, "p", svc.new_key(), now=at(THU, "13:00"))
+    second = events.review(conn, owner, ec["id"], True, None, svc.new_key())
+    assert second.finished and events.get(conn, ev["id"])["status"] == "finished"
+    board = events.leaderboard(conn, events.get(conn, ev["id"]))
+    assert [r["name"].split()[0] for r in board if r["winner"]] == ["Аня", "Вика"]  # 👑 in confirmation order
+    n = FakeNotifier(conn)
+    run(n.event_reviewed(second, owner))
+    assert any("завершено" in t for chat, t in n.sent if chat == b["telegram_id"])
+
+
+def test_accumulative_scoreboard_and_finish(conn, make_user):
+    from app import events
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a, b = make_user(first="Аня"), make_user(first="Боря")
+    ev = _event(conn, owner, title="Кто больше", mode="accumulative", target=None, max_winners=1)
+    e1, _ = events.submit(conn, a, ev["id"], 10, "p", svc.new_key(), now=at(THU, "11:00"))
+    events.review(conn, owner, e1["id"], True, None, svc.new_key())
+    e2, _ = events.submit(conn, b, ev["id"], 12, "p", svc.new_key(), now=at(THU, "12:00"))
+    e3, _ = events.submit(conn, a, ev["id"], 5, "p", svc.new_key(), now=at(THU, "12:30"))
+    board = events.view(conn, ev, None, at(THU, "13:00"))["leaderboard"]
+    assert [(r["name"].split()[0], r["score"], r["confirmed"]) for r in board] == [("Аня", 15, 10), ("Боря", 12, 0)]
+    events.review(conn, owner, e2["id"], True, None, svc.new_key())
+    events.review(conn, owner, e3["id"], False, "Не видно итога", svc.new_key())
+    with pytest.raises(svc.ServiceError) as e:  # after the timer: closed for new entries
+        events.submit(conn, a, ev["id"], 50, "p", svc.new_key(), now=at(THU, "18:05"))
+    assert e.value.code == "closed"
+    n = FakeNotifier(conn)
+    run(jobs.tick(conn, n, at(THU, "18:10")))  # still in the 15-minute buffer
+    assert events.get(conn, ev["id"])["status"] == "active"
+    run(jobs.tick(conn, n, at(THU, "18:16")))
+    assert events.get(conn, ev["id"])["status"] == "finished"
+    board = events.leaderboard(conn, events.get(conn, ev["id"]))
+    assert [r["name"].split()[0] for r in board if r["winner"]] == ["Боря"]  # prizes by confirmed score: 12 > 10
+    assert any("Победители" in t and "Боря" in t for chat, t in n.sent if chat == a["telegram_id"])
+
+
+def test_event_network_scope(conn, make_user):
+    from app import events, networks
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer, a, other = make_user(first="Тренер"), make_user(first="Аня"), make_user(first="Чужой")
+    net = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
+    networks.set_member(conn, owner, a["id"], net["id"], svc.new_key())
+    trainer, a = svc.get_user(conn, trainer["id"]), svc.get_user(conn, a["id"])
+    with pytest.raises(svc.ServiceError):
+        _event(conn, trainer)  # a trainer runs events only for their network
+    ev = _event(conn, trainer, network_id=net["id"])
+    assert events.eligible(ev, a) and not events.eligible(ev, other)
+    with pytest.raises(svc.ServiceError) as e:
+        events.submit(conn, other, ev["id"], 40, "p", svc.new_key(), now=at(THU, "12:00"))
+    assert e.value.status == 404
