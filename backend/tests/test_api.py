@@ -363,3 +363,30 @@ def test_goal_endpoints(client, conn):
     r = client.post(f"/api/goals/{goal['id']}/join", headers=h)
     assert r.json()["goal"]["joined"] is True and r.json()["goal"]["progress"] == 0
     assert client.get("/api/admin/goals", headers=owner).json()["items"][0]["participants"][0]["user_id"] == u["id"]
+
+
+def test_event_endpoints(client, conn):
+    from app.timeutil import now_local
+
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    u, _ = svc.create_registration(conn, 88, None, "Иван", "Петров")
+    svc.decide_registration(conn, u["id"], True, 999)
+    h = headers(88, "Иван", "Петров")
+    now = now_local().replace(tzinfo=None)  # the Mini App sends local (Moscow) time without a zone
+    body = {"title": "Спринт", "mode": "accumulative", "starts_at": (now - timedelta(hours=1)).isoformat(timespec="minutes"),
+            "ends_at": (now + timedelta(hours=2)).isoformat(timespec="minutes"), "max_winners": 2, "prize": "Пицца",
+            "idempotency_key": key()}
+    assert client.post("/api/admin/events", json=body, headers=h).status_code == 403
+    ev = client.post("/api/admin/events", json=body, headers=owner).json()["event"]
+    assert client.get("/api/me", headers=h).json()["events"] == 1
+    jpeg = b"\xff\xd8\xff\xe0" + b"1" * 64
+    r = client.post(f"/api/events/{ev['id']}/entries?value=7&idempotency_key={key()}", content=jpeg, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["event"]["my"]["pending"] is True and r.json()["event"]["leaderboard"][0]["score"] == 7
+    pending = client.get("/api/admin/events", headers=owner).json()["pending"]
+    assert client.get(pending[0]["photo_url"]).content == jpeg
+    assert client.get(pending[0]["photo_url"].replace("/event/", "/report/")).status_code == 403  # links don't cross kinds
+    r = client.post(f"/api/admin/event-entries/{pending[0]['id']}/review", json={"approve": True, "idempotency_key": key()},
+                    headers=owner)
+    assert r.json()["event"]["leaderboard"][0]["confirmed"] == 7

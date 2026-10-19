@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, finance, goals, networks, payouts, reports
+from . import day_actual, events, finance, goals, networks, payouts, reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -103,6 +103,26 @@ class PayoutCommit(PayoutPreview):
     choices: list[PayoutChoice]
     proof: list[str] = []
     deduction_proof: list[str] = []
+    idempotency_key: str
+
+
+class EventBody(BaseModel):
+    title: str
+    mode: str
+    starts_at: str
+    ends_at: str
+    description: str | None = None
+    prize: str | None = None
+    target: int | None = None
+    max_winners: int = 1
+    max_attempts: int = 3
+    network_id: int | None = None
+    idempotency_key: str
+
+
+class EntryReview(BaseModel):
+    approve: bool
+    reason: str | None = None
     idempotency_key: str
 
 
@@ -354,6 +374,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "registered": True,
             "user": public_user(user),
             "role_title": perms.ROLE_TITLES[perms.role_of(user)],
+            "events": len(events.visible(conn, user)),
             "network": (networks.get(conn, user["network_id"]) or {}).get("name") if user["network_id"] else None,
             "capabilities": perms.capabilities(user),
             "pricing": pricing.pricing_info(),
@@ -384,6 +405,43 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def save_payment_profile(body: ProfileBody, user: dict = Depends(current_user)):
         profile = payouts.save_profile(conn, user, user["id"], body.phone, body.bank, body.recipient, body.idempotency_key)
         return {"profile": payouts.public_profile(profile, True), "banks": payouts.BANKS}
+
+    @api.get("/events")
+    async def my_events(user: dict = Depends(current_user)):
+        return {"items": [events.view(conn, e, user) for e in events.visible(conn, user)]}
+
+    @api.get("/events/{event_id}")
+    async def my_event(event_id: int, user: dict = Depends(current_user)):
+        event = events.get(conn, event_id)
+        if event is None or event["id"] not in {e["id"] for e in events.visible(conn, user, days=30)}:
+            raise svc.ServiceError("Событие не найдено", 404, "not_found")
+        return {"event": events.view(conn, event, user)}
+
+    @api.post("/events/{event_id}/entries")
+    async def event_entry(event_id: int, request: Request, value: int = Query(...), idempotency_key: str = Query(...),
+                          user: dict = Depends(current_user)):
+        if svc._seen(conn, idempotency_key):
+            return {"event": events.view(conn, events.get(conn, event_id), user), "changed": False}
+        event = events.check_entry(conn, events.get(conn, event_id), user, now_local())
+        if event["mode"] == "first_to_reach" and value < event["target"]:
+            raise svc.ServiceError(f"Цель гонки — {event['target']} шт.", 409, "below_target")
+        data, ext = await read_photo(request, required=True)
+        file_id = await notifier.store_photo(user["telegram_id"], data, ext,
+                                             f"🏁 Ваша заявка в событии «{event['title']}»: {value} шт.")
+        entry, changed = events.submit(conn, user, event_id, value, file_id, idempotency_key)
+        if changed:
+            notifier.spawn(notifier.event_entry(entry))
+        return {"event": events.view(conn, events.get(conn, event_id), user), "changed": changed}
+
+    @api.get("/media/event/{entry_id}")
+    async def event_photo(entry_id: int, exp: int, sig: str):
+        if not media.verify(entry_id, exp, sig, kind="event"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        entry = events.get_entry(conn, entry_id)
+        found = await notifier.fetch_photo(entry["photo_file_id"]) if entry else None
+        if found is None:
+            raise svc.ServiceError("Фото недоступно", 404, "not_found")
+        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
     @api.get("/goals")
     async def my_goals(user: dict = Depends(current_user)):
@@ -704,6 +762,41 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                 if perms.can(admin, "approve_fines") else 0)
         out["fines_draft"] = len(finance.journal(conn, only=only, statuses=("draft",))) if perms.can(admin, "fine_direct") else 0
         return out
+
+    # ------------------------------------------------------------ live events (ТЗ модуль 7)
+
+    @api.get("/admin/events")
+    async def admin_events(admin: dict = Depends(staff("review"))):
+        rows = events.visible(conn, admin, days=14)
+        if not perms.sees_everyone(admin):
+            rows = [e for e in rows if e["network_id"] == admin["network_id"]]
+        return {"items": [events.view(conn, e) for e in rows], "pending": events.pending_entries(conn, admin)}
+
+    @api.post("/admin/events")
+    async def admin_event_create(body: EventBody, admin: dict = Depends(staff("review"))):
+        def when(value: str):
+            try:
+                dt = datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise svc.ServiceError("Некорректное время", 422, "bad_time") from exc
+            return dt if dt.tzinfo else dt.replace(tzinfo=settings.tz)
+        event = events.create(conn, admin, title=body.title, mode=body.mode, starts_at=when(body.starts_at),
+                              ends_at=when(body.ends_at), key=body.idempotency_key, description=body.description,
+                              prize=body.prize, target=body.target, max_winners=body.max_winners,
+                              max_attempts=body.max_attempts, network_id=body.network_id)
+        notifier.spawn(notifier.event_created(event))
+        return {"event": events.view(conn, event)}
+
+    @api.post("/admin/events/{event_id}/cancel")
+    async def admin_event_cancel(event_id: int, body: KeyOnly, admin: dict = Depends(staff("review"))):
+        return {"event": events.view(conn, events.cancel(conn, admin, event_id, body.idempotency_key))}
+
+    @api.post("/admin/event-entries/{entry_id}/review")
+    async def admin_event_review(entry_id: int, body: EntryReview, admin: dict = Depends(staff("review"))):
+        result = events.review(conn, admin, entry_id, body.approve, body.reason, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.event_reviewed(result, admin))
+        return {"event": events.view(conn, result.event), "changed": result.changed}
 
     # ------------------------------------------------------------ goals (ТЗ модуль 5)
 

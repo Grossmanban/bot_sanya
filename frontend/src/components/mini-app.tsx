@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarDays, ShieldCheck, UserRound } from "lucide-react";
+import { CalendarDays, ShieldCheck, Trophy, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
 import { initData, setupWebApp, tapHaptic } from "@/lib/telegram";
@@ -10,12 +10,14 @@ import { AccessScreen, LoadingScreen } from "./access-screens";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
+import { EventsScreen } from "./events/live";
 import { Avatar } from "./avatar";
 
-type Tab = "schedule" | "profile" | "admin";
+type Tab = "schedule" | "events" | "profile" | "admin";
 
 const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
   { id: "schedule", label: "График", icon: CalendarDays },
+  { id: "events", label: "События", icon: Trophy },
   { id: "profile", label: "Профиль", icon: UserRound },
   { id: "admin", label: "Админ", icon: ShieldCheck },
 ];
@@ -74,7 +76,8 @@ export function MiniApp() {
   } else {
     const user = me.user;
     const staff = isStaff(user);
-    const tabs = TABS.filter((t) => t.id !== "admin" || staff);
+    // the events tab appears while there is an active (or just finished) event for this person
+    const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0));
     const working = user.work_status === "working";
     const activeIndex = tabs.findIndex((t) => t.id === tab);
 
@@ -134,6 +137,7 @@ export function MiniApp() {
             {tab === "schedule" && (
               <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => go("profile")} onUserChange={updateUser} />
             )}
+            {tab === "events" && <EventsScreen />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} />}
             {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} />}
           </main>

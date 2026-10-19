@@ -805,6 +805,83 @@ class Notifier:
                 names = ", ".join(escape(svc.full_name(p)) for p in people)
                 await self.send(creator["telegram_id"], f"🎯 Цель «{escape(goal['title'])}» выполнена: {names}")
 
+    # ------------------------------------------------------------ live events (ТЗ модуль 7)
+
+    def _event_markup(self) -> InlineKeyboardMarkup | None:
+        if not settings.webapp_url.startswith("https://"):
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏁 Открыть событие",
+                                                                           web_app=WebAppInfo(url=settings.webapp_url))]])
+
+    async def event_created(self, event: dict) -> int:
+        from . import events
+
+        rule = (f"Гонка: первые {event['max_winners']} до {event['target']} шт." if event["mode"] == "first_to_reach"
+                else f"Кто больше сделает: топ-{event['max_winners']}")
+        text = (f"🏁 <b>Событие: {escape(event['title'])}</b>\n{rule}\n"
+                f"До {event['ends_at'][11:16]} {event['ends_at'][8:10]}.{event['ends_at'][5:7]}")
+        if event["prize"]:
+            text += f"\n🏆 Приз: {escape(event['prize'])}"
+        if event["description"]:
+            text += f"\n{escape(event['description'])}"
+        sent = 0
+        for user in svc.list_users(self.conn):
+            if events.eligible(event, user):
+                sent += await self.send(user["telegram_id"], text, self._event_markup())
+                await asyncio.sleep(0.05)
+        return sent
+
+    async def event_entry(self, entry: dict) -> None:
+        from . import events, reports
+
+        event = events.get(self.conn, entry["event_id"])
+        user = svc.get_user(self.conn, entry["user_id"])
+        caption = (f"🏁 <b>Заявка в событии «{escape(event['title'])}»</b>\n{who(user)}: <b>{entry['value']} шт.</b>"
+                   f" (попытка {entry['attempt']})")
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ev:ok:{entry['id']}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ev:no:{entry['id']}")]])
+        for chat in reports.reviewers(self.conn, user):
+            await self._photo_or_text(chat, entry["photo_file_id"], caption, markup)
+
+    async def event_reviewed(self, result, actor: dict) -> None:
+        from . import events
+
+        entry, event = result.entry, result.event
+        user = svc.get_user(self.conn, entry["user_id"])
+        if entry["status"] == "confirmed":
+            text = (f"👑 Вы среди победителей события «{escape(event['title'])}»!" if event["mode"] == "first_to_reach"
+                    else f"✅ Засчитано {entry['value']} шт. в событии «{escape(event['title'])}».")
+        else:
+            left = events.view(self.conn, event, user)["my"]["attempts_left"]
+            text = (f"❌ Заявка в событии «{escape(event['title'])}» отклонена.\nПричина: {escape(entry['reason'] or '')}\n"
+                    + (f"Осталось попыток: {left}. Исправьте и отправьте снова." if left else "Попытки закончились."))
+        await self.send(user["telegram_id"], text, self._event_markup())
+        if result.finished:
+            await self.event_finished(event)
+
+    async def event_finished(self, event: dict) -> None:
+        from . import events
+
+        board = events.leaderboard(self.conn, event)
+        winners = [r for r in board if r["winner"]]
+        lines = [f"🏁 <b>Событие «{escape(event['title'])}» завершено</b>"]
+        if winners:
+            lines.append("👑 Победители: " + ", ".join(f"{escape(r['name'])} ({r['confirmed']} шт.)" for r in winners))
+        else:
+            lines.append("Победителей нет.")
+        if event["prize"]:
+            lines.append(f"🏆 Приз: {escape(event['prize'])}")
+        text = "\n".join(lines)
+        notified = {r["user_id"] for r in board}
+        for user in svc.list_users(self.conn):
+            if user["id"] in notified or events.eligible(event, user):
+                await self.send(user["telegram_id"], text)
+                await asyncio.sleep(0.05)
+        creator = svc.get_user_by_tg(self.conn, event["created_by"])
+        if creator and creator["id"] not in notified:
+            await self.send(creator["telegram_id"], text)
+
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5)
 
     async def team_approved(self, shift: dict, report: dict | None = None) -> None:

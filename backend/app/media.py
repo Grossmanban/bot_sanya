@@ -44,15 +44,16 @@ def local_path(file_id: str) -> Path | None:
     return path if path.parent == Path(settings.media_dir).resolve() and path.is_file() else None
 
 
-def _sig(report_id: int, exp: int) -> str:
-    return hmac.new(settings.bot_token.encode(), f"report:{report_id}:{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+def _sig(object_id: int, exp: int, kind: str) -> str:
+    return hmac.new(settings.bot_token.encode(), f"{kind}:{object_id}:{exp}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
-def photo_url(report_id: int, now: float | None = None) -> str:
+def photo_url(object_id: int, now: float | None = None, kind: str = "report") -> str:
+    """kind: report (shift report) or event (live event entry) — signed separately."""
     # rounded expiry keeps the URL stable for a while, so the browser can cache the image
     exp = (int((now or time.time()) // 600) * 600) + LINK_TTL
-    return f"/api/media/report/{report_id}?exp={exp}&sig={_sig(report_id, exp)}"
+    return f"/api/media/{kind}/{object_id}?exp={exp}&sig={_sig(object_id, exp, kind)}"
 
 
-def verify(report_id: int, exp: int, sig: str) -> bool:
-    return exp > time.time() and hmac.compare_digest(_sig(report_id, exp), sig)
+def verify(object_id: int, exp: int, sig: str, kind: str = "report") -> bool:
+    return exp > time.time() and hmac.compare_digest(_sig(object_id, exp, kind), sig)

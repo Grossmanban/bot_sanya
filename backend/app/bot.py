@@ -44,6 +44,10 @@ class ReportInput(StatesGroup):
     photo = State()
 
 
+class EventReject(StatesGroup):
+    reason = State()
+
+
 class DecisionInput(StatesGroup):
     amount = State()
     reason = State()
@@ -506,6 +510,45 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         text = "✅ Одобрен" if verdict == "a" else "❌ Отклонён"
         await mark_done(call, text)
         await call.answer(text)
+
+    # ------------------------------------------------------------ live events (ТЗ модуль 7)
+
+    async def event_decide(tg_id: int, entry_id: int, approve: bool, reason: str | None) -> tuple[bool, str]:
+        from . import events
+
+        actor = svc.get_user_by_tg(conn, tg_id)
+        if actor is None:
+            return False, "Нет доступа"
+        try:
+            result = events.review(conn, actor, entry_id, approve, reason, svc.new_key())
+        except svc.ServiceError as exc:
+            return False, exc.message
+        if not result.changed:
+            return False, "Уже решено"
+        await notifier.event_reviewed(result, actor)
+        return True, "✅ Подтверждено" if approve else "❌ Отклонено"
+
+    @router.callback_query(F.data.startswith("ev:"))
+    async def event_pick(call: CallbackQuery, state: FSMContext):
+        _, verdict, entry_id = call.data.split(":")
+        if verdict == "ok":
+            ok, text = await event_decide(call.from_user.id, int(entry_id), True, None)
+            if ok:
+                await mark_done(call, text)
+            await call.answer(text, show_alert=not ok)
+            return
+        await state.clear()
+        await state.set_state(EventReject.reason)
+        await state.update_data(entry_id=int(entry_id))
+        await call.message.answer("Причина отклонения заявки? Напишите — участник увидит её.")
+        await call.answer()
+
+    @router.message(StateFilter(EventReject.reason), F.text)
+    async def event_reject_reason(message: Message, state: FSMContext):
+        data = await state.get_data()
+        await state.clear()
+        _, text = await event_decide(message.from_user.id, data["entry_id"], False, message.text.strip())
+        await message.answer(text)
 
     # ------------------------------------------------------------ goals (ТЗ модуль 5)
 
