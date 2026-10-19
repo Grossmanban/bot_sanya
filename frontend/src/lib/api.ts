@@ -373,6 +373,61 @@ export interface ScheduleSettings {
   global_actual_evening_time: string;
   global_actual_morning_enabled: boolean;
   global_actual_morning_time: string;
+  rate_base: number;
+  rate_lazy: number;
+  lazy_threshold: number;
+  trainer_commission: number;
+}
+
+export interface PaymentProfile {
+  phone: string;
+  bank: string;
+  recipient: string | null;
+  updated_at: string;
+}
+
+export interface PayoutRates {
+  rate_base: number;
+  rate_lazy: number;
+  lazy_threshold: number;
+  trainer_commission: number;
+}
+
+export interface PayoutRow {
+  user_id: number;
+  name: string;
+  role: Role;
+  network: string | null;
+  phone: string | null;
+  bank: string | null;
+  recipient: string | null;
+  personal_volume: number;
+  team_volume: number;
+  base_calc: number;
+  bonuses: number;
+  fines: number;
+  deductions: number;
+  total: number;
+  carried_debt: number;
+  has_deductions: boolean;
+}
+
+export interface PayoutItem extends Omit<PayoutRow, "has_deductions"> {
+  id: number;
+  base: number;
+}
+
+export interface PayoutBatch {
+  id: number;
+  title: string;
+  period_from: string;
+  period_to: string;
+  total: number;
+  created_at: string;
+  rates: PayoutRates;
+  proof_media: string[];
+  deduction_media: string[];
+  items: PayoutItem[];
 }
 
 export interface Broadcast {
@@ -448,6 +503,12 @@ export const api = {
     request<{
       items: { id: number; kind: string; shift_date: string; penalty_amount: number | null; reason: string }[];
     }>("/api/me/penalties"),
+  paymentProfile: () => request<{ profile: PaymentProfile | null; banks: string[] }>("/api/me/payment-profile"),
+  savePaymentProfile: (body: { phone: string; bank: string; recipient: string }, key: string) =>
+    request<{ profile: PaymentProfile; banks: string[] }>("/api/me/payment-profile", {
+      method: "PUT",
+      body: JSON.stringify({ ...body, idempotency_key: key }),
+    }),
   myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -517,6 +578,27 @@ export const api = {
       patch<{ network: Network }>(`/api/admin/networks/${id}`, { ...body, idempotency_key: key }),
     setMemberNetwork: (userId: number, networkId: number | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/network`, { network_id: networkId, idempotency_key: key }),
+    userPaymentProfile: (userId: number) =>
+      request<{ profile: PaymentProfile | null; full: boolean; banks: string[] }>(`/api/admin/users/${userId}/payment-profile`),
+    uploadMedia: (file: Blob) => upload<{ file_id: string }>("/api/admin/media", file),
+    payouts: () => request<{ items: { id: number; title: string; period_from: string; period_to: string; total: number; people: number; created_at: string }[]; rates: PayoutRates }>("/api/admin/payouts"),
+    payout: (id: number) => request<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}`),
+    payoutExcel: (id: number) => post<{ ok: boolean }>(`/api/admin/payouts/${id}/excel`, {}),
+    previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates }) =>
+      post<{ rows: PayoutRow[]; rates: PayoutRates }>("/api/admin/payouts/preview", body),
+    commitPayout: (
+      body: {
+        title: string;
+        date_from: string;
+        date_to: string;
+        network_id: number | null;
+        rates: PayoutRates;
+        choices: { user_id: number; include: boolean; base_override: number | null }[];
+        proof: string[];
+        deduction_proof: string[];
+      },
+      key: string,
+    ) => post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/payouts", { ...body, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
     review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),

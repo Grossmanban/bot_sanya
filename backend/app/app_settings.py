@@ -3,6 +3,7 @@
 import re
 import sqlite3
 
+from . import pricing
 from .db import transaction
 from .services import ServiceError
 
@@ -31,6 +32,11 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "global_actual_evening_time": ("21:30", "time"),
     "global_actual_morning_enabled": ("1", "bool"),
     "global_actual_morning_time": ("09:30", "time"),
+    # ТЗ 11.1: piece rates and «налог на лень» (pricing.py reads them), trainer commission per team piece
+    "rate_base": ("120", "rub"),
+    "rate_lazy": ("100", "rub"),
+    "lazy_threshold": ("20", "count"),
+    "trainer_commission": ("10", "rub"),
     "weekly_report_enabled": ("1", "bool"),
     "weekly_report_time": ("10:00", "time"),
     "backup_enabled": ("1", "bool"),
@@ -41,7 +47,7 @@ SCHEMA: dict[str, tuple[str, str]] = {
 def _parse(kind: str, raw: str):
     if kind == "bool":
         return raw == "1"
-    if kind in ("weekday", "minutes", "lead"):
+    if kind in ("weekday", "minutes", "lead", "rub", "count"):
         return int(raw)
     return raw
 
@@ -69,6 +75,11 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 6:
                 raise ServiceError("День недели от 0 (пн) до 6 (вс)", 422, "bad_setting")
             raw = str(value)
+        elif kind in ("rub", "count"):
+            top = 100_000 if kind == "rub" else 1_000
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top:
+                raise ServiceError(f"Число от 0 до {top}", 422, "bad_setting")
+            raw = str(value)
         elif kind.startswith("choice:"):
             if value not in kind[7:].split("|"):
                 raise ServiceError("Недопустимое значение", 422, "bad_setting")
@@ -83,7 +94,13 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
         conn.executemany(
             "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", rows
         )
-    return get_all(conn)
+    values = get_all(conn)
+    pricing.apply(values)
+    return values
+
+
+def load_pricing(conn: sqlite3.Connection) -> None:
+    pricing.apply(get_all(conn))
 
 
 # internal values that are not edited from the settings screen (e.g. the archive group set by /archive_here)

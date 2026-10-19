@@ -425,6 +425,61 @@ def _networks(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_networks)
 
 
+# 10: SBP payment profile with an audit trail, payout registry (ТЗ модули 9–10)
+MIGRATIONS.append("""
+CREATE TABLE payment_profiles (
+    user_id     INTEGER PRIMARY KEY REFERENCES users(id),
+    phone       TEXT NOT NULL,
+    bank        TEXT NOT NULL,
+    recipient   TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    updated_by  INTEGER NOT NULL
+);
+CREATE TABLE payment_profile_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    old_value   TEXT,
+    new_value   TEXT NOT NULL,
+    actor       INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE payout_batches (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    title               TEXT NOT NULL,
+    period_from         TEXT NOT NULL,
+    period_to           TEXT NOT NULL,
+    network_id          INTEGER,
+    rates               TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'processed' CHECK (status IN ('processed')),
+    proof_media         TEXT NOT NULL DEFAULT '[]',
+    deduction_media     TEXT NOT NULL DEFAULT '[]',
+    total               INTEGER NOT NULL,
+    created_by          INTEGER NOT NULL,
+    created_at          TEXT NOT NULL
+);
+CREATE TABLE payout_items (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id         INTEGER NOT NULL REFERENCES payout_batches(id),
+    user_id          INTEGER NOT NULL REFERENCES users(id),
+    role             TEXT NOT NULL,
+    network          TEXT,
+    phone            TEXT,
+    bank             TEXT,
+    recipient        TEXT,
+    personal_volume  INTEGER NOT NULL,
+    team_volume      INTEGER NOT NULL,
+    base_calc        INTEGER NOT NULL,
+    base             INTEGER NOT NULL,
+    bonuses          INTEGER NOT NULL,
+    fines            INTEGER NOT NULL,
+    deductions       INTEGER NOT NULL,
+    total            INTEGER NOT NULL,
+    carried_debt     INTEGER NOT NULL
+);
+CREATE INDEX ix_payout_items_batch ON payout_items (batch_id);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

@@ -288,6 +288,7 @@ export function SettingsSection() {
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!dirty || !!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} {dirty ? "Сохранить настройки" : "Всё сохранено"}
       </Button>
+      <RatesCard cfg={cfg} set={set} />
       <ArchiveCard archive={data.archive} />
     </div>
   );
@@ -324,6 +325,36 @@ function ArchiveCard({ archive }: { archive: SettingsResponse["archive"] }) {
           <li>Отключить — <code className="rounded bg-muted px-1.5 py-0.5 text-foreground">/archive_off</code> там же.</li>
         </ol>
       )}
+    </section>
+  );
+}
+
+const RATES: { key: "rate_base" | "rate_lazy" | "lazy_threshold" | "trainer_commission"; label: string; unit: string }[] = [
+  { key: "rate_base", label: "Ставка", unit: "₽ за шт." },
+  { key: "rate_lazy", label: "Налог на лень: ставка", unit: "₽ за шт." },
+  { key: "lazy_threshold", label: "Налог на лень, если меньше", unit: "шт. за день" },
+  { key: "trainer_commission", label: "Тренеру с объёма сети", unit: "₽ за шт." },
+];
+
+/** Piece rates (ТЗ 11.1): used by cards, stats, Excel and as defaults in the payout wizard. */
+function RatesCard({ cfg, set }: { cfg: ScheduleSettings; set: (p: Partial<ScheduleSettings>) => void }) {
+  return (
+    <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <h2 className="font-semibold">Ставки</h2>
+      <p className="text-sm text-muted-foreground">Сохраняются кнопкой выше. В мастере выплаты их можно изменить для одной выплаты.</p>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        {RATES.map((r) => (
+          <label key={r.key} className="space-y-1.5">
+            <span className="text-xs text-muted-foreground">{r.label}</span>
+            <span className="flex items-center gap-2">
+              <input inputMode="numeric" className="h-11 w-24 rounded-xl border-0 bg-muted px-3 tabular outline-none focus:ring-2 focus:ring-ring/25"
+                     value={String(cfg[r.key])}
+                     onChange={(e) => set({ [r.key]: Math.min(100000, Number(e.target.value.replace(/\D/g, "") || 0)) } as Partial<ScheduleSettings>)} />
+              <span className="text-sm text-muted-foreground">{r.unit}</span>
+            </span>
+          </label>
+        ))}
+      </div>
     </section>
   );
 }

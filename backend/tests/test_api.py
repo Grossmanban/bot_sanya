@@ -321,3 +321,27 @@ def test_network_endpoints(client, conn):
     assert client.post("/api/admin/networks", json={"name": "Юг", "idempotency_key": key()}, headers=th).status_code == 403
     tree = client.get("/api/admin/networks", headers=th).json()["items"]
     assert len(tree) == 1 and tree[0]["members"][0]["id"] == ids["Свой"]
+
+
+def test_payment_profile_and_payout_endpoints(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    u, _ = svc.create_registration(conn, 85, None, "Иван", "Петров")
+    svc.decide_registration(conn, u["id"], True, 999)
+    a, _ = svc.create_registration(conn, 86, None, "Адм", "Ин")
+    svc.decide_registration(conn, a["id"], True, 999)
+    conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (a["id"],))
+    h, ah = headers(85, "Иван", "Петров"), headers(86, "Адм", "Ин")
+    assert client.get("/api/me/payment-profile", headers=h).json()["profile"] is None
+    body = {"phone": "+7 900 123 45 67", "bank": "ВТБ", "recipient": "Иван Петров", "idempotency_key": key()}
+    r = client.put("/api/me/payment-profile", json=body, headers=h)
+    assert r.json()["profile"]["phone"] == "+7 900 123-45-67"
+    masked = client.get(f"/api/admin/users/{u['id']}/payment-profile", headers=ah).json()
+    assert masked["full"] is False and masked["profile"]["phone"] == "+7 *** ***-45-67" and masked["history"] == []
+    full = client.get(f"/api/admin/users/{u['id']}/payment-profile", headers=owner).json()
+    assert full["full"] and full["profile"]["recipient"] == "Иван Петров" and len(full["history"]) == 1
+    period = {"date_from": "2026-10-01", "date_to": "2026-10-15"}
+    assert client.post("/api/admin/payouts/preview", json=period, headers=ah).status_code == 403
+    r = client.post("/api/admin/payouts/preview", json=period, headers=owner)
+    assert r.status_code == 200 and r.json()["rates"]["rate_base"] == 120
+    assert client.get("/api/admin/payouts", headers=owner).json()["items"] == []

@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Bell, ChevronLeft, ChevronRight, History, LoaderCircle, Wallet } from "lucide-react";
+import { Bell, ChevronLeft, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Pricing, type User } from "@/lib/api";
 import { STATUS_META, WEEKDAYS_SHORT, parseDay, rub, timeRange, weekRange } from "@/lib/format";
@@ -13,7 +14,7 @@ import { DayTrack } from "../day-line";
 import { BalanceCard, TxRow } from "../finance/money";
 import { Avatar } from "../avatar";
 
-type View = "main" | "history" | "penalties";
+type View = "main" | "history" | "penalties" | "requisites";
 
 export function ProfileScreen({
   user,
@@ -27,11 +28,13 @@ export function ProfileScreen({
   const [view, setView] = useState<View>("main");
   const { busy, run } = useAction();
   const money = useLoad(() => api.myFinances(), []);
+  const profile = useLoad(() => api.paymentProfile(), []);
 
   useEffect(() => bindBackButton(view !== "main", () => setView("main")), [view]);
 
   if (view === "history") return <HistoryView onBack={() => setView("main")} />;
   if (view === "penalties") return <PenaltiesView onBack={() => setView("main")} />;
+  if (view === "requisites") return <RequisitesView onBack={() => setView("main")} />;
 
   const working = user.work_status === "working";
   const bal = money.data?.balance.balance ?? 0;
@@ -131,6 +134,8 @@ export function ProfileScreen({
             value={money.data ? (bal ? `${bal > 0 ? "+" : "−"}${rub(Math.abs(bal))}` : "0 ₽") : undefined}
             onClick={() => setView("penalties")}
           />
+          <MenuRow icon={CreditCard} label="Реквизиты для выплат" value={profile.data ? (profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
+                   onClick={() => setView("requisites")} />
         </section>
 
         <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
@@ -255,6 +260,75 @@ function PenaltiesView({ onBack }: { onBack: () => void }) {
       {data && data.items.length > 0 && (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <ul className="divide-y">{data.items.map((tx) => <TxRow key={tx.id} tx={tx} />)}</ul>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function formatPhone(raw: string) {
+  let d = raw.replace(/\D/g, "");
+  if (d.startsWith("8")) d = "7" + d.slice(1);
+  if (!d.startsWith("7")) d = "7" + d;
+  d = d.slice(0, 11);
+  const p = d.slice(1);
+  let out = "+7";
+  if (p.length) out += " " + p.slice(0, 3);
+  if (p.length > 3) out += " " + p.slice(3, 6);
+  if (p.length > 6) out += "-" + p.slice(6, 8);
+  if (p.length > 8) out += "-" + p.slice(8, 10);
+  return out;
+}
+
+/** SBP requisites (ТЗ модуль 9): phone, bank, recipient; visible only to the person and the owners. */
+function RequisitesView({ onBack }: { onBack: () => void }) {
+  const { data } = useLoad(() => api.paymentProfile(), []);
+  const [phone, setPhone] = useState<string | null>(null);
+  const [bank, setBank] = useState<string | null>(null);
+  const [recipient, setRecipient] = useState<string | null>(null);
+  const { busy, run } = useAction();
+  const p = data?.profile;
+  const vPhone = phone ?? p?.phone ?? "+7";
+  const vBank = bank ?? p?.bank ?? "";
+  const vRecipient = recipient ?? p?.recipient ?? "";
+  const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
+  const ready = vPhone.replace(/\D/g, "").length === 11 && vBank && vRecipient.trim().split(/\s+/).length >= 2;
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-4">
+      <SubHeader title="Реквизиты для выплат" onBack={onBack} />
+      {!data ? <Skeleton className="h-72 rounded-3xl" /> : (
+        <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+          <p className="text-sm text-muted-foreground">Выплаты приходят по СБП — по номеру телефона в выбранный банк.</p>
+          <label className="block space-y-1.5">
+            <span className="text-sm text-muted-foreground">Телефон, привязанный к СБП</span>
+            <input inputMode="tel" className={cn(field, "tabular")} value={vPhone} onChange={(e) => setPhone(formatPhone(e.target.value))} />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm text-muted-foreground">Банк</span>
+            <select className={field} value={vBank} onChange={(e) => setBank(e.target.value)}>
+              <option value="" disabled>Выберите банк</option>
+              {data.banks.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm text-muted-foreground">ФИО получателя — как в банке</span>
+            <input className={field} value={vRecipient} placeholder="Иванов Иван Иванович" onChange={(e) => setRecipient(e.target.value.slice(0, 120))} />
+          </label>
+          <p className="flex items-start gap-2 text-xs text-muted-foreground">
+            <ShieldCheck className="mt-0.5 size-4 shrink-0" /> Реквизиты видите только вы и владелец. Каждое изменение сохраняется в журнале.
+          </p>
+          <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy || !ready}
+                  onClick={async () => {
+                    try {
+                      const res = await run("save", (k) => api.savePaymentProfile({ phone: vPhone, bank: vBank, recipient: vRecipient.trim() }, k), "Реквизиты сохранены");
+                      if (res) { setPhone(null); setBank(null); setRecipient(null); onBack(); }
+                    } catch {
+                      /* toast shown */
+                    }
+                  }}>
+            {busy && <LoaderCircle className="animate-spin" />} Сохранить
+          </Button>
         </section>
       )}
     </div>
