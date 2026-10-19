@@ -112,7 +112,7 @@ function EventView({ event, onBack, onChanged }: { event: LiveEvent; onBack?: ()
         <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
           <div className="flex items-baseline justify-between">
             <h2 className="font-semibold">{event.my.winner ? "👑 Вы победитель" : "Мой результат"}</h2>
-            <span className="text-sm text-muted-foreground">попыток: {event.my.attempts_left} из {event.max_attempts}</span>
+            <span className="text-sm text-muted-foreground">осталось попыток: {event.my.attempts_left} из {event.max_attempts}</span>
           </div>
           <div className="relative h-3 overflow-hidden rounded-full bg-muted">
             <span className={cn("bar-draw absolute inset-y-0 left-0 rounded-full", event.my.winner ? "bg-go" : "bg-primary")} style={{ width: `${pct}%` }} />

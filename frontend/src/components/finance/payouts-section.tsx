@@ -137,7 +137,7 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
         </Button>
         <div className="ml-auto flex gap-1.5">
           {[1, 2, 3].map((s) => (
-            <span key={s} className={cn("h-1.5 w-8 rounded-full", s <= step ? "bg-primary" : "bg-muted")} />
+            <span key={s} className={cn("h-1.5 w-8 rounded-full", s <= step ? "bg-primary" : "bg-foreground/12")} />
           ))}
         </div>
       </div>
