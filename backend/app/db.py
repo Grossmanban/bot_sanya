@@ -343,6 +343,64 @@ def _day_actuals(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_day_actuals)
 
 
+
+def _finance(conn: sqlite3.Connection) -> None:
+    """8: money ledger (ТЗ модуль 4). Existing fines move here and it becomes the source of truth."""
+    _run_script(conn, """
+    CREATE TABLE financial_transactions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL REFERENCES users(id),
+        type            TEXT NOT NULL CHECK (type IN ('fine','bonus','deduction','payout_offset')),
+        amount          INTEGER CHECK (amount IS NULL OR amount > 0),
+        status          TEXT NOT NULL CHECK (status IN (
+                            'draft','pending_admin_approval','active','paid','cancelled','offset','rejected')),
+        reason          TEXT NOT NULL,
+        media_file_id   TEXT,
+        source          TEXT NOT NULL DEFAULT 'manual'
+                        CHECK (source IN ('manual','final_cancel','report','no_show','payout')),
+        shift_id        INTEGER REFERENCES shifts(id),
+        payout_id       INTEGER,
+        event_date      TEXT NOT NULL,
+        created_by      INTEGER NOT NULL,
+        created_at      TEXT NOT NULL,
+        decided_by      INTEGER,
+        decided_at      TEXT,
+        decision_comment TEXT,
+        CHECK (amount IS NOT NULL OR status IN ('draft','cancelled'))
+    );
+    CREATE INDEX ix_fin_user_status ON financial_transactions (user_id, status);
+    CREATE INDEX ix_fin_event_date ON financial_transactions (event_date);
+    -- one live fine per shift and reason
+    CREATE UNIQUE INDEX ux_fin_shift_source ON financial_transactions (shift_id, source)
+        WHERE shift_id IS NOT NULL AND status NOT IN ('cancelled','rejected');
+    """)
+    for s in conn.execute("SELECT * FROM shifts WHERE status = 'finally_cancelled'").fetchall():
+        amount = s["penalty_amount"] or None
+        conn.execute(
+            """INSERT INTO financial_transactions (user_id, type, amount, status, reason, source, shift_id, event_date,
+                                                   created_by, created_at, decided_by, decided_at)
+               VALUES (?, 'fine', ?, ?, 'Окончательная отмена смены', 'final_cancel', ?, ?, ?, ?, ?, ?)""",
+            (s["user_id"], amount, "active" if amount else "draft", s["id"], s["shift_date"], s["penalty_set_by"] or 0,
+             s["penalty_set_at"] or s["finally_cancelled_at"] or s["updated_at"], s["penalty_set_by"], s["penalty_set_at"]),
+        )
+    for s in conn.execute("SELECT * FROM shifts WHERE shortfall_status = 'fined' AND shortfall_penalty > 0").fetchall():
+        no_show = s["report_state"] == "no_show"
+        reason = "Неявка: отчёт не сдан" if no_show else f"Не выполнена норма: план {s['volume']}, факт {s['fact_volume']} шт."
+        if s["report_note"]:
+            reason += f". {s['report_note']}"
+        conn.execute(
+            """INSERT INTO financial_transactions (user_id, type, amount, status, reason, source, shift_id, event_date,
+                                                   created_by, created_at, decided_by, decided_at)
+               VALUES (?, 'fine', ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (s["user_id"], s["shortfall_penalty"], reason, "no_show" if no_show else "report", s["id"], s["shift_date"],
+             s["shortfall_decided_by"] or 0, s["shortfall_decided_at"] or s["updated_at"], s["shortfall_decided_by"],
+             s["shortfall_decided_at"]),
+        )
+
+
+MIGRATIONS.append(_finance)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

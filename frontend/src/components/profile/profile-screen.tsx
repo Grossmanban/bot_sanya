@@ -5,11 +5,12 @@ import { Bell, ChevronLeft, ChevronRight, History, LoaderCircle, Wallet } from "
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Pricing, type User } from "@/lib/api";
-import { STATUS_META, WEEKDAYS_SHORT, dayMonth, parseDay, rub, timeRange, weekRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS_SHORT, parseDay, rub, timeRange, weekRange } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { bindBackButton } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { DayTrack } from "../day-line";
+import { BalanceCard, TxRow } from "../finance/money";
 import { Avatar } from "../avatar";
 
 type View = "main" | "history" | "penalties";
@@ -25,7 +26,7 @@ export function ProfileScreen({
 }) {
   const [view, setView] = useState<View>("main");
   const { busy, run } = useAction();
-  const penalties = useLoad(() => api.myPenalties(), []);
+  const money = useLoad(() => api.myFinances(), []);
 
   useEffect(() => bindBackButton(view !== "main", () => setView("main")), [view]);
 
@@ -33,7 +34,7 @@ export function ProfileScreen({
   if (view === "penalties") return <PenaltiesView onBack={() => setView("main")} />;
 
   const working = user.work_status === "working";
-  const penaltyTotal = penalties.data?.items.reduce((s, p) => s + (p.penalty_amount ?? 0), 0) ?? 0;
+  const bal = money.data?.balance.balance ?? 0;
 
   async function setStatus(next: User["work_status"]) {
     if (next === user.work_status || busy) return;
@@ -126,8 +127,8 @@ export function ProfileScreen({
           <MenuRow icon={History} label="История выходов" onClick={() => setView("history")} />
           <MenuRow
             icon={Wallet}
-            label="Мои штрафы"
-            value={penalties.data ? (penaltyTotal ? rub(penaltyTotal) : "нет") : undefined}
+            label="Штрафы и бонусы"
+            value={money.data ? (bal ? `${bal > 0 ? "+" : "−"}${rub(Math.abs(bal))}` : "0 ₽") : undefined}
             onClick={() => setView("penalties")}
           />
         </section>
@@ -239,35 +240,21 @@ function HistoryView({ onBack }: { onBack: () => void }) {
 }
 
 function PenaltiesView({ onBack }: { onBack: () => void }) {
-  const { data, loading } = useLoad(() => api.myPenalties(), []);
-  const total = data?.items.reduce((sum, p) => sum + (p.penalty_amount ?? 0), 0) ?? 0;
+  const { data, loading } = useLoad(() => api.myFinances(), []);
   return (
-    <div className="mx-auto max-w-2xl">
-      <SubHeader title="Мои штрафы" onBack={onBack} />
-      {loading && !data && <Skeleton className="h-28 rounded-3xl" />}
+    <div className="mx-auto max-w-2xl space-y-4">
+      <SubHeader title="Штрафы и бонусы" onBack={onBack} />
+      {loading && !data && <Skeleton className="h-40 rounded-3xl" />}
+      {data && <BalanceCard balance={data.balance} />}
       {data && data.items.length === 0 && (
         <div className="rounded-3xl bg-card p-6 shadow-lift">
-          <p className="font-semibold">Штрафов нет</p>
-          <p className="mt-1 text-sm text-muted-foreground">Штраф бывает за повторную отмену смены и за невыполненную норму.</p>
+          <p className="font-semibold">Пока пусто</p>
+          <p className="mt-1 text-sm text-muted-foreground">Здесь будут штрафы, бонусы и вычеты с причинами.</p>
         </div>
       )}
       {data && data.items.length > 0 && (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
-          <div className="px-5 pt-5 pb-4 md:px-6">
-            <p className="text-sm text-muted-foreground">Всего</p>
-            <p className="font-display text-3xl font-semibold text-final">{rub(total)}</p>
-          </div>
-          <ul className="divide-y border-t">
-            {data.items.map((p) => (
-              <li key={`${p.kind}-${p.id}`} className="flex items-center justify-between px-5 py-3.5 md:px-6">
-                <div>
-                  <p className="font-medium">{dayMonth(p.shift_date)}</p>
-                  <p className="text-xs text-muted-foreground">{p.reason}</p>
-                </div>
-                <span className="font-semibold tabular">{p.penalty_amount != null ? rub(p.penalty_amount) : "ждёт решения"}</span>
-              </li>
-            ))}
-          </ul>
+          <ul className="divide-y">{data.items.map((tx) => <TxRow key={tx.id} tx={tx} />)}</ul>
         </section>
       )}
     </div>

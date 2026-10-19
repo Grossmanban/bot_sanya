@@ -19,7 +19,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import day_actual, reports
+from . import day_actual, finance, reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -455,6 +455,57 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         data = svc.raspred(conn, today_local() + timedelta(days=1))
         # plain text so it copies cleanly into the work chat
         await message.answer(data["text"], parse_mode=None)
+
+    # ------------------------------------------------------------ money (ТЗ модуль 4)
+
+    @router.message(Command("finances"), F.chat.type == "private")
+    async def finances_cmd(message: Message):
+        """Debtors and people with bonuses: owners and admins see everyone, a trainer — their network."""
+        actor = allowed(message.from_user.id, "review")
+        if actor is None:
+            return
+        only = None
+        if not perms.sees_everyone(actor):
+            only = {u["id"] for u in svc.list_users(conn) if perms.manages(actor, u)}
+        people = finance.summary(conn, only)
+        if not people:
+            await message.answer("💰 Долгов и начислений нет.")
+            return
+        lines = ["💰 <b>Финансы</b>"]
+        for p in people:
+            link = f'<a href="tg://user?id={p["telegram_id"]}">{escape(p["name"])}</a>'
+            parts = []
+            if p["fines"]:
+                parts.append(f"штрафы {p['fines']} ₽")
+            if p["bonuses"]:
+                parts.append(f"бонусы {p['bonuses']} ₽")
+            if p["deductions"]:
+                parts.append(f"вычеты {p['deductions']} ₽")
+            if p["pending"]:
+                parts.append(f"на согласовании {p['pending']} ₽")
+            if p["drafts"]:
+                parts.append(f"без суммы: {p['drafts']}")
+            sign = "−" if p["balance"] < 0 else "+" if p["balance"] > 0 else ""
+            lines.append(f"{'🔴' if p['balance'] < 0 else '🟢' if p['balance'] > 0 else '⚪'} {link}: "
+                         f"<b>{sign}{abs(p['balance'])} ₽</b> ({', '.join(parts)})")
+        await message.answer("\n".join(lines[:80]), parse_mode="HTML", reply_markup=open_app_keyboard())
+
+    @router.callback_query(F.data.startswith("fx:"))
+    async def fine_decision(call: CallbackQuery):
+        _, verdict, tx_id = call.data.split(":")
+        actor = svc.get_user_by_tg(conn, call.from_user.id)
+        try:
+            result = finance.decide(conn, actor or {"id": None}, int(tx_id), verdict == "a", None, svc.new_key())
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        if not result.changed:
+            await call.answer(f"Уже решено: {finance.STATUS_TITLES[result.tx['status']]}", show_alert=True)
+            return
+        await notifier.tx_decided(result.tx, actor)
+        text = "✅ Одобрен" if verdict == "a" else "❌ Отклонён"
+        await mark_done(call, text)
+        await call.answer(text)
 
     # ------------------------------------------------------------ the day's global actual (owners)
 

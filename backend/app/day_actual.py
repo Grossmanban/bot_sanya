@@ -159,6 +159,9 @@ def annul_fines(conn: sqlite3.Connection, actor: dict, day: date, shift_ids: lis
                                      updated_at = ? WHERE id = ?""",
                 (ANNUL_NOTE, actor["telegram_id"], now_iso(), now_iso(), s["id"]),
             )
+            from . import finance
+
+            finance.cancel_linked(conn, s["id"], ("report",), actor["telegram_id"], ANNUL_NOTE)
             log_event(conn, user_id=s["user_id"], actor_id=actor["telegram_id"], event_type="FINE_ANNULLED",
                       key=svc.new_key(), shift_id=s["id"], old={"penalty": s["shortfall_penalty"]},
                       new={"penalty": None}, description=ANNUL_NOTE)

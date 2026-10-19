@@ -27,6 +27,7 @@ import { TeamSection } from "./team-section";
 import { PlanFactBar } from "./shortfall";
 import { ReportsSection } from "./reports";
 import { DayActualSection } from "./day-actual-section";
+import { FinanceSection } from "../finance/finance-section";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
@@ -38,7 +39,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "actual", label: "Факт дня", need: "global_actual" },
   { id: "day", label: "День", need: "schedule" },
   { id: "stats", label: "Отчёт", need: "review" },
-  { id: "penalties", label: "Штрафы", need: "review" },
+  { id: "penalties", label: "Финансы", need: "review" },
   { id: "team", label: "Команда", need: "pause" },
   { id: "points", label: "Точки", need: "points" },
   { id: "broadcast", label: "Рассылка", need: "broadcast_all" },
@@ -54,6 +55,7 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
   const [version, setVersion] = useState(0);
   const counts = useLoad(() => api.admin.reportCounts(), [version, section]);
   const waiting = (counts.data?.review ?? 0) + (counts.data?.no_show ?? 0);
+  const money = (counts.data?.fines_pending ?? 0) + (counts.data?.fines_draft ?? 0);
 
   return (
     <CapsContext.Provider value={caps}>
@@ -82,6 +84,12 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
                   {counts.data?.actual_missing}
                 </span>
               )}
+              {s.id === "penalties" && money > 0 && (
+                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
+                  section === s.id ? "bg-white/20" : "bg-wait text-white")}>
+                  {money}
+                </span>
+              )}
               {s.id === "reports" && waiting > 0 && (
                 <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
                   section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
@@ -100,7 +108,7 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
         {section === "penalties" && (
-          <PenaltiesSection version={version} onEdit={setEditing} />
+          <FinanceSection onChanged={() => setVersion((v) => v + 1)} />
         )}
         {section === "team" && <TeamSection me={me} caps={caps} />}
         {section === "points" && <PointsSection />}
@@ -459,83 +467,6 @@ function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; on
         </span>
       </span>
     </button>
-  );
-}
-
-function PenaltiesSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
-  const users = useLoad(() => api.admin.users(), [version]);
-  const [user, setUser] = useState<User | null>(null);
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const { data, loading } = useLoad(() => api.admin.penalties({ userId: user?.id, from, to }), [user?.id, from, to, version]);
-  const total = data?.items.reduce((s, p) => s + (p.amount ?? 0), 0) ?? 0;
-  const pending = data?.items.filter((p) => p.kind === "final_cancel" && p.amount == null).length ?? 0;
-
-  async function open(shiftId: number, date: string) {
-    const day = await api.admin.day(date);
-    const s = day.items.find((x) => x.id === shiftId);
-    if (s) onEdit({ ...s });
-  }
-
-  return (
-    <div className="space-y-4">
-      <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
-        <h2 className="font-semibold">Журнал штрафов</h2>
-        {users.data ? <UserPicker users={users.data.items} value={user} onChange={setUser} /> : <Skeleton className="h-12 rounded-2xl" />}
-        <div className="grid grid-cols-2 gap-3">
-          <label className="space-y-1.5">
-            <span className="text-sm text-muted-foreground">С</span>
-            <input type="date" className={field} value={from} onChange={(e) => setFrom(e.target.value)} />
-          </label>
-          <label className="space-y-1.5">
-            <span className="text-sm text-muted-foreground">По</span>
-            <input type="date" className={field} value={to} onChange={(e) => setTo(e.target.value)} />
-          </label>
-        </div>
-      </section>
-
-      <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
-        {loading && !data ? (
-          <Skeleton className="m-5 h-24 rounded-2xl" />
-        ) : data && data.items.length === 0 ? (
-          <p className="p-5 text-muted-foreground md:p-6">Штрафов нет.</p>
-        ) : (
-          <>
-            <div className="p-5 md:p-6">
-              <p className="text-sm text-muted-foreground">Всего начислено</p>
-              <p className="font-display text-3xl font-semibold">{rub(total)}</p>
-              {pending > 0 && (
-                <p className="mt-1 text-sm text-wait">
-                  {pending} {plural(pending, "отмена ждёт", "отмены ждут", "отмен ждут")} суммы штрафа
-                </p>
-              )}
-            </div>
-            <ul className="divide-y border-t">
-              {data?.items.map((p) => (
-                <li key={`${p.kind}-${p.shift_id}`}>
-                  <button className="press flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-muted/60 md:px-6"
-                          onClick={() => open(p.shift_id, p.date)}>
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium">{p.name}</span>
-                      <span className={cn("block text-sm", p.kind !== "final_cancel" ? "text-cancel" : "text-muted-foreground")}>
-                        {p.reason}
-                      </span>
-                      <span className="block text-xs text-muted-foreground">
-                        Смена {dayMonth(p.date)}
-                        {p.set_by ? `, назначил ${p.set_by}` : ""}
-                      </span>
-                    </span>
-                    <span className={cn("shrink-0 font-semibold tabular", p.amount == null && "text-wait")}>
-                      {p.amount != null ? rub(p.amount) : "указать"}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </section>
-    </div>
   );
 }
 

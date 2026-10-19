@@ -41,6 +41,7 @@ export interface ReportSubject {
   attempts: ReportAttempt[];
   team: TeamDay | null;
   fine_block: string | null;
+  fine_pending?: number | null;
 }
 
 export function ReportsSection({ onChanged }: { onChanged: () => void }) {
@@ -138,7 +139,10 @@ type Mode = null | "return" | "fine" | "excuse" | "manual";
 
 /** Status, screenshots and the actions available for this report state (ТЗ 3.3–3.4). */
 export function ReportDecision({ subject, onDone }: { subject: ReportSubject; onDone: () => void }) {
-  const canFine = useCan("fine_direct");
+  // trainers' fines go to an owner for approval (ТЗ 5.3)
+  const direct = useCan("fine_direct");
+  const request = useCan("fine_request");
+  const canFine = direct || request;
   const [mode, setMode] = useState<Mode>(null);
   const { state, attempts } = subject;
   const last = attempts[attempts.length - 1] ?? null;
@@ -233,10 +237,12 @@ function StateLine({ subject }: { subject: ReportSubject }) {
       case "needs_fix":
         return [RotateCcw, "text-wait", "Вернули на исправление — ждём новый отчёт"];
       case "rejected":
-        return [ShieldAlert, "text-cancel", `Отклонён, штраф ${rub(fine ?? 0)}`];
+        return [ShieldAlert, "text-cancel", subject.fine_pending ? `Отклонён, штраф ${rub(subject.fine_pending)} на согласовании`
+          : fine ? `Отклонён, штраф ${rub(fine)}` : decided === "waived" ? "Отклонён, штраф аннулирован" : "Отклонён"];
       case "no_show":
         return [ShieldAlert, "text-cancel",
-          decided === "fined" ? `Неявка, штраф ${rub(fine ?? 0)}` : decided === "waived" ? "Неявка, без штрафа" : "Неявка: отчёт не сдан"];
+          subject.fine_pending ? `Неявка, штраф ${rub(subject.fine_pending)} на согласовании`
+            : decided === "fined" ? `Неявка, штраф ${rub(fine ?? 0)}` : decided === "waived" ? "Неявка, без штрафа" : "Неявка: отчёт не сдан"];
       default:
         return [Clock3, "text-muted-foreground", `Отчёт не сдан, срок ${deadlineText(subject.deadline, subject.date)}`];
     }

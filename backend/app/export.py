@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import pricing
+from . import finance, pricing
 from .services import ACTIVE, full_name, shortfall
 
 STATUS_RU = {
@@ -83,22 +83,38 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
             t["cancelled"] += 1
         elif s["status"] == "pre_declared_off":
             t["off"] += 1
-        t["penalties"] += (s["penalty_amount"] or 0) + (s["shortfall_penalty"] or 0)
         if shortfall(s):
             t["short"] += shortfall(s)
             t["short_shifts"] += 1
+    # money comes from the ledger (ТЗ модуль 4): fines and bonuses that took effect in the period
+    money = [t for t in finance.journal(conn, user_id=user_id, only=only, date_from=date_from, date_to=date_to, limit=100_000)]
+    for tx in money:
+        if tx["status"] not in finance.HAPPENED:
+            continue
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (tx["user_id"],)).fetchone()
+        t = totals.setdefault(
+            tx["user_id"],
+            {"name": full_name(dict(user)), "username": user["username"] or "", "shifts": 0, "plan": 0, "fact": 0,
+             "no_fact": 0, "plan_pay": 0, "fact_pay": 0, "cancelled": 0, "penalties": 0, "off": 0, "short": 0,
+             "short_shifts": 0},
+        )
+        key = {"fine": "penalties", "bonus": "bonuses", "deduction": "deductions"}.get(tx["type"])
+        if key:
+            t[key] = t.get(key, 0) + tx["amount"]
     total_rows = [
         [t["name"], t["username"], t["shifts"], t["plan"], t["fact"], t["no_fact"], t["short_shifts"], t["short"],
-         t["plan_pay"], t["fact_pay"], t["cancelled"], t["off"], t["penalties"], t["fact_pay"] - t["penalties"]]
+         t["plan_pay"], t["fact_pay"], t["cancelled"], t["off"], t["penalties"], t.get("bonuses", 0),
+         t.get("deductions", 0), t["fact_pay"] - t["penalties"] + t.get("bonuses", 0) - t.get("deductions", 0)]
         for t in sorted(totals.values(), key=lambda x: x["name"])
     ]
     if total_rows:
-        total_rows.append(["Итого", "", *[sum(r[i] for r in total_rows) for i in range(2, 14)]])
+        total_rows.append(["Итого", "", *[sum(r[i] for r in total_rows) for i in range(2, 16)]])
     ws = _sheet(
         wb, "Итоги",
         ["Сотрудник", "Username", "Выходов", "План, шт.", "Факт, шт.", "Без факта", "Не по норме, смен",
-         "Недобор, шт.", "План, ₽", "Факт, ₽", "Отмен", "Выходных", "Штрафы, ₽", "К выплате (факт − штрафы), ₽"],
-        total_rows, [24, 16, 10, 11, 11, 11, 18, 13, 12, 12, 9, 11, 12, 28], first=True,
+         "Недобор, шт.", "План, ₽", "Факт, ₽", "Отмен", "Выходных", "Штрафы, ₽", "Бонусы, ₽", "Вычеты, ₽",
+         "Итог (факт − штрафы + бонусы − вычеты), ₽"],
+        total_rows, [24, 16, 10, 11, 11, 11, 18, 13, 12, 12, 9, 11, 12, 12, 12, 30], first=True,
     )
     if total_rows:
         for cell in ws[ws.max_row]:
@@ -127,20 +143,15 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
     )
 
     _sheet(
-        wb, "Штрафы",
-        ["Дата смены", "Сотрудник", "Причина", "Сумма, ₽"],
+        wb, "Штрафы и бонусы",
+        ["Дата", "Сотрудник", "Тип", "Причина", "Сумма, ₽", "Статус", "Назначил", "Решение"],
         [
-            [date.fromisoformat(s["shift_date"]).strftime("%d.%m.%Y"), full_name(s), "Окончательная отмена смены",
-             s["penalty_amount"] if s["penalty_amount"] is not None else "не назначен"]
-            for s in shifts
-            if s["status"] == "finally_cancelled"
-        ] + [
-            [date.fromisoformat(s["shift_date"]).strftime("%d.%m.%Y"), full_name(s),
-             f"Не выполнена норма: план {s['volume']}, факт {s['fact_volume']}", s["shortfall_penalty"]]
-            for s in shifts
-            if s["shortfall_status"] == "fined"
+            [date.fromisoformat(tx["event_date"]).strftime("%d.%m.%Y"), tx["name"], finance.TYPE_TITLES[tx["type"]],
+             tx["reason"], tx["amount"] if tx["amount"] is not None else "не назначен",
+             finance.STATUS_TITLES[tx["status"]], tx["created_by"] or "", tx["decision_comment"] or ""]
+            for tx in money
         ],
-        [12, 24, 30, 14],
+        [12, 24, 12, 40, 12, 18, 22, 28],
     )
 
     buf = io.BytesIO()
