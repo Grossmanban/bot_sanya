@@ -72,6 +72,10 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
     await daily("weekly_report", cfg["weekly_report_enabled"], cfg["weekly_report_time"],
                 lambda: weekly_report(conn, notifier, today), weekday=0)
     await daily("backup", cfg["backup_enabled"], cfg["backup_time"], lambda: backup(conn, notifier))
+    await daily("global_actual_evening", cfg["global_actual_evening_enabled"], cfg["global_actual_evening_time"],
+                lambda: notifier.global_actual_reminder(today, morning=False))
+    await daily("global_actual_morning", cfg["global_actual_morning_enabled"], cfg["global_actual_morning_time"],
+                lambda: notifier.global_actual_reminder(today - timedelta(days=1), morning=True))
     await daily("report_digest", cfg["report_digest_enabled"], cfg["report_digest_time"],
                 lambda: report_digest(conn, notifier, today, cfg["report_digest_to"]))
     since = reports_since(conn, today)

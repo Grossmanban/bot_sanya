@@ -4,7 +4,7 @@ import { useState } from "react";
 import { CircleCheck, Clock3, LoaderCircle, MessageCircle, RotateCcw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type QueueItem, type QueueKind, type ReportAttempt, type ReportCounts, type ReportState } from "@/lib/api";
+import { api, type QueueItem, type QueueKind, type ReportAttempt, type ReportCounts, type ReportState, type TeamDay } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { addDays, dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
@@ -39,6 +39,8 @@ export interface ReportSubject {
   note: string | null;
   deadline: string;
   attempts: ReportAttempt[];
+  team: TeamDay | null;
+  fine_block: string | null;
 }
 
 export function ReportsSection({ onChanged }: { onChanged: () => void }) {
@@ -142,6 +144,8 @@ export function ReportDecision({ subject, onDone }: { subject: ReportSubject; on
   const last = attempts[attempts.length - 1] ?? null;
   const fact = last?.fact_volume ?? subject.fact_volume;
   const noShowOpen = state === "no_show" && !subject.decided;
+  // shortfall fines wait for the day's global actual and are off when the team met the plan (ТЗ 3.5)
+  const reportFine = canFine && !subject.fine_block;
 
   const toggle = (m: Mode) => {
     tapHaptic();
@@ -152,6 +156,7 @@ export function ReportDecision({ subject, onDone }: { subject: ReportSubject; on
     <div className="space-y-4">
       <StateLine subject={subject} />
       {fact != null && subject.volume > 0 && <PlanFactBar plan={subject.volume} fact={fact} />}
+      {(state === "pending_review" || subject.team) && fact != null && fact < subject.volume && <TeamLine team={subject.team} />}
 
       {attempts.length > 0 && (
         <div className="flex gap-3 overflow-x-auto no-scrollbar">
@@ -176,7 +181,7 @@ export function ReportDecision({ subject, onDone }: { subject: ReportSubject; on
           <>
             <Approve shiftId={subject.shift_id} onDone={onDone} />
             <Chip active={mode === "return"} onClick={() => toggle("return")} icon={RotateCcw}>На исправление</Chip>
-            {canFine && <Chip active={mode === "fine"} danger onClick={() => toggle("fine")}>Отклонить + штраф</Chip>}
+            {reportFine && <Chip active={mode === "fine"} danger onClick={() => toggle("fine")}>Отклонить + штраф</Chip>}
           </>
         )}
         {noShowOpen && (
@@ -185,7 +190,7 @@ export function ReportDecision({ subject, onDone }: { subject: ReportSubject; on
             <Chip active={mode === "excuse"} onClick={() => toggle("excuse")}>Без штрафа</Chip>
           </>
         )}
-        {state === "approved" && canFine && (
+        {state === "approved" && reportFine && (
           <Chip active={mode === "fine"} danger onClick={() => toggle("fine")}>Отклонить + штраф</Chip>
         )}
         <Chip active={mode === "manual"} onClick={() => toggle("manual")}>
@@ -198,6 +203,22 @@ export function ReportDecision({ subject, onDone }: { subject: ReportSubject; on
       {mode === "excuse" && <ExcuseForm shiftId={subject.shift_id} onDone={onDone} />}
       {mode === "manual" && <ManualForm subject={subject} onDone={onDone} />}
     </div>
+  );
+}
+
+/** The day's global actual next to a below-plan report: without it a shortfall can't be fined. */
+function TeamLine({ team }: { team: TeamDay | null }) {
+  if (!team) {
+    return (
+      <p className="rounded-xl bg-muted px-3 py-2 text-sm text-muted-foreground">
+        Общий факт дня ещё не введён. Если команда выполнит план, отчёт примут автоматически; штраф за недобор — только после ввода.
+      </p>
+    );
+  }
+  return (
+    <p className={cn("rounded-xl px-3 py-2 text-sm", team.met ? "bg-go-soft text-go" : "bg-cancel-soft text-cancel")}>
+      Общий факт: {team.actual} из {team.plan} шт. — {team.met ? "команда выполнила план" : "план команды не выполнен"}
+    </p>
   );
 }
 

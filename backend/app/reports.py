@@ -18,7 +18,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from . import media
+from . import day_actual, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -114,6 +114,8 @@ def view(conn: sqlite3.Connection, shift: dict, now: datetime | None = None) -> 
         "fine": shift.get("shortfall_penalty") if shift.get("shortfall_status") == "fined" else None,
         "decided": shift.get("shortfall_status"),
         "last": public_report(latest(conn, shift["id"])),
+        "team": day_actual.team_view(conn, shift["shift_date"]),
+        "fine_block": day_actual.shortfall_fine_block(conn, shift),
     }
 
 
@@ -136,6 +138,8 @@ def _queue_row(conn, s: dict) -> dict:
         "note": s["report_note"],
         "deadline": deadline(s).isoformat(timespec="minutes"),
         "attempts": [public_report(r) for r in attempts(conn, s["id"])],
+        "team": day_actual.team_view(conn, s["shift_date"]),
+        "fine_block": day_actual.shortfall_fine_block(conn, s),
     }
 
 
@@ -212,7 +216,9 @@ def submit(conn: sqlite3.Connection, user: dict, shift_id: int, value: int, phot
             return ReportResult(shift, latest(conn, shift_id), False)
         shift = check_submittable(svc.get_shift(conn, shift_id), user, now)
         auto = bool(shift["volume"]) and value >= shift["volume"]
-        status = "auto_approved" if auto else "pending_review"
+        team = day_actual.get(conn, shift["shift_date"])
+        by_team = not auto and bool(team and team["met"])  # the team already met the day's plan (ТЗ 3.5)
+        status = "auto_approved" if auto else "approved_team" if by_team else "pending_review"
         last = latest(conn, shift_id)
         if last and last["status"] == "pending_review":
             conn.execute(
@@ -233,9 +239,12 @@ def submit(conn: sqlite3.Connection, user: dict, shift_id: int, value: int, phot
             """UPDATE shifts SET fact_volume = ?, fact_set_at = ?, fact_set_by = ?, report_state = ?, report_note = NULL,
                                  shortfall_status = NULL, shortfall_penalty = NULL, shortfall_decided_by = NULL,
                                  shortfall_decided_at = NULL, updated_at = ? WHERE id = ?""",
-            (value, now_iso(), user["telegram_id"], "approved" if auto else "pending_review", now_iso(), shift_id),
+            (value, now_iso(), user["telegram_id"], "approved" if auto or by_team else "pending_review", now_iso(), shift_id),
         )
-        event = "REPORT_AUTO_APPROVED" if auto else "REPORT_SUBMITTED"
+        if by_team:
+            conn.execute("UPDATE shifts SET report_note = ?, shortfall_status = 'waived' WHERE id = ?",
+                         (day_actual.TEAM_NOTE, shift_id))
+        event = "REPORT_AUTO_APPROVED" if auto else "REPORT_TEAM_APPROVED" if by_team else "REPORT_SUBMITTED"
         log_event(conn, user_id=shift["user_id"], actor_id=user["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, old={"fact_volume": shift["fact_volume"], "report_state": shift["report_state"]},
                   new={"fact_volume": value, "report_id": report_id})
@@ -291,6 +300,10 @@ def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, ke
             raise ServiceError("Нет отчёта для проверки", 409, "no_report")
         if action == "approve" and shift["report_state"] == "approved":
             return ReportResult(shift, report, False)
+        if action == "fine":
+            block = day_actual.shortfall_fine_block(conn, {**shift, "fact_volume": report["fact_volume"]})
+            if block:
+                raise ServiceError(block, 409, "shortfall_fine_blocked")
         status = {"approve": "approved", "return": "rejected_retry", "fine": "rejected_penalty"}[action]
         conn.execute(
             """UPDATE reports SET status = ?, reviewed_by = ?, reviewed_at = ?, review_comment = ?, penalty_amount = ?

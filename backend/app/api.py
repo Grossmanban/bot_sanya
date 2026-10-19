@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import reports
+from . import day_actual, reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -67,6 +67,16 @@ class AccessBody(BaseModel):
 class StateBody(BaseModel):
     state: str
     reason: str | None = None
+    idempotency_key: str
+
+
+class ActualBody(BaseModel):
+    actual: int
+    idempotency_key: str
+
+
+class AnnulBody(BaseModel):
+    shift_ids: list[int] | None = None  # None = every shortfall fine of the day
     idempotency_key: str
 
 
@@ -514,9 +524,31 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/reports/counts")
     async def admin_report_counts(admin: dict = Depends(admin_user)):
-        if not perms.can(admin, "review"):
-            return {"review": 0, "no_show": 0}
-        return reports.counts(conn, visible_ids(admin))
+        out = reports.counts(conn, visible_ids(admin)) if perms.can(admin, "review") else {"review": 0, "no_show": 0}
+        out["actual_missing"] = len(day_actual.missing_days(conn)) if perms.can(admin, "global_actual") else 0
+        return out
+
+    # ------------------------------------------------------------ the day's global actual (ТЗ 3.5, owners)
+
+    @api.get("/admin/day-actuals")
+    async def admin_day_actuals(_: dict = Depends(staff("global_actual"))):
+        return {"items": day_actual.overview(conn), "missing": [d.isoformat() for d in day_actual.missing_days(conn)]}
+
+    @api.post("/admin/day-actuals/{day}")
+    async def admin_set_day_actual(day: str, body: ActualBody, owner: dict = Depends(staff("global_actual"))):
+        d = svc.parse_date(day)
+        result = day_actual.set_actual(conn, owner, d, body.actual, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.global_actual_set(d, result, owner))
+        return {"changed": result.changed, "met": bool(result.row["met"]), "approved": len(result.approved),
+                "fined": [{"shift_id": s["id"], "amount": s["shortfall_penalty"]} for s in result.fined]}
+
+    @api.post("/admin/day-actuals/{day}/annul")
+    async def admin_annul_day_fines(day: str, body: AnnulBody, owner: dict = Depends(staff("global_actual"))):
+        done = day_actual.annul_fines(conn, owner, svc.parse_date(day), body.shift_ids, body.idempotency_key)
+        if done:
+            notifier.spawn(notifier.fines_annulled(done, owner))
+        return {"annulled": len(done)}
 
     @api.post("/admin/shifts/{shift_id}/review")
     async def admin_review(shift_id: int, body: ReviewBody, admin: dict = Depends(staff("review"))):

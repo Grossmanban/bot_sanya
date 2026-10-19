@@ -26,14 +26,16 @@ import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
 import { TeamSection } from "./team-section";
 import { PlanFactBar } from "./shortfall";
 import { ReportsSection } from "./reports";
+import { DayActualSection } from "./day-actual-section";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
-type Section = "raspred" | "reports" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
   { id: "reports", label: "Отчёты", need: "review" },
+  { id: "actual", label: "Факт дня", need: "global_actual" },
   { id: "day", label: "День", need: "schedule" },
   { id: "stats", label: "Отчёт", need: "review" },
   { id: "penalties", label: "Штрафы", need: "review" },
@@ -57,7 +59,7 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
     <CapsContext.Provider value={caps}>
     <div className="mx-auto max-w-3xl space-y-5">
       <nav className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
-        <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift md:w-full">
+        <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift lg:w-full lg:flex-wrap">
           {sections.map((s) => (
             <button
               key={s.id}
@@ -69,11 +71,17 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
                 setSection(s.id);
               }}
               className={cn(
-                "press inline-flex h-10 shrink-0 items-center justify-center rounded-xl px-4 text-sm font-semibold whitespace-nowrap transition-colors duration-200 md:flex-1 md:px-2",
+                "press inline-flex h-10 shrink-0 items-center justify-center rounded-xl px-4 text-sm font-semibold whitespace-nowrap transition-colors duration-200",
                 section === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
               {s.label}
+              {s.id === "actual" && (counts.data?.actual_missing ?? 0) > 0 && (
+                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
+                  section === s.id ? "bg-white/20" : "bg-wait text-white")}>
+                  {counts.data?.actual_missing}
+                </span>
+              )}
               {s.id === "reports" && waiting > 0 && (
                 <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
                   section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
@@ -88,6 +96,7 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
       <div key={section} className="screen-in">
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
         {section === "reports" && <ReportsSection onChanged={() => setVersion((v) => v + 1)} />}
+        {section === "actual" && <DayActualSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}
         {section === "penalties" && (

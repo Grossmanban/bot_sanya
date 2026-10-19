@@ -19,7 +19,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import reports
+from . import day_actual, reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -455,6 +455,45 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         data = svc.raspred(conn, today_local() + timedelta(days=1))
         # plain text so it copies cleanly into the work chat
         await message.answer(data["text"], parse_mode=None)
+
+    # ------------------------------------------------------------ the day's global actual (owners)
+
+    @router.message(Command("fakt"), F.chat.type == "private")
+    async def global_actual_cmd(message: Message):
+        """/fakt 480 — today's global actual; /fakt 480 17.10 — for another day."""
+        actor = allowed(message.from_user.id, "global_actual")
+        if actor is None:
+            return
+        parts = (message.text or "").split()[1:]
+        if not parts or not parts[0].isdigit():
+            await message.answer("Общий факт дня: <code>/fakt 480</code> — за сегодня, "
+                                 "<code>/fakt 480 17.10</code> — за другой день.", parse_mode="HTML")
+            return
+        day = today_local()
+        if len(parts) > 1:
+            try:
+                dd, mm = parts[1].split(".")[:2]
+                day = day.replace(month=int(mm), day=int(dd))
+                if day > today_local():
+                    day = day.replace(year=day.year - 1)
+            except ValueError:
+                await message.answer("Дата в формате ДД.ММ, например 17.10")
+                return
+        try:
+            result = day_actual.set_actual(conn, actor, day, int(parts[0]), svc.new_key())
+        except svc.ServiceError as exc:
+            await message.answer(exc.message)
+            return
+        row = result.row
+        text = (f"📊 Общий факт за {day:%d.%m}: {row['actual']} из плана {row['plan']} шт. — "
+                + ("команда выполнила план." if row["met"] else "план не выполнен, недоборы на ручной проверке."))
+        if result.approved:
+            text += f"\nПринято автоматически: {len(result.approved)}."
+        if result.fined:
+            text += f"\nЕсть штрафы за недобор ({len(result.fined)}) — их можно аннулировать в приложении, раздел «Факт дня»."
+        await message.answer(text)
+        if result.changed:
+            await notifier.global_actual_set(day, result, actor)
 
     # ------------------------------------------------------------ archive group (owner, inside the group)
 
