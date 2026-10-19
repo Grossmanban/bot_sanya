@@ -165,6 +165,14 @@ bash deploy/install.sh        # из клона репозитория
 
 Вручную то же самое: скопировать `.env.example` в `.env`, заполнить и выполнить `docker compose up -d --build`. Админы из `ADMIN_IDS` получают доступ сразу, без заявки.
 
+**Владельцы** (строка `ADMIN_IDS` в `.env`) меняются скриптом, он сам перезапускает бота:
+```bash
+bash deploy/owners.sh                      # кто владелец сейчас (с именами)
+bash deploy/owners.sh add 123456789        # добавить владельца, остальные остаются
+bash deploy/owners.sh remove 123456789     # убрать (последнего убрать нельзя)
+```
+Telegram ID человека видно в приложении: «Админ» → «Команда» → нажать на человека.
+
 База лежит в `./data/bot.db`. Бэкап вручную:
 ```bash
 docker compose exec app python scripts/backup.py /data/backups
