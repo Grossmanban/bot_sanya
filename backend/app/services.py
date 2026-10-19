@@ -306,6 +306,8 @@ def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict
         if user["role"] == role:
             return user, False
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        if role != "trainer":  # no longer leads a network
+            conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="ROLE_CHANGED", key=key,
                   old={"role": user["role"]}, new={"role": role})
     return get_user(conn, user_id), True
@@ -384,6 +386,8 @@ def set_account_state(conn, actor: dict, user_id: int, state: str, reason: str |
                WHERE id = ?""",
             (state, reason if state != "active" else None, now_iso(), actor["telegram_id"], state, state, user_id),
         )
+        if state == "blocked":
+            conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
         event = {"paused": "ACCOUNT_PAUSED", "blocked": "ACCOUNT_BLOCKED", "active": "ACCOUNT_ACTIVATED"}[state]
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
                   old={"account_state": current}, new={"account_state": state}, description=reason)

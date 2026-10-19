@@ -28,10 +28,11 @@ import { PlanFactBar } from "./shortfall";
 import { ReportsSection } from "./reports";
 import { DayActualSection } from "./day-actual-section";
 import { FinanceSection } from "../finance/finance-section";
+import { NetworksSection } from "./networks-section";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
-type Section = "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
@@ -41,6 +42,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "stats", label: "Отчёт", need: "review" },
   { id: "penalties", label: "Финансы", need: "review" },
   { id: "team", label: "Команда", need: "pause" },
+  { id: "networks", label: "Сети", need: "registrations" },
   { id: "points", label: "Точки", need: "points" },
   { id: "broadcast", label: "Рассылка", need: "broadcast_all" },
   { id: "settings", label: "Настройки", need: "settings" },
@@ -48,7 +50,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
-export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
+export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
   const sections = SECTIONS.filter((s) => caps.includes(s.need));
   const [section, setSection] = useState<Section>(sections[0]?.id ?? "day");
   const [editing, setEditing] = useState<EditableShift | null>(null);
@@ -110,7 +112,8 @@ export function AdminScreen({ me, caps }: { me: User; caps: Capability[] }) {
         {section === "penalties" && (
           <FinanceSection onChanged={() => setVersion((v) => v + 1)} />
         )}
-        {section === "team" && <TeamSection me={me} caps={caps} />}
+        {section === "team" && <TeamSection me={me} caps={caps} network={network} />}
+        {section === "networks" && <NetworksSection />}
         {section === "points" && <PointsSection />}
         {section === "broadcast" && <BroadcastSection />}
         {section === "settings" && <SettingsSection />}
