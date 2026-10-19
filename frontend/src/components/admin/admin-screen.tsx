@@ -34,12 +34,14 @@ import { GoalsSection } from "../goals/goals";
 import { EventsAdmin } from "../events/events-admin";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
+import { ViolationsSection } from "./violations-section";
 
-type Section = "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
   { id: "reports", label: "Отчёты", need: "review" },
+  { id: "discipline", label: "Дисциплина", need: "review" },
   { id: "actual", label: "Факт дня", need: "global_actual" },
   { id: "day", label: "День", need: "schedule" },
   { id: "stats", label: "Отчёт", need: "review" },
@@ -98,6 +100,12 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
                   {money}
                 </span>
               )}
+              {s.id === "discipline" && (counts.data?.violations ?? 0) > 0 && (
+                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
+                  section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
+                  {counts.data?.violations}
+                </span>
+              )}
               {s.id === "reports" && waiting > 0 && (
                 <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
                   section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
@@ -112,6 +120,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
       <div key={section} className="screen-in">
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
         {section === "reports" && <ReportsSection onChanged={() => setVersion((v) => v + 1)} />}
+        {section === "discipline" && <ViolationsSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "actual" && <DayActualSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "day" && <DaySection version={version} onEdit={setEditing} />}
         {section === "stats" && <StatsSection version={version} onEdit={setEditing} />}

@@ -262,7 +262,33 @@ export type ReportCounts = {
   actual_missing?: number;
   fines_pending?: number;
   fines_draft?: number;
+  violations?: number;
 };
+
+/** ТЗ 12.4: a week below the norm of work days, waiting for «штраф» or «оправдание». */
+export interface Violation {
+  id: number;
+  user_id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+  network: string | null;
+  week_start: string;
+  week_end: string;
+  week_number: number;
+  required_days: number;
+  actual_days: number;
+  absent_dates: string[];
+  status: "pending" | "penalized" | "waived";
+  default_comment: string;
+  resolution_comment: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  media_count: number;
+  media: string[];
+  fine: { id: number; amount: number; status: TxStatus } | null;
+  created_at: string;
+}
 
 export type TxType = "fine" | "bonus" | "deduction" | "payout_offset";
 export type TxStatus = "draft" | "pending_admin_approval" | "active" | "paid" | "offset" | "cancelled" | "rejected";
@@ -274,7 +300,7 @@ export interface Tx {
   amount: number | null;
   status: TxStatus;
   reason: string;
-  source: "manual" | "final_cancel" | "report" | "no_show" | "payout";
+  source: "manual" | "final_cancel" | "report" | "no_show" | "payout" | "attendance";
   shift_id: number | null;
   event_date: string;
   created_at: string;
@@ -401,7 +427,7 @@ export interface Stats {
 
 export interface PenaltyRow {
   shift_id: number;
-  kind: "final_cancel" | "report" | "no_show" | "manual" | "payout";
+  kind: "final_cancel" | "report" | "no_show" | "manual" | "payout" | "attendance";
   status: "fined" | "waived" | null;
   date: string;
   user_id: number;
@@ -414,6 +440,9 @@ export interface PenaltyRow {
 }
 
 export interface ScheduleSettings {
+  weekly_attendance_quota: number;
+  attendance_check_enabled: boolean;
+  attendance_check_time: string;
   eve_reminder_enabled: boolean;
   eve_reminder_time: string;
   auto_raspred_enabled: boolean;
@@ -726,6 +755,13 @@ export const api = {
       key: string,
     ) => post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/payouts", { ...body, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
+    violations: (status: "pending" | "resolved") =>
+      request<{ items: Violation[]; pending: number; quota: number }>(`/api/admin/violations?status=${status}`),
+    scanViolations: () => post<{ created: number }>("/api/admin/violations/scan", {}),
+    fineViolation: (id: number, body: { amount: number; comment: string; media_files: string[] }, key: string) =>
+      post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/fine`, { ...body, idempotency_key: key }),
+    waiveViolation: (id: number, body: { comment: string; media_files: string[] }, key: string) =>
+      post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/waive`, { ...body, idempotency_key: key }),
     review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),
     noShow: (shiftId: number, action: "fine" | "excuse", extra: { amount?: number; comment?: string }, key: string) =>

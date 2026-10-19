@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, events, finance, goals, networks, payouts, reports
+from . import day_actual, events, finance, goals, networks, payouts, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -194,6 +194,19 @@ class ActualBody(BaseModel):
 
 class AnnulBody(BaseModel):
     shift_ids: list[int] | None = None  # None = every shortfall fine of the day
+    idempotency_key: str
+
+
+class ViolationFine(BaseModel):
+    amount: int
+    comment: str
+    media_files: list[str] = []
+    idempotency_key: str
+
+
+class ViolationWaive(BaseModel):
+    comment: str
+    media_files: list[str] = []
     idempotency_key: str
 
 
@@ -761,7 +774,57 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         out["fines_pending"] = (len(finance.journal(conn, only=only, statuses=("pending_admin_approval",)))
                                 if perms.can(admin, "approve_fines") else 0)
         out["fines_draft"] = len(finance.journal(conn, only=only, statuses=("draft",))) if perms.can(admin, "fine_direct") else 0
+        out["violations"] = violations.pending_count(conn, admin) if perms.can(admin, "review") else 0
         return out
+
+    # ------------------------------------------------------------ schedule violations (ТЗ 12.4)
+
+    def with_media(item: dict) -> dict:
+        item["media"] = [media.photo_url(item["id"], kind=f"violation{i}") for i in range(item["media_count"])]
+        return item
+
+    def violation_out(v: dict) -> dict:
+        return with_media(violations.public(conn, v))
+
+    @api.get("/admin/violations")
+    async def admin_violations(status: str = "pending", admin: dict = Depends(staff("review"))):
+        items = [with_media(i) for i in violations.listing(conn, admin, status)]
+        quota = app_settings.get_all(conn)["weekly_attendance_quota"]
+        return {"items": items, "pending": violations.pending_count(conn, admin), "quota": quota}
+
+    @api.post("/admin/violations/scan")
+    async def admin_violations_scan(admin: dict = Depends(staff("settings"))):
+        """Check the last finished week right now (the Monday job does the same; repeats create nothing)."""
+        created = violations.scan(conn, app_settings.get_all(conn)["weekly_attendance_quota"])
+        if created:
+            notifier.spawn(notifier.violations_found(created))
+        return {"created": len(created)}
+
+    @api.post("/admin/violations/{violation_id}/fine")
+    async def admin_violation_fine(violation_id: int, body: ViolationFine, admin: dict = Depends(staff("review"))):
+        result = violations.fine(conn, admin, violation_id, body.amount, body.comment, body.media_files,
+                                 body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.violation_resolved(result.violation, result.tx, admin))
+        return {"violation": violation_out(result.violation), "changed": result.changed}
+
+    @api.post("/admin/violations/{violation_id}/waive")
+    async def admin_violation_waive(violation_id: int, body: ViolationWaive, admin: dict = Depends(staff("review"))):
+        result = violations.waive(conn, admin, violation_id, body.comment, body.media_files, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.violation_resolved(result.violation, None, admin))
+        return {"violation": violation_out(result.violation), "changed": result.changed}
+
+    @api.get("/media/violation/{violation_id}/{index}")
+    async def violation_photo(violation_id: int, index: int, exp: int, sig: str):
+        if not media.verify(violation_id, exp, sig, kind=f"violation{index}"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        v = violations.get(conn, violation_id)
+        files = violations.media_ids(v) if v else []
+        found = await notifier.fetch_photo(files[index]) if 0 <= index < len(files) else None
+        if found is None:
+            raise svc.ServiceError("Файл не найден", 404, "not_found")
+        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
     # ------------------------------------------------------------ live events (ТЗ модуль 7)
 

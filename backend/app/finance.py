@@ -319,6 +319,10 @@ def decide(conn: sqlite3.Connection, actor: dict, tx_id: int, approve: bool, com
                      "WHERE id = ?", (status, actor["telegram_id"], now_iso(), comment, tx_id))
         if not approve:
             _sync_shift(conn, tx, f"Штраф отклонён владельцем{': ' + comment if comment else ''}")
+            if tx["source"] == "attendance":
+                from . import violations
+
+                violations.reopen_for_rejected_fine(conn, tx)
         event = "FINE_APPROVED" if approve else "FINE_REJECTED"
         log_event(conn, user_id=tx["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
                   shift_id=tx["shift_id"], new={"tx": tx_id, "status": status}, description=comment)
