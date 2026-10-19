@@ -295,12 +295,15 @@ function Money({ label, value, sign, tone }: { label: string; value: number; sig
   );
 }
 
-function Uploads({ title, hint, value, onChange }: { title: string; hint: string; value: string[]; onChange: (v: string[]) => void }) {
+/** Proof photos uploaded to Telegram one by one; the ids go with the form. */
+export function Uploads({ title, hint, value, onChange, max = 10 }: {
+  title: string; hint: string; value: string[]; onChange: (v: string[]) => void; max?: number;
+}) {
   const input = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(0);
   async function pick(files: FileList | null) {
     if (!files) return;
-    const list = Array.from(files).slice(0, 10 - value.length);
+    const list = Array.from(files).slice(0, max - value.length);
     setLoading(list.length);
     const ids: string[] = [];
     for (const f of list) {
@@ -330,7 +333,7 @@ function Uploads({ title, hint, value, onChange }: { title: string; hint: string
             </button>
           </span>
         ))}
-        {value.length < 10 && (
+        {value.length < max && (
           <button onClick={() => input.current?.click()} disabled={loading > 0}
                   className="press flex h-10 items-center gap-1.5 rounded-xl border-2 border-dashed px-3 text-sm font-semibold text-muted-foreground">
             {loading ? <LoaderCircle className="size-4 animate-spin" /> : <ImagePlus className="size-4" />} Добавить

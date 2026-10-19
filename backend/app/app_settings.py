@@ -9,7 +9,7 @@ from .services import ServiceError
 
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
-# key -> (default, kind); kind is "bool", "time", "weekday" (0 = Monday), "minutes" (0–240),
+# key -> (default, kind); kind is "bool", "time", "weekday" (0 = Monday), "minutes" (0–240), "days" (0–7),
 # "lead" (minutes before a deadline, 0–720) or "choice:<option>|<option>"
 SCHEMA: dict[str, tuple[str, str]] = {
     "eve_reminder_enabled": ("1", "bool"),
@@ -37,6 +37,10 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "rate_lazy": ("100", "rub"),
     "lazy_threshold": ("20", "count"),
     "trainer_commission": ("10", "rub"),
+    # ТЗ 12.4: every Monday the past week is checked against the norm of work days (0 — no norm)
+    "weekly_attendance_quota": ("3", "days"),
+    "attendance_check_enabled": ("1", "bool"),
+    "attendance_check_time": ("10:30", "time"),
     "weekly_report_enabled": ("1", "bool"),
     "weekly_report_time": ("10:00", "time"),
     "backup_enabled": ("1", "bool"),
@@ -47,7 +51,7 @@ SCHEMA: dict[str, tuple[str, str]] = {
 def _parse(kind: str, raw: str):
     if kind == "bool":
         return raw == "1"
-    if kind in ("weekday", "minutes", "lead", "rub", "count"):
+    if kind in ("weekday", "minutes", "lead", "rub", "count", "days"):
         return int(raw)
     return raw
 
@@ -74,6 +78,10 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
         elif kind == "weekday":
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 6:
                 raise ServiceError("День недели от 0 (пн) до 6 (вс)", 422, "bad_setting")
+            raw = str(value)
+        elif kind == "days":
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 7:
+                raise ServiceError("Дней в неделю — от 0 до 7", 422, "bad_setting")
             raw = str(value)
         elif kind in ("rub", "count"):
             top = 100_000 if kind == "rub" else 1_000

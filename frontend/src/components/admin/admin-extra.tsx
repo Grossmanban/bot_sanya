@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Point, type ScheduleSettings, type SettingsResponse, type User } from "@/lib/api";
-import { WEEKDAYS } from "@/lib/format";
+import { WEEKDAYS, plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
@@ -171,6 +171,8 @@ type Row = {
   lead?: keyof ScheduleSettings;
   /** who receives it */
   audience?: keyof ScheduleSettings;
+  /** work days a week (ТЗ 12.4) */
+  days?: keyof ScheduleSettings;
   fixedDay?: string;
 };
 
@@ -190,6 +192,7 @@ const ROWS: Row[] = [
   { title: "Общий факт: вечером", text: "Владельцам, если общий факт за сегодня ещё не введён.", enabled: "global_actual_evening_enabled", time: "global_actual_evening_time" },
   { title: "Общий факт: утром", text: "Владельцам, если общий факт за вчера так и не введён.", enabled: "global_actual_morning_enabled", time: "global_actual_morning_time" },
   { title: "Итоги недели", text: "Админам: план и факт по каждому и файл Excel за прошлую неделю.", enabled: "weekly_report_enabled", time: "weekly_report_time", fixedDay: "по понедельникам" },
+  { title: "Норма выходов", text: "Кто за прошлую неделю вышел меньше нормы — заявка в «Дисциплину»: штраф или оправдание.", enabled: "attendance_check_enabled", time: "attendance_check_time", fixedDay: "по понедельникам", days: "weekly_attendance_quota" },
   { title: "Резервная копия базы", text: "Владельцам: файл базы данных каждый день.", enabled: "backup_enabled", time: "backup_time" },
 ];
 
@@ -232,7 +235,8 @@ export function SettingsSection() {
                     <span className="block font-medium">{r.title}</span>
                     <span className="block text-sm text-muted-foreground">{r.text}</span>
                   </span>
-                  <Switch checked={on} onCheckedChange={(v) => set({ [r.enabled]: v } as Partial<ScheduleSettings>)} />
+                  <Switch checked={on} onCheckedChange={(v) => set({ [r.enabled]: v,
+                    ...(r.days && v && !cfg[r.days] ? { [r.days]: 3 } : {}) } as Partial<ScheduleSettings>)} />
                 </label>
                 {on && (
                   <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -243,6 +247,18 @@ export function SettingsSection() {
                           <option key={w} value={i}>{w}</option>
                         ))}
                       </select>
+                    )}
+                    {r.days && (
+                      <label className="flex items-center gap-2 text-muted-foreground">
+                        не меньше
+                        <select className="h-10 rounded-xl border-0 bg-muted px-3 text-foreground outline-none" value={(cfg[r.days] as number) || 3}
+                                onChange={(e) => set({ [r.days!]: Number(e.target.value) } as Partial<ScheduleSettings>)}>
+                          {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
+                        {plural((cfg[r.days] as number) || 3, "дня", "дней", "дней")} в неделю,
+                      </label>
                     )}
                     {r.fixedDay && <span className="text-muted-foreground">{r.fixedDay}</span>}
                     {r.time && (
@@ -294,7 +310,7 @@ export function SettingsSection() {
   );
 }
 
-const ARCHIVE_TAGS = ["#штраф", "#бонус", "#блок", "#пауза", "#роль", "#доступ", "#отчёт", "#выплата"];
+const ARCHIVE_TAGS = ["#нарушение", "#штраф", "#бонус", "#блок", "#пауза", "#роль", "#доступ", "#отчёт", "#выплата"];
 
 function ArchiveCard({ archive }: { archive: SettingsResponse["archive"] }) {
   return (

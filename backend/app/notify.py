@@ -13,6 +13,7 @@ from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -23,7 +24,7 @@ from . import app_settings, day_actual, finance, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
-from .timeutil import ddmm, ddmm_wd
+from .timeutil import ddmm, ddmm_wd, now_local
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +194,72 @@ STATUS_RU = {
 
 def svc_status_ru(status: str) -> str:
     return STATUS_RU.get(status, status)
+
+
+def _open_admin() -> InlineKeyboardMarkup | None:
+    if not settings.webapp_url.startswith("https://"):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚖️ Открыть «Дисциплину»", web_app=WebAppInfo(url=settings.webapp_url))
+    ]])
+
+
+def name_handle(user: dict) -> str:
+    """Иван Петров (@ivan_p) — for the archive templates of ТЗ 12.4."""
+    name = escape(svc.full_name(user))
+    return f"{name} (@{escape(user['username'])})" if user.get("username") else f'<a href="tg://user?id={user["telegram_id"]}">{name}</a>'
+
+
+def stamp() -> str:
+    now = now_local()
+    zone = "МСК" if settings.timezone == "Europe/Moscow" else now.strftime("%Z")
+    return f"{now:%d.%m.%Y %H:%M} {zone}"
+
+
+def files_word(n: int) -> str:
+    return f"{n} {plural(n, 'файл', 'файла', 'файлов')}"
+
+
+def violation_text(v: dict, user: dict, tx: dict | None) -> str:
+    """The employee's message (ТЗ 12.4 Б): fine or waived."""
+    from . import violations
+
+    files = violations.media_ids(v)
+    req, act = v["required_days"], v["actual_days"]
+    stats = (f"📊 <b>Статистика:</b>\n• Требование: {req} {violations.days_word(req)}\n"
+             f"• Факт: {act} {violations.days_word(act)}")
+    head = (f"👤 Сотрудник: {escape(svc.full_name(user))}\n📅 Период: {violations.period(v)}\n\n")
+    comment = f"📝 Комментарий администратора: «{escape(v['resolution_comment'] or '')}»"
+    if v["status"] == "penalized":
+        missed = max(0, req - act)
+        return ("⚠️ <b>НАРУШЕНИЕ ГРАФИКА | ШТРАФ НАЗНАЧЕН</b>\n\n" + head + stats +
+                f"\n• Пропущено: {missed} {violations.days_word(missed)}\n\n"
+                f"💰 Сумма штрафа: <b>-{tx['amount']} ₽</b>\n{comment}\n"
+                f"📎 Доказательства: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
+                "ℹ️ Ваш текущий баланс обновлён. Пожалуйста, ознакомьтесь с правилами выхода на работу.")
+    return ("✅ <b>НАРУШЕНИЕ ГРАФИКА | СНЯТО АДМИНИСТРАЦИЕЙ</b>\n\n" + head + stats +
+            f"\n\n💬 Решение: штраф не начислен.\n{comment}\n"
+            f"📎 Документы: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
+            "ℹ️ Спасибо за своевременное информирование. Соблюдайте график в будущем.")
+
+
+def violation_archive_text(v: dict, user: dict, resolver: dict, tx: dict | None, approver: dict | None = None) -> str:
+    """The audit copy for the archive group (ТЗ 12.4 В)."""
+    from . import violations
+
+    files = violations.media_ids(v)
+    role = perms.ROLE_TITLES[perms.role_of(resolver)]
+    norm = f"{v['actual_days']}/{v['required_days']}, {violations.period(v)}"
+    media_line = f"📎 Медиа: {files_word(len(files)) + ' — ниже' if files else 'нет'}"
+    if v["status"] == "penalized":
+        approved = f"\n✅ Одобрил: {name_handle(approver)}" if approver else ""
+        return (f"❌ <b>ШТРАФ ЗА ПРОПУСК ГРАФИКА</b>\n👤 Кто: {name_handle(user)}\n"
+                f"👮‍♂️ Назначил: {role} {name_handle(resolver)}{approved}\n💰 Сумма: -{tx['amount']} ₽\n"
+                f"📝 Причина: невыполнение нормы выходов ({norm}). {escape(v['resolution_comment'] or '')}\n"
+                f"{media_line}\n⏱ Время: {stamp()}")
+    return (f"☑️ <b>НАРУШЕНИЕ ПОГАШЕНО (БЕЗ ШТРАФА)</b>\n👤 Кто: {name_handle(user)}\n"
+            f"👮‍♂️ Решил: {role} {name_handle(resolver)}\n📊 Норма выходов: {norm}\n"
+            f"💬 Основание: {escape(v['resolution_comment'] or '')}\n{media_line}\n⏱ Время: {stamp()}")
 
 
 # ---------------------------------------------------------------- sender
@@ -709,7 +776,16 @@ class Notifier:
                            user, tx["media_file_id"])
 
     async def tx_decided(self, tx: dict, actor: dict) -> None:
+        from . import violations
+
         user = svc.get_user(self.conn, tx["user_id"])
+        v = violations.by_tx(self.conn, tx["id"]) if tx["source"] == "attendance" else None
+        if v and tx["status"] == "active":
+            trainer = svc.get_user(self.conn, v["resolution_admin_id"])
+            await self._violation_out(v, tx, trainer, approver=actor)
+            await self.send(trainer["telegram_id"], f"Заявка на штраф {tx['amount']} ₽ за пропуск графика "
+                            f"({who(user)}): одобрена.")
+            return
         trainer = svc.get_user_by_tg(self.conn, tx["created_by"])
         comment = f"\nКомментарий: {escape(tx['decision_comment'])}" if tx["decision_comment"] else ""
         if tx["status"] == "active":
@@ -717,6 +793,8 @@ class Notifier:
             verdict, tags = "✅ ОДОБРЕН", ["штраф"]
         else:
             verdict, tags = "❌ ОТКЛОНЁН", ["штраф", "отклонён"]  # the employee is not told (ТЗ 5.3)
+        if tx["source"] == "attendance" and tx["status"] == "rejected":
+            comment += "\nНарушение графика снова ждёт решения в «Дисциплине»."
         if trainer:
             await self.send(trainer["telegram_id"], f"Заявка на штраф {tx['amount']} ₽ ({who(user)}): "
                             f"{'одобрена' if tx['status'] == 'active' else 'отклонена'}.{comment}")
@@ -732,6 +810,76 @@ class Notifier:
         await self.archive(["аннулирование", {"fine": "штраф", "bonus": "бонус"}.get(tx["type"], "вычет")],
                            f"↩️ АННУЛИРОВАН {title.upper()}{amount} — {who(user)}\nБыло: {escape(tx['reason'])}\n"
                            f"Причина: {escape(tx['decision_comment'] or '')}\nАннулировал: {who(actor)}", user)
+
+    # ------------------------------------------------------------ schedule violations (ТЗ 12.4)
+
+    async def send_album(self, chat_id: int, files: list[str]) -> int:
+        """Proof photos after a message: one photo, or an album of up to 10. Local dev files are skipped."""
+        real = [f for f in files if not f.startswith("local:")]
+        if not real or self.bot is None:
+            if files:
+                log.info("[album → %s] %d file(s)", chat_id, len(files))
+            return 0
+        try:
+            if len(real) == 1:
+                await self._retry(lambda: self.bot.send_photo(chat_id, real[0]))
+            else:
+                await self._retry(lambda: self.bot.send_media_group(chat_id, [InputMediaPhoto(media=f) for f in real[:10]]))
+            return len(real)
+        except Exception as exc:
+            log.warning("album to %s failed: %s", chat_id, exc)
+            return 0
+
+    async def violations_found(self, created: list[dict]) -> None:
+        """Monday check: managers learn who fell below the norm; each decides in «Дисциплина»."""
+        from . import networks, violations
+
+        if not created:
+            return
+        v0 = created[0]
+        users = {v["id"]: svc.get_user(self.conn, v["user_id"]) for v in created}
+
+        def body(items: list[dict]) -> str:
+            lines = [f"📋 <b>Нарушения графика</b> — {violations.period(v0)}",
+                     f"Не выполнили норму выходов: {len(items)}. Нужно решение по каждому: штраф или оправдание.", ""]
+            lines += [f"• {escape(svc.full_name(users[v['id']]))}: {v['actual_days']} из {v['required_days']}" for v in items]
+            lines += ["", "Раздел «Дисциплина» в приложении."]
+            return "\n".join(lines)[:3900]
+
+        markup = _open_admin()
+        await self.to_admins(body(created), markup)
+        admins = set(svc.admin_telegram_ids(self.conn))
+        by_trainer: dict[int, tuple[dict, list[dict]]] = {}
+        for v in created:
+            trainer = networks.trainer_of(self.conn, users[v["id"]])
+            if trainer and trainer["telegram_id"] not in admins:
+                by_trainer.setdefault(trainer["id"], (trainer, []))[1].append(v)
+        for trainer, items in by_trainer.values():
+            await self.send(trainer["telegram_id"], body(items), markup)
+
+    async def _violation_out(self, v: dict, tx: dict | None, resolver: dict, approver: dict | None = None) -> None:
+        """The employee's message and the archive copy, each followed by the proof photos."""
+        from . import violations
+
+        user = svc.get_user(self.conn, v["user_id"])
+        files = violations.media_ids(v)
+        if await self.send(user["telegram_id"], violation_text(v, user, tx)):
+            await self.send_album(user["telegram_id"], files)
+        tags = ["нарушение", "штраф" if v["status"] == "penalized" else "оправдание"]
+        if await self.archive(tags, violation_archive_text(v, user, resolver, tx, approver), user):
+            await self.send_album(int(app_settings.get_raw(self.conn, "archive_chat_id")), files)
+
+    async def violation_resolved(self, v: dict, tx: dict | None, actor: dict) -> None:
+        if v["status"] == "penalized" and tx and tx["status"] == "pending_admin_approval":
+            # a trainer's fine: owners approve it first; the employee hears about it only then (ТЗ 5.3)
+            user = svc.get_user(self.conn, v["user_id"])
+            await self.archive(["нарушение", "штраф", "согласование"],
+                               f"🧾 ЗАЯВКА НА ШТРАФ ЗА ПРОПУСК ГРАФИКА {tx['amount']} ₽ — {name_handle(user)}\n"
+                               f"Норма выходов: {v['actual_days']}/{v['required_days']}\n"
+                               f"Причина: {escape(tx['reason'])}\nТренер: {name_handle(actor)}", user, tx["media_file_id"])
+            await self.fine_requested(tx, actor)
+            return
+        await self._violation_out(v, tx, actor)
 
     async def fines_paid(self, user_id: int, rows: list[dict], actor: dict) -> None:
         user = svc.get_user(self.conn, user_id)

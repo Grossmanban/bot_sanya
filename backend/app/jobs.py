@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import app_settings, events, export, goals, notify, reports
+from . import app_settings, events, export, goals, notify, reports, violations
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -71,6 +71,9 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
                 lambda: week_reminders(conn, notifier, today), weekday=cfg["week_reminder_weekday"])
     await daily("weekly_report", cfg["weekly_report_enabled"], cfg["weekly_report_time"],
                 lambda: weekly_report(conn, notifier, today), weekday=0)
+    await daily("attendance_check", cfg["attendance_check_enabled"] and cfg["weekly_attendance_quota"] > 0,
+                cfg["attendance_check_time"], lambda: attendance_check(conn, notifier, today, cfg["weekly_attendance_quota"]),
+                weekday=0)
     await daily("backup", cfg["backup_enabled"], cfg["backup_time"], lambda: backup(conn, notifier))
     await daily("global_actual_evening", cfg["global_actual_evening_enabled"], cfg["global_actual_evening_time"],
                 lambda: notifier.global_actual_reminder(today, morning=False))
@@ -302,6 +305,14 @@ async def weekly_report(conn, notifier: Notifier, today: date) -> None:
     for admin_id in svc.admin_telegram_ids(conn):
         await notifier.send(admin_id, text)
         await notifier.send_document(admin_id, data, export.export_filename(start, end))
+
+
+async def attendance_check(conn, notifier: Notifier, today: date, quota: int) -> int:
+    """ТЗ 12.4: Monday — people below the weekly norm of work days get a violation to decide on."""
+    created = violations.scan(conn, quota, today)
+    if created:
+        await notifier.violations_found(created)
+    return len(created)
 
 
 async def backup(conn, notifier: Notifier) -> None:

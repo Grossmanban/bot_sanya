@@ -566,6 +566,70 @@ CREATE INDEX ix_event_entries_event ON event_entries (event_id, status);
 """)
 
 
+def _attendance(conn: sqlite3.Connection) -> None:
+    """14: schedule violations (ТЗ 12.4). The ledger is rebuilt only to allow source = 'attendance'
+    (SQLite can't change a CHECK in place); ids, data and the id counter stay as they were."""
+    seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'financial_transactions'").fetchone()
+    _run_script(conn, """
+    CREATE TABLE financial_transactions_new (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL REFERENCES users(id),
+        type            TEXT NOT NULL CHECK (type IN ('fine','bonus','deduction','payout_offset')),
+        amount          INTEGER CHECK (amount IS NULL OR amount > 0),
+        status          TEXT NOT NULL CHECK (status IN (
+                            'draft','pending_admin_approval','active','paid','cancelled','offset','rejected')),
+        reason          TEXT NOT NULL,
+        media_file_id   TEXT,
+        source          TEXT NOT NULL DEFAULT 'manual'
+                        CHECK (source IN ('manual','final_cancel','report','no_show','payout','attendance')),
+        shift_id        INTEGER REFERENCES shifts(id),
+        payout_id       INTEGER,
+        event_date      TEXT NOT NULL,
+        created_by      INTEGER NOT NULL,
+        created_at      TEXT NOT NULL,
+        decided_by      INTEGER,
+        decided_at      TEXT,
+        decision_comment TEXT,
+        CHECK (amount IS NOT NULL OR status IN ('draft','cancelled'))
+    );
+    INSERT INTO financial_transactions_new SELECT id, user_id, type, amount, status, reason, media_file_id, source,
+        shift_id, payout_id, event_date, created_by, created_at, decided_by, decided_at, decision_comment
+        FROM financial_transactions;
+    DROP TABLE financial_transactions;
+    ALTER TABLE financial_transactions_new RENAME TO financial_transactions;
+    CREATE INDEX ix_fin_user_status ON financial_transactions (user_id, status);
+    CREATE INDEX ix_fin_event_date ON financial_transactions (event_date);
+    CREATE UNIQUE INDEX ux_fin_shift_source ON financial_transactions (shift_id, source)
+        WHERE shift_id IS NOT NULL AND status NOT IN ('cancelled','rejected');
+    CREATE TABLE attendance_violations (
+        id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id                     INTEGER NOT NULL REFERENCES users(id),
+        week_start_date             TEXT NOT NULL,
+        week_end_date               TEXT NOT NULL,
+        required_days               INTEGER NOT NULL CHECK (required_days > 0),
+        actual_days                 INTEGER NOT NULL CHECK (actual_days >= 0),
+        absent_dates                TEXT NOT NULL DEFAULT '[]',
+        status                      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','penalized','waived')),
+        resolution_admin_id         INTEGER REFERENCES users(id),
+        resolution_comment          TEXT,
+        resolution_media_ids        TEXT,
+        linked_fine_transaction_id  INTEGER REFERENCES financial_transactions(id),
+        resolved_at                 TEXT,
+        created_at                  TEXT NOT NULL,
+        UNIQUE (user_id, week_start_date),
+        CHECK (status = 'pending' OR (resolution_admin_id IS NOT NULL AND resolution_comment IS NOT NULL
+                                      AND resolved_at IS NOT NULL)),
+        CHECK ((status = 'penalized') = (linked_fine_transaction_id IS NOT NULL))
+    );
+    CREATE INDEX ix_violations_status ON attendance_violations (status, week_start_date);
+    """)
+    if seq:
+        conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'financial_transactions'", (seq[0],))
+
+
+MIGRATIONS.append(_attendance)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):
