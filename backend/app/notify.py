@@ -207,6 +207,10 @@ def review_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def ack_keyboard(broadcast_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Я ознакомился", callback_data=f"ack:{broadcast_id}")]])
+
+
 def fine_decision_keyboard(tx_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Одобрить", callback_data=f"fx:a:{tx_id}"),
@@ -306,17 +310,61 @@ class Notifier:
     def broadcast_body(html: str, signed: bool) -> str:
         return f"📣 <b>Сообщение от администратора</b>\n\n{html}" if signed else html
 
-    async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signed: bool = True) -> int:
-        """html must already be sanitized (richtext.sanitize)."""
+    async def _deliver(self, chat_id: int, body: str, media: str | None, markup) -> int | None:
+        """Send one broadcast message; returns the message id of the part carrying the buttons."""
+        if self.bot is None:
+            log.info("[broadcast → %s] %s", chat_id, body[:80])
+            return None
+        try:
+            if media and not media.startswith("local:"):
+                if len(body) <= 1000:
+                    msg = await self._retry(lambda: self.bot.send_photo(chat_id, media, caption=body, parse_mode="HTML",
+                                                                        reply_markup=markup))
+                    return msg.message_id
+                await self._retry(lambda: self.bot.send_photo(chat_id, media))
+            msg = await self._retry(lambda: self.bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=markup,
+                                                                  disable_web_page_preview=True))
+            return msg.message_id
+        except Exception as exc:
+            log.warning("broadcast to %s failed: %s", chat_id, exc)
+            return None
+
+    async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signed: bool = True,
+                        media: str | None = None, require_ack: bool = False) -> int:
+        """html must already be sanitized (richtext.sanitize). Every delivery is recorded for read receipts."""
         body = self.broadcast_body(html, signed)
+        markup = ack_keyboard(broadcast_id) if require_ack else None
         delivered = 0
         for i, user in enumerate(recipients):
-            delivered += await self.send(user["telegram_id"], body)
+            message_id = await self._deliver(user["telegram_id"], body, media, markup)
+            ok = message_id is not None
+            delivered += ok
+            self.conn.execute(
+                """INSERT INTO broadcast_deliveries (broadcast_id, user_id, message_id, delivered, sent_at)
+                   VALUES (?, ?, ?, ?, ?) ON CONFLICT(broadcast_id, user_id) DO NOTHING""",
+                (broadcast_id, user["id"], message_id, int(ok), svc.now_iso()))
             if i % 10 == 9:
                 self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
             await asyncio.sleep(0.05)  # stay well under Telegram's ~30 msg/s limit
         self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
         return delivered
+
+    async def broadcast_remind(self, broadcast_id: int, user_ids: list[int] | None = None) -> int:
+        """«Напомнить» / «Напомнить всем»: the message again, with the button, to those who haven't confirmed."""
+        b = self.conn.execute("SELECT * FROM broadcasts WHERE id = ?", (broadcast_id,)).fetchone()
+        if b is None:
+            return 0
+        rows = [r for r in svc.broadcast_deliveries(self.conn, broadcast_id)
+                if r["read_at"] is None and (user_ids is None or r["user_id"] in user_ids)]
+        body = "⏰ <b>Напоминание:</b> подтвердите, что ознакомились с сообщением.\n\n" + self.broadcast_body(b["html"] or escape(b["text"]), bool(b["signed"]))
+        sent = 0
+        for r in rows:
+            message_id = await self._deliver(r["telegram_id"], body, b["media_file_id"], ack_keyboard(broadcast_id))
+            sent += message_id is not None
+            self.conn.execute("UPDATE broadcast_deliveries SET reminded_at = ?, reminders = reminders + 1 WHERE id = ?",
+                              (svc.now_iso(), r["id"]))
+            await asyncio.sleep(0.05)
+        return sent
 
     async def send_photo(self, chat_id: int | str, photo: str, caption: str, markup=None) -> bool:
         if self.bot is None:

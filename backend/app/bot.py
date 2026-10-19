@@ -507,6 +507,25 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         await mark_done(call, text)
         await call.answer(text)
 
+    # ------------------------------------------------------------ read receipts (ТЗ 7.2)
+
+    @router.callback_query(F.data.startswith("ack:"))
+    async def acknowledge(call: CallbackQuery):
+        broadcast_id = int(call.data.split(":")[1])
+        if broadcast_id == 0:
+            await call.answer("Это проверочное сообщение — у сотрудников кнопка отметит прочтение.", show_alert=True)
+            return
+        svc.acknowledge(conn, broadcast_id, call.from_user.id)
+        mark = "\n\n✅ <i>Прочитано</i>"
+        try:
+            if call.message.photo:
+                await call.message.edit_caption(caption=(call.message.html_text or "") + mark, parse_mode="HTML")
+            else:
+                await call.message.edit_text(call.message.html_text + mark, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:
+            log.debug("could not mark the broadcast as read", exc_info=True)
+        await call.answer("Учтено")
+
     # ------------------------------------------------------------ the day's global actual (owners)
 
     @router.message(Command("fakt"), F.chat.type == "private")

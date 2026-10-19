@@ -46,7 +46,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "team", label: "Команда", need: "pause" },
   { id: "networks", label: "Сети", need: "registrations" },
   { id: "points", label: "Точки", need: "points" },
-  { id: "broadcast", label: "Рассылка", need: "broadcast_all" },
+  { id: "broadcast", label: "Рассылка", need: "broadcast_network" },
   { id: "settings", label: "Настройки", need: "settings" },
 ];
 
@@ -118,7 +118,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
         {section === "networks" && <NetworksSection />}
         {section === "payouts" && <PayoutsSection />}
         {section === "points" && <PointsSection />}
-        {section === "broadcast" && <BroadcastSection />}
+        {section === "broadcast" && <BroadcastSection me={me} />}
         {section === "settings" && <SettingsSection />}
       </div>
 

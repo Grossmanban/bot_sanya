@@ -14,6 +14,7 @@ from .auth import InitDataError, validate_init_data
 from .config import settings
 from .notify import Notifier
 from .bot import open_app_keyboard
+from .notify import ack_keyboard as notify_ack
 from .timeutil import now_local, today_local
 
 
@@ -187,14 +188,24 @@ class PointPatch(BaseModel):
 
 
 class BroadcastBody(BaseModel):
-    audiences: list[str]
+    audiences: list[str] = []
     html: str
     signed: bool = True
+    network_id: int | None = None
+    user_ids: list[int] | None = None
+    require_ack: bool = False
+    media_file_id: str | None = None
 
 
 class BroadcastTest(BaseModel):
     html: str
     signed: bool = True
+    require_ack: bool = False
+    media_file_id: str | None = None
+
+
+class RemindBody(BaseModel):
+    user_ids: list[int] | None = None
 
 
 class ExportBody(BaseModel):
@@ -508,27 +519,64 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return settings_view()
 
     @api.get("/admin/broadcasts")
-    async def admin_broadcasts(_: dict = Depends(staff("broadcast_all"))):
+    async def admin_broadcasts(admin: dict = Depends(staff("broadcast_network"))):
+        nets = networks.names(conn)
         people = [
-            {"id": u["id"], "working": u["work_status"] == "working", "admin": u["role"] == "admin"}
-            for u in svc.list_users(conn) if u["account_state"] != "blocked"
+            {"id": u["id"], "name": svc.full_name(u), "working": u["work_status"] == "working", "admin": u["role"] == "admin",
+             "network_id": u["network_id"], "network": nets.get(u["network_id"])}
+            for u in visible(admin, svc.list_users(conn)) if u["account_state"] != "blocked"
         ]
-        return {"items": svc.list_broadcasts(conn), "audiences": svc.AUDIENCES, "people": people}
+        everyone = perms.can(admin, "broadcast_all")
+        return {
+            "items": svc.list_broadcasts(conn, author_tg=None if everyone else admin["telegram_id"]),
+            "audiences": svc.AUDIENCES,
+            "people": people,
+            "networks": [{"id": n["id"], "name": n["name"]} for n in networks.listing(conn, admin)],
+            "scope": "all" if everyone else "network",
+        }
 
     @api.post("/admin/broadcasts")
-    async def admin_broadcast(body: BroadcastBody, admin: dict = Depends(staff("broadcast_all"))):
+    async def admin_broadcast(body: BroadcastBody, admin: dict = Depends(staff("broadcast_network"))):
         if notifier.bot is None:
             raise svc.ServiceError("Бот не запущен: рассылка недоступна", 503, "no_bot")
-        row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed)
-        notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], bool(row["signed"])))
+        if not perms.can(admin, "broadcast_all") and body.network_id not in (None, admin["network_id"]):
+            raise svc.ServiceError("Тренер пишет только своей сети", 403, "forbidden")
+        row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed, body.network_id,
+                                               body.user_ids, body.require_ack, body.media_file_id)
+        notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], bool(row["signed"]), row["media_file_id"],
+                                          bool(row["require_ack"])))
         return {"broadcast": row}
 
+    @api.get("/admin/broadcasts/{broadcast_id}")
+    async def admin_broadcast_receipts(broadcast_id: int, admin: dict = Depends(staff("broadcast_network"))):
+        row = conn.execute("SELECT * FROM broadcasts WHERE id = ?", (broadcast_id,)).fetchone()
+        if row is None or (not perms.can(admin, "broadcast_all") and row["author_id"] != admin["telegram_id"]):
+            raise svc.ServiceError("Рассылка не найдена", 404, "not_found")
+        items = [{"user_id": d["user_id"], "name": d["name"], "username": d["username"], "telegram_id": d["telegram_id"],
+                  "delivered": bool(d["delivered"]), "read_at": d["read_at"], "reminders": d["reminders"],
+                  "reminded_at": d["reminded_at"]} for d in svc.broadcast_deliveries(conn, broadcast_id)]
+        return {"broadcast": dict(row), "items": items}
+
+    @api.post("/admin/broadcasts/{broadcast_id}/remind")
+    async def admin_broadcast_remind(broadcast_id: int, body: RemindBody, admin: dict = Depends(staff("broadcast_network"))):
+        row = conn.execute("SELECT * FROM broadcasts WHERE id = ?", (broadcast_id,)).fetchone()
+        if row is None or (not perms.can(admin, "broadcast_all") and row["author_id"] != admin["telegram_id"]):
+            raise svc.ServiceError("Рассылка не найдена", 404, "not_found")
+        if not row["require_ack"]:
+            raise svc.ServiceError("В этой рассылке не просили подтверждать прочтение", 409, "no_ack")
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен", 503, "no_bot")
+        sent = await notifier.broadcast_remind(broadcast_id, body.user_ids)
+        return {"sent": sent}
+
     @api.post("/admin/broadcasts/test")
-    async def admin_broadcast_test(body: BroadcastTest, admin: dict = Depends(staff("broadcast_all"))):
+    async def admin_broadcast_test(body: BroadcastTest, admin: dict = Depends(staff("broadcast_network"))):
         if notifier.bot is None:
             raise svc.ServiceError("Бот не запущен: проверка недоступна", 503, "no_bot")
         html, _ = svc.prepare_message(body.html)
-        if not await notifier.send(admin["telegram_id"], notifier.broadcast_body(html, body.signed)):
+        markup = notify_ack(0) if body.require_ack else None
+        if await notifier._deliver(admin["telegram_id"], notifier.broadcast_body(html, body.signed), body.media_file_id,
+                                   markup) is None:
             raise svc.ServiceError("Telegram не принял сообщение. Проверьте ссылки и форматирование", 502, "send_failed")
         return {"ok": True}
 

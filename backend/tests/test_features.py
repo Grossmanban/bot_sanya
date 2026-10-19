@@ -22,6 +22,7 @@ class FakeNotifier(Notifier):
         self.sent: list[tuple[int, str]] = []
         self.docs: list[tuple[int, str]] = []
         self.photos: list[tuple[int, str]] = []
+        self.markups: list = []
 
     async def send(self, chat_id, text, markup=None):
         self.sent.append((chat_id, text))
@@ -30,6 +31,11 @@ class FakeNotifier(Notifier):
     async def send_document(self, chat_id, data, filename, caption=None):
         self.docs.append((chat_id, filename))
         return True
+
+    async def _deliver(self, chat_id, body, media, markup):
+        self.sent.append((chat_id, body))
+        self.markups.append((chat_id, markup))
+        return 1000 + len(self.sent)
 
     async def send_photo(self, chat_id, photo, caption, markup=None):
         self.sent.append((chat_id, caption))
@@ -849,3 +855,45 @@ def test_rates_come_from_settings(conn):
         assert pricing.pricing_info() == {"base_rate": 150, "lazy_rate": 90, "lazy_threshold": 15}
     finally:
         app_settings.update(conn, {"rate_base": 120, "rate_lazy": 100, "lazy_threshold": 20})
+
+
+# ---------------------------------------------------------------- broadcasts with read receipts (ТЗ модуль 6)
+
+
+def test_broadcast_audiences_by_network_and_people(conn, make_user):
+    from app import networks
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer, a, b, c = make_user(first="Тренер"), make_user(first="Аня"), make_user(first="Боря", working=False), make_user(first="Вика")
+    net = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
+    networks.set_member(conn, owner, a["id"], net["id"], svc.new_key())
+    networks.set_member(conn, owner, b["id"], net["id"], svc.new_key())
+    names = lambda rows: sorted(r["first_name"] for r in rows)  # noqa: E731
+    assert names(svc.broadcast_recipients(conn, [], network_id=net["id"])) == ["Аня", "Боря", "Тренер"]
+    assert names(svc.broadcast_recipients(conn, [], user_ids=[c["id"]])) == ["Вика"]
+    assert names(svc.broadcast_recipients(conn, ["not_working"], user_ids=[c["id"]])) == ["Боря", "Вика", "Саня"]
+    with pytest.raises(svc.ServiceError):
+        svc.broadcast_recipients(conn, [])
+    # a trainer reaches only their network whatever they choose
+    t = svc.get_user(conn, trainer["id"])
+    assert names(svc.broadcast_recipients(conn, ["working", "not_working"], actor=t)) == ["Аня", "Боря"]
+
+
+def test_read_receipts_and_reminders(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a, b = make_user(first="Аня"), make_user(first="Боря")
+    row, recipients = svc.create_broadcast(conn, owner, [], "<b>Важно</b>", True, user_ids=[a["id"], b["id"]],
+                                           require_ack=True)
+    n = FakeNotifier(conn)
+    assert run(n.broadcast(row["id"], recipients, row["html"], True, None, True)) == 2
+    assert all(m is not None and m.inline_keyboard[0][0].callback_data == f"ack:{row['id']}" for _, m in n.markups)
+    assert svc.acknowledge(conn, row["id"], a["telegram_id"]) is True
+    assert svc.acknowledge(conn, row["id"], a["telegram_id"]) is False  # once
+    receipts = {d["first_name"]: d for d in svc.broadcast_deliveries(conn, row["id"])}
+    assert receipts["Аня"]["read_at"] and receipts["Боря"]["read_at"] is None
+    assert svc.list_broadcasts(conn)[0]["read"] == 1
+    n.sent.clear()
+    assert run(n.broadcast_remind(row["id"])) == 1  # only the one who hasn't confirmed
+    assert n.sent[0][0] == b["telegram_id"] and "Напоминание" in n.sent[0][1]
+    assert svc.broadcast_deliveries(conn, row["id"])[0]["reminders"] == 1
