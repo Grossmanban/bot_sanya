@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import app_settings, export, notify, reports
+from . import app_settings, export, goals, notify, reports
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -85,6 +85,10 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
         ran.append("report_reminder")
     if await no_shows(conn, notifier, now, since):
         ran.append("no_show")
+    done = goals.check_completions(conn, today)
+    if done:
+        ran.append("goals")
+        await notifier.goals_completed(done)
     return ran
 
 

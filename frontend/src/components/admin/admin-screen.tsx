@@ -30,10 +30,11 @@ import { DayActualSection } from "./day-actual-section";
 import { FinanceSection } from "../finance/finance-section";
 import { NetworksSection } from "./networks-section";
 import { PayoutsSection } from "../finance/payouts-section";
+import { GoalsSection } from "../goals/goals";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 
-type Section = "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
@@ -44,6 +45,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "penalties", label: "Финансы", need: "review" },
   { id: "payouts", label: "Выплаты", need: "money" },
   { id: "team", label: "Команда", need: "pause" },
+  { id: "goals", label: "Цели", need: "review" },
   { id: "networks", label: "Сети", need: "registrations" },
   { id: "points", label: "Точки", need: "points" },
   { id: "broadcast", label: "Рассылка", need: "broadcast_network" },
@@ -117,6 +119,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
         {section === "team" && <TeamSection me={me} caps={caps} network={network} />}
         {section === "networks" && <NetworksSection />}
         {section === "payouts" && <PayoutsSection />}
+        {section === "goals" && <GoalsSection me={me} />}
         {section === "points" && <PointsSection />}
         {section === "broadcast" && <BroadcastSection me={me} />}
         {section === "settings" && <SettingsSection />}

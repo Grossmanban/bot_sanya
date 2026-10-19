@@ -897,3 +897,62 @@ def test_read_receipts_and_reminders(conn, make_user):
     assert run(n.broadcast_remind(row["id"])) == 1  # only the one who hasn't confirmed
     assert n.sent[0][0] == b["telegram_id"] and "Напоминание" in n.sent[0][1]
     assert svc.broadcast_deliveries(conn, row["id"])[0]["reminders"] == 1
+
+
+# ---------------------------------------------------------------- goals (ТЗ модуль 5)
+
+
+def test_goals_progress_and_completion(conn, make_user):
+    from app import goals, networks
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer, a, b, c = make_user(first="Тренер"), make_user(first="Аня"), make_user(first="Боря"), make_user(first="Вика")
+    net = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
+    for u in (a, b):
+        networks.set_member(conn, owner, u["id"], net["id"], svc.new_key())
+    trainer, a, b = (svc.get_user(conn, u["id"]) for u in (trainer, a, b))
+
+    with pytest.raises(svc.ServiceError):  # company-wide goals are for owners and admins
+        goals.create(conn, trainer, title="Все", kind="team", target=10, date_from=TODAY, date_to=THU, key=svc.new_key())
+    with pytest.raises(svc.ServiceError):  # not their person
+        goals.create(conn, trainer, title="Лично", kind="personal", target=10, date_from=TODAY, date_to=THU,
+                     user_id=c["id"], key=svc.new_key())
+    personal = goals.create(conn, trainer, title="Лично Ане", kind="personal", target=25, date_from=TODAY, date_to=THU,
+                            user_id=a["id"], key=svc.new_key())
+    shared = goals.create(conn, trainer, title="Северу 50", kind="network", target=50, date_from=TODAY, date_to=THU,
+                          network_id=net["id"], key=svc.new_key())
+    team = goals.create(conn, owner, title="Каждый по 20", kind="team", mode="each", target=20, date_from=TODAY,
+                        date_to=THU, key=svc.new_key())
+
+    assert [g["title"] for g in goals.for_user(conn, a, TODAY)] == ["Лично Ане", "Северу 50", "Каждый по 20"]
+    assert [g["title"] for g in goals.for_user(conn, c, TODAY)] == ["Каждый по 20"]
+    assert goals.view(conn, personal, a)["joined"]  # personal goals join automatically
+    with pytest.raises(svc.ServiceError):
+        goals.join(conn, c, shared["id"], TODAY)  # not in the network
+    for u in (a, b):
+        goals.join(conn, u, shared["id"], TODAY)
+    goals.join(conn, a, team["id"], TODAY)
+    assert goals.join(conn, a, team["id"], TODAY)[1] is False
+
+    sa, sb = shift(conn, a), shift(conn, b)
+    report(conn, a, sa, 30)  # auto-approved: counts in every goal at once
+    report(conn, b, sb, 10)  # below plan, waits for review → not counted yet
+    v = goals.view(conn, goals.get(conn, shared["id"]), a)
+    assert v["progress"] == 30 and v["my_volume"] == 30
+
+    n = FakeNotifier(conn)
+    run(jobs.tick(conn, n, at(THU, "20:01")))
+    assert goals.get(conn, personal["id"])["status"] == "completed"
+    assert goals.get(conn, shared["id"])["status"] == "active"
+    assert any("Цель выполнена" in t and "Лично Ане" in t for chat, t in n.sent if chat == a["telegram_id"])
+    team_view = goals.view(conn, goals.get(conn, team["id"]), a)
+    assert team_view["done"] and team_view["participants"][0]["done"]
+
+    reports.review(conn, owner, sb["id"], "approve", svc.new_key())  # 30 + 10 = 40 < 50
+    assert goals.check_completions(conn, THU) == []
+    sb2 = shift(conn, b, THU + timedelta(days=1))
+    report(conn, b, sb2, 25, now=at(THU + timedelta(days=1), "19:30"))  # outside the period → doesn't count
+    assert goals.check_completions(conn, THU) == []
+    goals.archive(conn, trainer, shared["id"], svc.new_key())
+    assert all(g["title"] != "Северу 50" for g in goals.for_user(conn, a, TODAY))

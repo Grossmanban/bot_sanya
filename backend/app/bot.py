@@ -507,6 +507,27 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         await mark_done(call, text)
         await call.answer(text)
 
+    # ------------------------------------------------------------ goals (ТЗ модуль 5)
+
+    @router.callback_query(F.data.startswith("goal:"))
+    async def goal_join(call: CallbackQuery):
+        from . import goals
+
+        user = svc.get_user_by_tg(conn, call.from_user.id)
+        if user is None or user["status"] != "approved":
+            await call.answer("Нет доступа", show_alert=True)
+            return
+        try:
+            goal, joined = goals.join(conn, user, int(call.data.split(":")[1]))
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        await call.answer("Вы участвуете! Прогресс — в приложении" if joined else "Вы уже участвуете")
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------ read receipts (ТЗ 7.2)
 
     @router.callback_query(F.data.startswith("ack:"))

@@ -62,6 +62,26 @@ export interface Me {
   network?: string | null;
 }
 
+export interface Goal {
+  id: number;
+  title: string;
+  description: string | null;
+  kind: "personal" | "team" | "network";
+  mode: "shared" | "each";
+  target: number;
+  date_from: string;
+  date_to: string;
+  status: "active" | "completed" | "archived";
+  network: string | null;
+  person?: string;
+  progress: number;
+  total: number;
+  participants: { user_id: number; name: string; volume: number; done: boolean }[];
+  joined: boolean;
+  done: boolean;
+  my_volume: number;
+}
+
 export interface NetworkMember {
   id: number;
   name: string;
@@ -543,6 +563,8 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ ...body, idempotency_key: key }),
     }),
+  goals: () => request<{ items: Goal[] }>("/api/goals"),
+  joinGoal: (id: number) => post<{ goal: Goal }>(`/api/goals/${id}/join`, {}),
   myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -613,6 +635,13 @@ export const api = {
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/amount`, { amount, idempotency_key: key }),
     payAll: (user_id: number, key: string) =>
       post<{ paid: number; total: number }>("/api/admin/finances/pay-all", { user_id, idempotency_key: key }),
+    goals: () => request<{ items: Goal[] }>("/api/admin/goals"),
+    createGoal: (
+      body: { title: string; kind: Goal["kind"]; mode: Goal["mode"]; target: number; date_from: string; date_to: string;
+        description?: string; user_id?: number | null; network_id?: number | null },
+      key: string,
+    ) => post<{ goal: Goal }>("/api/admin/goals", { ...body, idempotency_key: key }),
+    archiveGoal: (id: number, key: string) => post<{ goal: Goal }>(`/api/admin/goals/${id}/archive`, { idempotency_key: key }),
     networks: () => request<{ items: Network[] }>("/api/admin/networks"),
     createNetwork: (name: string, key: string) => post<{ network: Network }>("/api/admin/networks", { name, idempotency_key: key }),
     updateNetwork: (id: number, body: { name?: string; trainer_id?: number; clear_trainer?: boolean; archive?: boolean }, key: string) =>
