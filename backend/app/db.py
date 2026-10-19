@@ -290,6 +290,59 @@ def _reports(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_reports)
 
 
+
+def _day_actuals(conn: sqlite3.Connection) -> None:
+    """7: the day's global actual output (ТЗ 3.5) and a report status for «approved: the team met the plan»."""
+    _run_script(conn, """
+    CREATE TABLE reports_new (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        shift_id       INTEGER NOT NULL REFERENCES shifts(id),
+        user_id        INTEGER NOT NULL REFERENCES users(id),
+        attempt        INTEGER NOT NULL,
+        fact_volume    INTEGER NOT NULL CHECK (fact_volume >= 0),
+        photo_file_id  TEXT,
+        source         TEXT NOT NULL CHECK (source IN ('app','bot','admin','legacy')),
+        status         TEXT NOT NULL CHECK (status IN (
+                           'pending_review','approved','auto_approved','approved_team',
+                           'rejected_penalty','rejected_retry')),
+        submitted_by   INTEGER NOT NULL,
+        submitted_at   TEXT NOT NULL,
+        reviewed_by    INTEGER,
+        reviewed_at    TEXT,
+        review_comment TEXT,
+        penalty_amount INTEGER,
+        UNIQUE (shift_id, attempt)
+    );
+    INSERT INTO reports_new SELECT * FROM reports;
+    DROP TABLE reports;
+    ALTER TABLE reports_new RENAME TO reports;
+    CREATE INDEX ix_reports_status ON reports (status, submitted_at);
+
+    CREATE TABLE day_actuals (
+        day     TEXT PRIMARY KEY,
+        actual  INTEGER NOT NULL CHECK (actual >= 0),
+        plan    INTEGER NOT NULL,
+        met     INTEGER NOT NULL,
+        set_by  INTEGER NOT NULL,
+        set_at  TEXT NOT NULL
+    );
+    -- every change of the global actual (ТЗ 3.5 step 4, admin_actions_log)
+    CREATE TABLE day_actual_log (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        day        TEXT NOT NULL,
+        old_value  INTEGER,
+        new_value  INTEGER NOT NULL,
+        plan       INTEGER NOT NULL,
+        actor      INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX ix_day_actual_log_day ON day_actual_log (day, id);
+    """)
+
+
+MIGRATIONS.append(_day_actuals)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

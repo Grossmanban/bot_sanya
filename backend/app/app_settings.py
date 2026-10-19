@@ -26,6 +26,11 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "report_digest_enabled": ("1", "bool"),
     "report_digest_time": ("22:00", "time"),
     "report_digest_to": ("admins", "choice:owners|admins|staff"),
+    # ТЗ 3.5: owners are reminded to enter the day's global actual (evening for today, morning for yesterday)
+    "global_actual_evening_enabled": ("1", "bool"),
+    "global_actual_evening_time": ("21:30", "time"),
+    "global_actual_morning_enabled": ("1", "bool"),
+    "global_actual_morning_time": ("09:30", "time"),
     "weekly_report_enabled": ("1", "bool"),
     "weekly_report_time": ("10:00", "time"),
     "backup_enabled": ("1", "bool"),
