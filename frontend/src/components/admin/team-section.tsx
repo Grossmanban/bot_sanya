@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Ban, Check, ChevronRight, Copy, LoaderCircle, MessageCircle, Pause, Play, Send, X } from "lucide-react";
+import { Ban, Check, ChevronRight, Copy, LoaderCircle, MessageCircle, Pause, Play, Send, Wallet, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,6 +22,7 @@ import { haptic, openChat, webApp } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
+import { TxForm } from "../finance/money";
 
 export function TeamSection({ me, caps }: { me: User; caps: Capability[] }) {
   const { data, reload } = useLoad(() => api.admin.team(), []);
@@ -230,6 +231,7 @@ function MemberSheet({
   const wide = useWide();
   const { busy, run } = useAction();
   const [pausing, setPausing] = useState(false);
+  const [money, setMoney] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const [reason, setReason] = useState("");
 
@@ -269,6 +271,7 @@ function MemberSheet({
         onOpenChange={(o) => {
           if (!o) {
             setPausing(false);
+            setMoney(false);
             setReason("");
             onClose();
           }
@@ -328,6 +331,19 @@ function MemberSheet({
                         onClick={() => openChat(user)}>
                   <MessageCircle /> Открыть в Telegram
                 </Button>
+              )}
+
+              {approved && !isSelf && state !== "blocked" && (caps.includes("bonus") || caps.includes("fine_direct")) && (
+                <div className="mt-4">
+                  <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" onClick={() => setMoney((v) => !v)}>
+                    <Wallet /> {money ? "Скрыть" : "Штраф, бонус, вычет"}
+                  </Button>
+                  {money && (
+                    <div className="row-in mt-3 rounded-2xl bg-muted/50 p-4">
+                      <TxForm userId={user.id} onDone={() => setMoney(false)} />
+                    </div>
+                  )}
+                </div>
               )}
 
               {canRole && (

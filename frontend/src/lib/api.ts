@@ -121,6 +121,8 @@ export interface ReportView {
   team: TeamDay | null;
   /** why a shortfall fine can't be given now (no global actual yet, or the team met the plan) */
   fine_block: string | null;
+  /** a trainer's fine waiting for an owner */
+  fine_pending?: number | null;
 }
 
 export interface TeamDay {
@@ -167,9 +169,57 @@ export interface QueueItem {
   attempts: ReportAttempt[];
   team: TeamDay | null;
   fine_block: string | null;
+  fine_pending?: number | null;
 }
 
-export type ReportCounts = { review: number; no_show: number; actual_missing?: number };
+export type ReportCounts = {
+  review: number;
+  no_show: number;
+  actual_missing?: number;
+  fines_pending?: number;
+  fines_draft?: number;
+};
+
+export type TxType = "fine" | "bonus" | "deduction" | "payout_offset";
+export type TxStatus = "draft" | "pending_admin_approval" | "active" | "paid" | "offset" | "cancelled" | "rejected";
+
+export interface Tx {
+  id: number;
+  user_id: number;
+  type: TxType;
+  amount: number | null;
+  status: TxStatus;
+  reason: string;
+  source: "manual" | "final_cancel" | "report" | "no_show" | "payout";
+  shift_id: number | null;
+  event_date: string;
+  created_at: string;
+  created_by: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  decision_comment: string | null;
+  has_media: boolean;
+  /** journal rows carry the person */
+  name?: string;
+  username?: string | null;
+  telegram_id?: number;
+}
+
+export interface Balance {
+  fines: number;
+  bonuses: number;
+  deductions: number;
+  balance: number;
+  pending?: number;
+  drafts: number;
+}
+
+export interface MoneyPerson extends Balance {
+  user_id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+}
 
 export interface Point {
   id: number;
@@ -267,7 +317,7 @@ export interface Stats {
 
 export interface PenaltyRow {
   shift_id: number;
-  kind: "final_cancel" | "shortfall" | "no_show";
+  kind: "final_cancel" | "report" | "no_show" | "manual" | "payout";
   status: "fined" | "waived" | null;
   date: string;
   user_id: number;
@@ -375,8 +425,9 @@ export const api = {
     upload<ShiftResponse>(`/api/shifts/${id}/report?fact_volume=${fact_volume}&idempotency_key=${key}`, photo),
   myPenalties: () =>
     request<{
-      items: { id: number; kind: "final_cancel" | "shortfall" | "no_show"; shift_date: string; penalty_amount: number | null; reason: string }[];
+      items: { id: number; kind: string; shift_date: string; penalty_amount: number | null; reason: string }[];
     }>("/api/me/penalties"),
+  myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
     request<{ weeks: { start: string; end: string; shifts: Shift[] }[] }>(`/api/history?weeks_back=${weeksBack}`),
@@ -421,6 +472,24 @@ export const api = {
         `/api/admin/day-actuals/${day}`, { actual, idempotency_key: key }),
     annulDayFines: (day: string, shiftIds: number[] | null, key: string) =>
       post<{ annulled: number }>(`/api/admin/day-actuals/${day}/annul`, { shift_ids: shiftIds, idempotency_key: key }),
+    finances: (params: { userId?: number; status?: TxStatus; type?: TxType } = {}) => {
+      const q = new URLSearchParams();
+      if (params.userId) q.set("user_id", String(params.userId));
+      if (params.status) q.set("status", params.status);
+      if (params.type) q.set("type", params.type);
+      return request<{ items: Tx[]; balance: Balance | null }>(`/api/admin/finances?${q}`);
+    },
+    financeSummary: () => request<{ people: MoneyPerson[]; pending: Tx[]; drafts: Tx[] }>("/api/admin/finances/summary"),
+    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, amount: number, reason: string, key: string) =>
+      post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, amount, reason, idempotency_key: key }),
+    decideTx: (id: number, approve: boolean, comment: string | null, key: string) =>
+      post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/decide`, { approve, comment, idempotency_key: key }),
+    cancelTx: (id: number, reason: string, key: string) =>
+      post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/cancel`, { reason, idempotency_key: key }),
+    fillTx: (id: number, amount: number, key: string) =>
+      post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/amount`, { amount, idempotency_key: key }),
+    payAll: (user_id: number, key: string) =>
+      post<{ paid: number; total: number }>("/api/admin/finances/pay-all", { user_id, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
     review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),

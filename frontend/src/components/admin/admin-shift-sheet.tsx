@@ -209,6 +209,7 @@ export function AdminShiftSheet({
                         attempts: shift.report.last ? [shift.report.last] : [],
                         team: shift.report.team,
                         fine_block: shift.report.fine_block,
+                        fine_pending: shift.report.fine_pending,
                       }}
                       onDone={onChanged}
                     />

@@ -573,23 +573,18 @@ def report_fine_reason(s: dict) -> str:
         head = f"Не выполнена норма: план {s['volume']}, факт {s['fact_volume']} шт."
     else:
         head = "Отчёт отклонён"
-    return f"{head}. {s['report_note']}" if s.get("report_note") else head
+    return f"{head.rstrip('.')}. {s['report_note']}" if s.get("report_note") else head
 
 
 def user_penalties(conn, user_id: int) -> list[dict]:
+    """The employee's own fines (a trainer's fine is shown only once an owner approved it)."""
+    from . import finance
+
     out = []
-    for r in conn.execute(
-        """SELECT * FROM shifts WHERE user_id = ? AND (status = 'finally_cancelled' OR shortfall_status = 'fined')
-           ORDER BY shift_date DESC""",
-        (user_id,),
-    ):
-        s = dict(r)
-        if s["status"] == "finally_cancelled":
-            out.append({"id": s["id"], "kind": "final_cancel", "shift_date": s["shift_date"],
-                        "penalty_amount": s["penalty_amount"], "reason": "Окончательная отмена смены"})
-        if s["shortfall_status"] == "fined":
-            out.append({"id": s["id"], "kind": "shortfall", "shift_date": s["shift_date"],
-                        "penalty_amount": s["shortfall_penalty"], "reason": report_fine_reason(s)})
+    for tx in finance.journal(conn, user_id=user_id, types=("fine",),
+                              statuses=("draft", "active", "paid", "offset", "cancelled")):
+        out.append({"id": tx["shift_id"] or -tx["id"], "tx_id": tx["id"], "kind": tx["source"], "shift_date": tx["event_date"],
+                    "penalty_amount": tx["amount"], "reason": tx["reason"], "status": tx["status"]})
     return out
 
 
@@ -735,6 +730,9 @@ def final_cancel_shift(conn, user: dict, shift_id: int, key: str, today: date | 
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="SHIFT_FINAL_CANCELLED",
                   key=key, shift_id=shift_id, old=_snapshot(shift), new={"status": "finally_cancelled"},
                   description="Сотрудник подтвердил окончательную отмену и согласился со штрафом")
+        from . import finance
+
+        finance.final_cancel_draft(conn, get_shift(conn, shift_id), user["telegram_id"])  # waits for its amount
     return Result(get_shift(conn, shift_id), True, "SHIFT_FINAL_CANCELLED")
 
 
@@ -810,6 +808,9 @@ def set_penalty(conn, shift_id: int, amount: int, admin_tg: int, override: bool 
             "UPDATE shifts SET penalty_amount = ?, penalty_set_by = ?, penalty_set_at = ?, updated_at = ? WHERE id = ?",
             (amount, admin_tg, now_iso(), now_iso(), shift_id),
         )
+        from . import finance
+
+        finance.set_final_cancel_amount(conn, shift, amount, admin_tg)
         log_event(conn, user_id=shift["user_id"], actor_id=admin_tg, event_type="PENALTY_ASSIGNED", key=new_key(),
                   shift_id=shift_id, old={"penalty_amount": shift["penalty_amount"]},
                   new={"penalty_amount": amount})
@@ -848,6 +849,11 @@ def admin_edit_shift(conn, admin: dict, shift_id: int, changes: dict, key: str) 
             if shift["start_time"] is None:
                 raise ServiceError("У смены нет времени", 409, "bad_status")
             updates.update(status="active", admin_locked=0)
+            if shift["status"] == "finally_cancelled":
+                from . import finance
+
+                finance.cancel_linked(conn, shift_id, ("final_cancel",), admin["telegram_id"], "Смена восстановлена")
+                updates.update(penalty_amount=None)
         elif action not in (None, ""):
             raise ServiceError("Неизвестное действие", 422, "bad_action")
         penalty = changes.get("penalty_amount")
@@ -870,6 +876,10 @@ def admin_edit_shift(conn, admin: dict, shift_id: int, changes: dict, key: str) 
                if k in (*field_keys, "status", "penalty_amount", "fact_volume", "shortfall_status", "shortfall_penalty")}
         log_event(conn, user_id=shift["user_id"], actor_id=admin["telegram_id"], event_type="SHIFT_EDITED_BY_ADMIN",
                   key=key, shift_id=shift_id, old=_snapshot(shift), new=new, description=reason)
+        if updates.get("penalty_amount") is not None:
+            from . import finance
+
+            finance.set_final_cancel_amount(conn, get_shift(conn, shift_id), updates["penalty_amount"], admin["telegram_id"])
         if "penalty_amount" in updates:
             log_event(conn, user_id=shift["user_id"], actor_id=admin["telegram_id"], event_type="PENALTY_ASSIGNED",
                       key=new_key(), shift_id=shift_id, old={"penalty_amount": shift["penalty_amount"]},
@@ -970,7 +980,6 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
                 fact_missing += 1
         elif s["status"] in ("cancelled", "finally_cancelled") and s["volume"]:
             cancelled_volume += s["volume"]
-        penalties += (s["penalty_amount"] or 0) + (s["shortfall_penalty"] or 0)
         short = shortfall(s)
         if short:
             short_shifts += 1
@@ -999,6 +1008,9 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
                 "notes": ", ".join(notes),
             }
         )
+    from . import finance
+
+    penalties = finance.fines_total(conn, user_id, date_from, date_to)
     return {
         "user": {"id": user["id"], "name": full_name(user), "username": user["username"]},
         "from": date_from.isoformat(),
@@ -1022,38 +1034,15 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
 
 
 def penalty_log(conn, user_id: int | None, date_from: date | None, date_to: date | None) -> list[dict]:
-    """Fines for final cancellations and for missed plans, plus shortfalls still waiting for a decision."""
-    sql = f"""SELECT s.*, u.first_name, u.last_name, u.username FROM shifts s JOIN users u ON u.id = s.user_id
-              WHERE (s.status = 'finally_cancelled'
-                     OR (s.status IN {ACTIVE} AND (s.shortfall_status IS NOT NULL
-                                                   OR s.report_state IN ('pending_review','no_show'))))"""
-    params: list = []
-    if user_id:
-        sql += " AND s.user_id = ?"
-        params.append(user_id)
-    if date_from:
-        sql += " AND s.shift_date >= ?"
-        params.append(date_from.isoformat())
-    if date_to:
-        sql += " AND s.shift_date <= ?"
-        params.append(date_to.isoformat())
-    sql += " ORDER BY s.shift_date DESC"
-    admins = {r["telegram_id"]: full_name(dict(r)) for r in conn.execute("SELECT telegram_id, first_name, last_name FROM users")}
+    """Fines from the money ledger (every status), newest first."""
+    from . import finance
+
     out = []
-    for r in conn.execute(sql, params):
-        s = dict(r)
-        base = {"shift_id": s["id"], "date": s["shift_date"], "user_id": s["user_id"], "name": full_name(s),
-                "username": s["username"]}
-        if s["status"] == "finally_cancelled":
-            out.append({**base, "kind": "final_cancel", "reason": "Окончательная отмена смены",
-                        "amount": s["penalty_amount"], "status": "fined" if s["penalty_amount"] is not None else None,
-                        "set_by": admins.get(s["penalty_set_by"]) if s["penalty_set_by"] else None, "set_at": s["penalty_set_at"]})
-        elif s["shortfall_status"] != "waived" and (s["shortfall_status"] or s["report_state"] == "no_show" or shortfall(s)):
-            out.append({**base, "kind": "no_show" if s["report_state"] == "no_show" else "shortfall",
-                        "reason": report_fine_reason(s),
-                        "amount": s["shortfall_penalty"], "status": s["shortfall_status"],
-                        "set_by": admins.get(s["shortfall_decided_by"]) if s["shortfall_decided_by"] else None,
-                        "set_at": s["shortfall_decided_at"]})
+    for tx in finance.journal(conn, user_id=user_id, types=("fine",), date_from=date_from, date_to=date_to):
+        out.append({"shift_id": tx["shift_id"], "tx_id": tx["id"], "kind": tx["source"], "date": tx["event_date"],
+                    "user_id": tx["user_id"], "name": tx["name"], "username": tx["username"], "reason": tx["reason"],
+                    "amount": tx["amount"], "status": tx["status"], "set_by": tx["decided_by"] or tx["created_by"],
+                    "set_at": tx["decided_at"] or tx["created_at"]})
     return out
 
 

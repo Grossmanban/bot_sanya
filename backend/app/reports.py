@@ -18,7 +18,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from . import day_actual, media
+from . import day_actual, finance, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -111,12 +111,20 @@ def view(conn: sqlite3.Connection, shift: dict, now: datetime | None = None) -> 
         "can_submit": can_submit(shift, now),
         "started": shift_start(shift) <= now,
         "note": shift.get("report_note"),
-        "fine": shift.get("shortfall_penalty") if shift.get("shortfall_status") == "fined" else None,
+        **_fine_view(conn, shift),
         "decided": shift.get("shortfall_status"),
         "last": public_report(latest(conn, shift["id"])),
         "team": day_actual.team_view(conn, shift["shift_date"]),
         "fine_block": day_actual.shortfall_fine_block(conn, shift),
     }
+
+
+def _fine_view(conn, shift: dict) -> dict:
+    """fine — counted in the balance; fine_pending — a trainer's fine waiting for an owner."""
+    txs = finance.linked(conn, shift["id"], ("report", "no_show"))
+    active = next((t["amount"] for t in txs if t["status"] in ("active", "paid", "offset")), None)
+    pending = next((t["amount"] for t in txs if t["status"] == "pending_admin_approval"), None)
+    return {"fine": active, "fine_pending": pending}
 
 
 def _queue_row(conn, s: dict) -> dict:
@@ -134,7 +142,7 @@ def _queue_row(conn, s: dict) -> dict:
         "fact_volume": s["fact_volume"],
         "state": s["report_state"],
         "decided": s["shortfall_status"],
-        "fine": s["shortfall_penalty"],
+        **_fine_view(conn, s),
         "note": s["report_note"],
         "deadline": deadline(s).isoformat(timespec="minutes"),
         "attempts": [public_report(r) for r in attempts(conn, s["id"])],
@@ -294,7 +302,8 @@ def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, ke
         if _seen(conn, key):
             shift = svc.get_shift(conn, shift_id)
             return ReportResult(shift, latest(conn, shift_id), False)
-        actor, shift = _staff_shift(conn, actor, shift_id, "fine_direct" if action == "fine" else "review")
+        actor, shift = _staff_shift(conn, actor, shift_id, "review")
+        fine_status = finance.fine_status(actor, svc.get_user(conn, shift["user_id"])) if action == "fine" else None
         report = latest(conn, shift_id)
         if report is None or shift["report_state"] not in REVIEWABLE:
             raise ServiceError("Нет отчёта для проверки", 409, "no_report")
@@ -319,6 +328,11 @@ def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, ke
             (state, comment, decided, amount if action == "fine" else None,
              actor["telegram_id"] if decided else None, now_iso() if decided else None, now_iso(), shift_id),
         )
+        if action == "fine":
+            finance.link_fine(conn, svc.get_shift(conn, shift_id), "report", amount,
+                              svc.report_fine_reason(svc.get_shift(conn, shift_id)), actor["telegram_id"], fine_status)
+        else:
+            finance.cancel_linked(conn, shift_id, ("report",), actor["telegram_id"], "Отчёт принят")
         event = {"approve": "REPORT_APPROVED", "return": "REPORT_RETURNED", "fine": "REPORT_FINED"}[action]
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, old={"report_state": shift["report_state"]},
@@ -338,7 +352,8 @@ def resolve_no_show(conn: sqlite3.Connection, actor: dict, shift_id: int, action
     with transaction(conn):
         if _seen(conn, key):
             return ReportResult(svc.get_shift(conn, shift_id), None, False)
-        actor, shift = _staff_shift(conn, actor, shift_id, "fine_direct" if action == "fine" else "review")
+        actor, shift = _staff_shift(conn, actor, shift_id, "review")
+        fine_status = finance.fine_status(actor, svc.get_user(conn, shift["user_id"])) if action == "fine" else None
         if shift["report_state"] != "no_show":
             raise ServiceError("Смена не отмечена как неявка", 409, "not_no_show")
         if shift["shortfall_status"]:
@@ -349,6 +364,9 @@ def resolve_no_show(conn: sqlite3.Connection, actor: dict, shift_id: int, action
             ("fined" if action == "fine" else "waived", amount if action == "fine" else None, actor["telegram_id"],
              now_iso(), comment, now_iso(), shift_id),
         )
+        if action == "fine":
+            finance.link_fine(conn, svc.get_shift(conn, shift_id), "no_show", amount,
+                              svc.report_fine_reason(svc.get_shift(conn, shift_id)), actor["telegram_id"], fine_status)
         event = "NO_SHOW_FINED" if action == "fine" else "NO_SHOW_EXCUSED"
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, new={"penalty": amount if action == "fine" else None}, description=comment)
@@ -389,6 +407,7 @@ def manual_result(conn: sqlite3.Connection, actor: dict, shift_id: int, value: i
             (value, now_iso(), actor["telegram_id"], comment, "waived" if under else None,
              actor["telegram_id"] if under else None, now_iso() if under else None, now_iso(), shift_id),
         )
+        finance.cancel_linked(conn, shift_id, ("report", "no_show"), actor["telegram_id"], "Результат внесён вручную")
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type="REPORT_MANUAL", key=key,
                   shift_id=shift_id, old={"fact_volume": shift["fact_volume"], "report_state": shift["report_state"]},
                   new={"fact_volume": value, "report_id": cur.lastrowid}, description=comment)

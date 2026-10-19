@@ -266,3 +266,33 @@ def test_day_actual_endpoints(client, conn):
     assert r.status_code == 200 and r.json()["met"] is True
     items = client.get("/api/admin/day-actuals", headers=owner).json()["items"]
     assert items[0]["actual"] == 25 and items[0]["log"][0]["new_value"] == 25
+
+
+def test_finance_endpoints(client, conn):
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    ids = {}
+    for tg, name, role in ((90, "Тренер", "trainer"), (91, "Иван", "employee")):
+        u, _ = svc.create_registration(conn, tg, None, name, "Тест")
+        svc.decide_registration(conn, u["id"], True, 999)
+        conn.execute("UPDATE users SET role = ?, network_id = 1 WHERE id = ?", (role, u["id"]))
+        ids[name] = u["id"]
+    th, eh = headers(90, "Тренер", "Тест"), headers(91, "Иван", "Тест")
+    body = {"user_id": ids["Иван"], "type": "fine", "amount": 400, "reason": "Опоздание", "idempotency_key": key()}
+    r = client.post("/api/admin/finances", json=body, headers=th)
+    assert r.status_code == 200 and r.json()["tx"]["status"] == "pending_admin_approval"
+    tx_id = r.json()["tx"]["id"]
+    assert client.get("/api/me/finances", headers=eh).json()["items"] == []  # the employee doesn't see requests
+    assert client.post(f"/api/admin/finances/{tx_id}/decide", json={"approve": True, "idempotency_key": key()},
+                       headers=th).status_code == 403
+    summary = client.get("/api/admin/finances/summary", headers=owner).json()
+    assert summary["pending"][0]["id"] == tx_id
+    assert client.get("/api/admin/reports/counts", headers=owner).json()["fines_pending"] == 1
+    r = client.post(f"/api/admin/finances/{tx_id}/decide", json={"approve": True, "idempotency_key": key()}, headers=owner)
+    assert r.json()["tx"]["status"] == "active"
+    mine = client.get("/api/me/finances", headers=eh).json()
+    assert mine["balance"]["balance"] == -400 and mine["items"][0]["amount"] == 400
+    r = client.post("/api/admin/finances/pay-all", json={"user_id": ids["Иван"], "idempotency_key": key()}, headers=th)
+    assert r.status_code == 403
+    r = client.post("/api/admin/finances/pay-all", json={"user_id": ids["Иван"], "idempotency_key": key()}, headers=owner)
+    assert r.json() == {"paid": 1, "total": 400}

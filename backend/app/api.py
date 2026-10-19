@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, reports
+from . import day_actual, finance, reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -67,6 +67,36 @@ class AccessBody(BaseModel):
 class StateBody(BaseModel):
     state: str
     reason: str | None = None
+    idempotency_key: str
+
+
+class TxBody(BaseModel):
+    user_id: int
+    type: str
+    amount: int
+    reason: str
+    event_date: str | None = None
+    idempotency_key: str
+
+
+class TxDecision(BaseModel):
+    approve: bool
+    comment: str | None = None
+    idempotency_key: str
+
+
+class TxCancel(BaseModel):
+    reason: str
+    idempotency_key: str
+
+
+class TxAmount(BaseModel):
+    amount: int
+    idempotency_key: str
+
+
+class PayAll(BaseModel):
+    user_id: int
     idempotency_key: str
 
 
@@ -266,6 +296,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.get("/me/penalties")
     async def my_penalties(user: dict = Depends(current_user)):
         return {"items": svc.user_penalties(conn, user["id"])}
+
+    @api.get("/me/finances")
+    async def my_finances(user: dict = Depends(current_user)):
+        # a trainer's fine is invisible to the employee until an owner approves it (ТЗ 5.3)
+        items = finance.journal(conn, user_id=user["id"],
+                                statuses=("draft", "active", "paid", "offset", "cancelled"), limit=200)
+        return {"balance": {k: v for k, v in finance.balance(conn, user["id"]).items() if k != "pending"}, "items": items}
 
     # ------------------------------------------------------------ schedule
 
@@ -526,7 +563,74 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_report_counts(admin: dict = Depends(admin_user)):
         out = reports.counts(conn, visible_ids(admin)) if perms.can(admin, "review") else {"review": 0, "no_show": 0}
         out["actual_missing"] = len(day_actual.missing_days(conn)) if perms.can(admin, "global_actual") else 0
+        only = visible_ids(admin)
+        out["fines_pending"] = (len(finance.journal(conn, only=only, statuses=("pending_admin_approval",)))
+                                if perms.can(admin, "approve_fines") else 0)
+        out["fines_draft"] = len(finance.journal(conn, only=only, statuses=("draft",))) if perms.can(admin, "fine_direct") else 0
         return out
+
+    # ------------------------------------------------------------ money (ТЗ модуль 4)
+
+    @api.get("/admin/finances")
+    async def admin_finances(user_id: int | None = None, status: str | None = None, type: str | None = None,
+                             date_from: str | None = Query(None, alias="from"), date_to: str | None = Query(None, alias="to"),
+                             admin: dict = Depends(staff("review"))):
+        if user_id is not None:
+            require(admin, "review", user_id)
+        items = finance.journal(
+            conn, user_id=user_id, only=visible_ids(admin), types=(type,) if type else None,
+            statuses=(status,) if status else None,
+            date_from=svc.parse_date(date_from) if date_from else None, date_to=svc.parse_date(date_to) if date_to else None,
+        )
+        balance = finance.balance(conn, user_id) if user_id is not None else None
+        return {"items": items, "balance": balance}
+
+    @api.get("/admin/finances/summary")
+    async def admin_finance_summary(admin: dict = Depends(staff("review"))):
+        only = visible_ids(admin)
+        pending = finance.journal(conn, only=only, statuses=("pending_admin_approval",)) if perms.can(admin, "approve_fines") else []
+        drafts = finance.journal(conn, only=only, statuses=("draft",))
+        return {"people": finance.summary(conn, only), "pending": pending, "drafts": drafts}
+
+    @api.post("/admin/finances")
+    async def admin_tx_create(body: TxBody, admin: dict = Depends(admin_user)):
+        require(admin, "review", body.user_id)
+        result = finance.create(conn, admin, body.user_id, body.type, body.amount, body.reason, body.idempotency_key,
+                                svc.parse_date(body.event_date) if body.event_date else None)
+        if result.changed:
+            notifier.spawn(notifier.tx_created(result.tx, admin))
+        return {"tx": finance.public(result.tx), "changed": result.changed}
+
+    @api.post("/admin/finances/{tx_id}/decide")
+    async def admin_tx_decide(tx_id: int, body: TxDecision, owner: dict = Depends(staff("approve_fines"))):
+        result = finance.decide(conn, owner, tx_id, body.approve, body.comment, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.tx_decided(result.tx, owner))
+        return {"tx": finance.public(result.tx), "changed": result.changed}
+
+    @api.post("/admin/finances/{tx_id}/cancel")
+    async def admin_tx_cancel(tx_id: int, body: TxCancel, admin: dict = Depends(admin_user)):
+        before = finance.get(conn, tx_id)
+        result = finance.cancel(conn, admin, tx_id, body.reason, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.tx_cancelled(result.tx, admin, before["status"]))
+        return {"tx": finance.public(result.tx), "changed": result.changed}
+
+    @api.post("/admin/finances/{tx_id}/amount")
+    async def admin_tx_amount(tx_id: int, body: TxAmount, admin: dict = Depends(admin_user)):
+        result = finance.fill_draft(conn, admin, tx_id, body.amount, body.idempotency_key)
+        if result.changed and result.tx["shift_id"]:
+            notifier.spawn(notifier.penalty_assigned(svc.get_shift(conn, result.tx["shift_id"]), svc.full_name(admin)))
+        elif result.changed:
+            notifier.spawn(notifier.tx_created(result.tx, admin))
+        return {"tx": finance.public(result.tx), "changed": result.changed}
+
+    @api.post("/admin/finances/pay-all")
+    async def admin_pay_all(body: PayAll, owner: dict = Depends(staff("money"))):
+        rows = finance.pay_all(conn, owner, body.user_id, body.idempotency_key)
+        if rows:
+            notifier.spawn(notifier.fines_paid(body.user_id, rows, owner))
+        return {"paid": len(rows), "total": sum(r["amount"] for r in rows)}
 
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5, owners)
 

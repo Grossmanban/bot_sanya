@@ -154,7 +154,7 @@ def test_report_review_return_and_fine(conn, make_user):
     assert [r["status"] for r in reports.attempts(conn, s["id"])] == ["rejected_retry", "rejected_penalty"]
 
     penalties = svc.user_penalties(conn, u["id"])
-    assert penalties[0]["kind"] == "shortfall" and penalties[0]["penalty_amount"] == 700
+    assert penalties[0]["kind"] == "report" and penalties[0]["penalty_amount"] == 700
     assert "Не выполнена норма" in penalties[0]["reason"]
     st = svc.stats(conn, u["id"], TODAY, THU)
     assert st["totals"]["penalties"] == 700 and st["totals"]["shortfall_volume"] == 6
@@ -174,9 +174,6 @@ def test_report_permissions(conn, make_user):
     s = shift(conn, u, payload={**P, "volume": 20})
     report(conn, u, s, 10)
     assert trainer["telegram_id"] in reports.reviewers(conn, u)
-    with pytest.raises(svc.ServiceError) as e:  # trainers can't fine directly
-        reports.review(conn, trainer, s["id"], "fine", svc.new_key(), amount=500, comment="x")
-    assert e.value.status == 403
     ok = reports.review(conn, trainer, s["id"], "approve", svc.new_key())
     assert ok.shift["report_state"] == "approved" and ok.shift["shortfall_status"] == "waived"
 
@@ -224,7 +221,8 @@ def test_no_show_reminder_and_resolution(conn, make_user):
     # path B: staff enter the result themselves — the fine is cleared, the shift approved
     fixed = reports.manual_result(conn, owner, s["id"], 25, svc.new_key(), comment="Был на точке, скрин в чате")
     assert fixed.shift["report_state"] == "approved" and fixed.shift["shortfall_status"] is None
-    assert fixed.report["source"] == "admin" and svc.user_penalties(conn, u["id"]) == []
+    assert fixed.report["source"] == "admin"
+    assert [p["status"] for p in svc.user_penalties(conn, u["id"])] == ["cancelled"]  # annulled, kept as history
 
 
 def test_old_shifts_never_become_no_shows(conn, make_user):
@@ -319,7 +317,7 @@ def test_excel_export_contents(conn, make_user):
     s = shift(conn, u)
     report(conn, u, s, 20)
     wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
-    assert wb.sheetnames == ["Итоги", "Смены", "Штрафы"]
+    assert wb.sheetnames == ["Итоги", "Смены", "Штрафы и бонусы"]
     totals = list(wb["Итоги"].iter_rows(values_only=True))
     assert totals[1][0] == "Иван Петров" and totals[1][3] == 25 and totals[1][4] == 20
     assert totals[-1][0] == "Итого"
@@ -479,7 +477,7 @@ def test_global_actual_recalculation(conn, make_user):
     done = day_actual.annul_fines(conn, owner, THU, None, svc.new_key())
     assert [s["id"] for s in done] == [sb["id"]] and done[0]["annulled_amount"] == 500
     assert svc.get_shift(conn, sb["id"])["shortfall_penalty"] is None
-    assert svc.user_penalties(conn, b["id"]) == []
+    assert [p["status"] for p in svc.user_penalties(conn, b["id"])] == ["cancelled"]
     run(n.fines_annulled(done, owner))
     assert any("аннулирован" in t for chat, t in n.sent if chat == b["telegram_id"])
 
@@ -540,3 +538,134 @@ def test_migration_keeps_reports_when_adding_team_status(tmp_path):
     assert old.execute("PRAGMA user_version").fetchone()[0] == len(saved)
     assert old.execute("SELECT status, photo_file_id FROM reports").fetchone()[:] == ("pending_review", "f")
     old.execute("UPDATE reports SET status = 'approved_team'")  # the new status is accepted
+
+
+# ---------------------------------------------------------------- money (ТЗ модуль 4)
+
+
+def _staff(conn, make_user, role, first, network=None):
+    u = make_user(first=first)
+    conn.execute("UPDATE users SET role = ?, network_id = ? WHERE id = ?", (role, network, u["id"]))
+    return svc.get_user(conn, u["id"])
+
+
+def test_final_cancel_creates_a_draft_fine(conn, make_user):
+    from app import finance
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    u = make_user()
+    s = shift(conn, u)
+    svc.cancel_shift(conn, u, s["id"], svc.new_key(), today=TODAY)
+    svc.restore_shift(conn, u, s["id"], dict(P), svc.new_key(), today=TODAY)
+    svc.final_cancel_shift(conn, u, s["id"], svc.new_key(), today=TODAY)
+    [draft] = finance.linked(conn, s["id"], ("final_cancel",))
+    assert draft["status"] == "draft" and draft["amount"] is None
+    assert finance.balance(conn, u["id"])["drafts"] == 1 and finance.balance(conn, u["id"])["balance"] == 0
+    svc.set_penalty(conn, s["id"], 1000, 999)  # the bot's preset button
+    [fine] = finance.linked(conn, s["id"], ("final_cancel",))
+    assert fine["status"] == "active" and fine["amount"] == 1000
+    assert finance.balance(conn, u["id"])["balance"] == -1000
+    # restoring the shift annuls the fine
+    svc.admin_edit_shift(conn, owner, s["id"], {"action": "force_restore", "reason": "ошибка"}, svc.new_key())
+    assert finance.linked(conn, s["id"], ("final_cancel",)) == [] and finance.balance(conn, u["id"])["balance"] == 0
+
+
+def test_trainer_fine_needs_owner_approval_and_balance(conn, make_user):
+    from app import finance
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = _staff(conn, make_user, "trainer", "Тренер", network=1)
+    admin = _staff(conn, make_user, "admin", "Админ")
+    u = make_user(first="Иван")
+    conn.execute("UPDATE users SET network_id = 1 WHERE id = ?", (u["id"],))
+    stranger = make_user(first="Чужой")
+
+    req = finance.create(conn, trainer, u["id"], "fine", 500, "Опоздал", svc.new_key())
+    assert req.tx["status"] == "pending_admin_approval" and finance.balance(conn, u["id"])["balance"] == 0
+    with pytest.raises(svc.ServiceError):  # not their network
+        finance.create(conn, trainer, stranger["id"], "fine", 500, "x", svc.new_key())
+    with pytest.raises(svc.ServiceError) as e:  # only owners decide
+        finance.decide(conn, admin, req.tx["id"], True, None, svc.new_key())
+    assert e.value.status == 403
+    ok = finance.decide(conn, owner, req.tx["id"], True, None, svc.new_key())
+    assert ok.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -500
+
+    bonus = finance.create(conn, trainer, u["id"], "bonus", 300, "Лучший день", svc.new_key())
+    assert bonus.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -200
+    with pytest.raises(svc.ServiceError) as e:
+        finance.create(conn, admin, u["id"], "deduction", 100, "Форма", svc.new_key())
+    assert e.value.code == "owner_only"
+    finance.create(conn, owner, u["id"], "deduction", 100, "Форма", svc.new_key())
+    assert finance.balance(conn, u["id"]) | {} == {"fines": 500, "bonuses": 300, "deductions": 100, "balance": -300,
+                                                     "pending": 0, "drafts": 0}
+
+    declined = finance.create(conn, trainer, u["id"], "fine", 700, "Спорно", svc.new_key())
+    finance.decide(conn, owner, declined.tx["id"], False, "Нет доказательств", svc.new_key())
+    assert finance.get(conn, declined.tx["id"])["status"] == "rejected"
+
+    with pytest.raises(svc.ServiceError) as e:  # a reason is required to annul
+        finance.cancel(conn, admin, bonus.tx["id"], " ", svc.new_key())
+    assert e.value.code == "reason_required"
+    finance.cancel(conn, admin, bonus.tx["id"], "Ошибка", svc.new_key())
+    with pytest.raises(svc.ServiceError) as e:
+        finance.pay_all(conn, admin, u["id"], svc.new_key())
+    assert e.value.status == 403
+    paid = finance.pay_all(conn, owner, u["id"], svc.new_key())
+    assert [p["amount"] for p in paid] == [500]
+    assert finance.balance(conn, u["id"])["fines"] == 0 and finance.balance(conn, u["id"])["deductions"] == 100
+
+    people = finance.summary(conn, only={u["id"]})
+    assert people[0]["balance"] == -100
+    n = FakeNotifier(conn)
+    run(n.tx_created(req.tx, trainer))
+    assert any("Заявка на штраф" in t for chat, t in n.sent if chat == 999)
+
+
+def test_trainer_report_fine_waits_and_reject_clears_it(conn, make_user):
+    from app import finance
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = _staff(conn, make_user, "trainer", "Тренер", network=1)
+    u = make_user(first="Иван")
+    conn.execute("UPDATE users SET network_id = 1 WHERE id = ?", (u["id"],))
+    u = svc.get_user(conn, u["id"])
+    s = shift(conn, u, payload={**P, "volume": 20})
+    report(conn, u, s, 10)
+    day_actual.set_actual(conn, owner, THU, 5, svc.new_key(), today=THU)
+    res = reports.review(conn, trainer, s["id"], "fine", svc.new_key(), amount=500, comment="Не выполнена норма")
+    [tx] = finance.linked(conn, s["id"], ("report",))
+    assert tx["status"] == "pending_admin_approval" and finance.balance(conn, u["id"])["balance"] == 0
+    view = reports.view(conn, res.shift)
+    assert view["fine"] is None and view["fine_pending"] == 500
+    finance.decide(conn, owner, tx["id"], False, None, svc.new_key())
+    shift_now = svc.get_shift(conn, s["id"])
+    assert shift_now["shortfall_status"] == "waived" and shift_now["shortfall_penalty"] is None
+
+
+def test_migration_moves_fines_into_the_ledger(tmp_path):
+    import sqlite3
+
+    from app import db
+
+    old = sqlite3.connect(tmp_path / "old.db", isolation_level=None)
+    old.row_factory = sqlite3.Row
+    old.executescript(db.SCHEMA)
+    saved = db.MIGRATIONS[:]
+    try:
+        db.MIGRATIONS[:] = saved[:7]
+        db.migrate(old)
+        old.execute("INSERT INTO users (telegram_id, first_name, last_name, status, created_at) VALUES (1,'a','b','approved','x')")
+        ins = ("INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, created_at, updated_at,"
+               " penalty_amount, fact_volume, shortfall_status, shortfall_penalty, report_state) VALUES (1,?,'10:00','12:00',20,"
+               "'x',?,'t','t',?,?,?,?,?)")
+        old.execute(ins, ("2026-10-01", "finally_cancelled", 1000, None, None, None, None))
+        old.execute(ins, ("2026-10-02", "finally_cancelled", None, None, None, None, None))
+        old.execute(ins, ("2026-10-03", "active", None, 10, "fined", 700, "rejected"))
+        old.execute(ins, ("2026-10-04", "active", None, None, "fined", 300, "no_show"))
+        db.MIGRATIONS[:] = saved
+        db.migrate(old)
+    finally:
+        db.MIGRATIONS[:] = saved
+    rows = [tuple(r) for r in old.execute("SELECT source, status, amount FROM financial_transactions ORDER BY shift_id")]
+    assert rows == [("final_cancel", "active", 1000), ("final_cancel", "draft", None), ("report", "active", 700),
+                    ("no_show", "active", 300)]

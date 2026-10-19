@@ -19,7 +19,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import app_settings, day_actual, media
+from . import app_settings, day_actual, finance, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -205,6 +205,13 @@ def review_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarku
         rows.append([InlineKeyboardButton(text=f"⚠️ {a} ₽", callback_data=f"rv:f:{shift_id}:{a}") for a in PENALTY_PRESETS])
         rows.append([InlineKeyboardButton(text="⚠️ Штраф — своя сумма", callback_data=f"rv:f:{shift_id}:c")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def fine_decision_keyboard(tx_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Одобрить", callback_data=f"fx:a:{tx_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"fx:r:{tx_id}"),
+    ]])
 
 
 def no_show_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarkup:
@@ -521,7 +528,8 @@ class Notifier:
             caption += f"\n\nℹ️ {block}."
         for chat in reports.reviewers(self.conn, user):
             reviewer = svc.get_user_by_tg(self.conn, chat)
-            fine = reviewer is not None and perms.can(reviewer, "fine_direct", user) or chat in settings.admin_ids
+            fine = chat in settings.admin_ids or reviewer is not None and (
+                perms.can(reviewer, "fine_direct", user) or perms.can(reviewer, "fine_request", user))
             await self._photo_or_text(chat, report["photo_file_id"], caption,
                                       review_keyboard(shift["id"], fine and not block))
 
@@ -540,8 +548,15 @@ class Notifier:
                             "Сдайте отчёт заново — в приложении или кнопкой ниже.", report_keyboard(shift))
             tags, line = ["отчёт", "исправление"], "🔄 ТРЕБУЕТСЯ ИСПРАВЛЕНИЕ"
         else:
-            await self.send(user["telegram_id"], f"❌ Отчёт отклонён, штраф {report['penalty_amount']} ₽: {place}{note}")
-            tags, line = ["отчёт", "штраф"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {report['penalty_amount']} ₽"
+            pending = next((t for t in finance.linked(self.conn, shift["id"], ("report",))
+                            if t["status"] == "pending_admin_approval"), None)
+            if pending:
+                await self.send(user["telegram_id"], f"❌ Отчёт отклонён: {place}{note}")
+                tags, line = ["отчёт", "штраф", "согласование"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {report['penalty_amount']} ₽ НА СОГЛАСОВАНИИ"
+                await self.fine_requested(pending, actor)
+            else:
+                await self.send(user["telegram_id"], f"❌ Отчёт отклонён, штраф {report['penalty_amount']} ₽: {place}{note}")
+                tags, line = ["отчёт", "штраф"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {report['penalty_amount']} ₽"
         await self._archive_report(tags, f"{line} — {who(user)}\n{place}\n{plan_fact}{note}\nПроверил: {who(actor)}",
                                    user, report)
         for chat in reports.reviewers(self.conn, user):
@@ -559,7 +574,8 @@ class Notifier:
         await self.archive(["неявка"], f"🚫 НЕЯВКА — {who(user)}\n{place}, план {shift['volume']} шт.", user)
         for chat in reports.reviewers(self.conn, user):
             reviewer = svc.get_user_by_tg(self.conn, chat)
-            fine = reviewer is not None and perms.can(reviewer, "fine_direct", user) or chat in settings.admin_ids
+            fine = chat in settings.admin_ids or reviewer is not None and (
+                perms.can(reviewer, "fine_direct", user) or perms.can(reviewer, "fine_request", user))
             await self.send(chat, f"🚫 <b>Неявка</b>: нет отчёта\n{who(user)}\n{place}, план {shift['volume']} шт.\n\n"
                             "Назначьте штраф, отпустите без штрафа или внесите результат за сотрудника.",
                             no_show_keyboard(shift["id"], fine))
@@ -568,7 +584,12 @@ class Notifier:
         user = svc.get_user(self.conn, shift["user_id"])
         place = shift_place(shift)
         note = f"\nПричина: {escape(shift['report_note'])}" if shift["report_note"] else ""
-        if shift["shortfall_status"] == "fined":
+        pending = next((t for t in finance.linked(self.conn, shift["id"], ("no_show",))
+                        if t["status"] == "pending_admin_approval"), None)
+        if pending:
+            tags, line = ["неявка", "штраф", "согласование"], f"💸 НЕЯВКА | ШТРАФ {pending['amount']} ₽ НА СОГЛАСОВАНИИ"
+            await self.fine_requested(pending, actor)
+        elif shift["shortfall_status"] == "fined":
             await self.send(user["telegram_id"], f"💸 Штраф {shift['shortfall_penalty']} ₽ за неявку: {place}{note}")
             tags, line = ["неявка", "штраф"], f"💸 НЕЯВКА | ШТРАФ {shift['shortfall_penalty']} ₽"
         else:
@@ -584,6 +605,69 @@ class Notifier:
         await self.send(user["telegram_id"], f"✍️ Администратор внёс результат: {place}\n{text}{note}")
         await self._archive_report(["отчёт", "ручной"], f"✍️ РЕЗУЛЬТАТ ВНЕСЁН ВРУЧНУЮ — {who(user)}\n{place}\n{text}{note}\n"
                                    f"Внёс: {who(actor)}", user, report)
+
+    # ------------------------------------------------------------ money (ТЗ модуль 4)
+
+    async def fine_requested(self, tx: dict, trainer: dict) -> None:
+        """A trainer's fine: owners decide, the balance doesn't change until then (ТЗ 5.3)."""
+        user = svc.get_user(self.conn, tx["user_id"])
+        text = (f"🧾 <b>Заявка на штраф</b> от тренера {who(trainer)}\n{who(user)}: <b>{tx['amount']} ₽</b>\n"
+                f"Причина: {escape(tx['reason'])}")
+        for chat in svc.owner_telegram_ids():
+            await self._photo_or_text(chat, tx["media_file_id"], text, fine_decision_keyboard(tx["id"]))
+
+    async def tx_created(self, tx: dict, actor: dict) -> None:
+        user = svc.get_user(self.conn, tx["user_id"])
+        amount, reason = tx["amount"], escape(tx["reason"])
+        if tx["status"] == "pending_admin_approval":
+            await self.archive(["штраф", "согласование"], f"🧾 ЗАЯВКА НА ШТРАФ {amount} ₽ — {who(user)}\n"
+                               f"Причина: {reason}\nТренер: {who(actor)}", user, tx["media_file_id"])
+            await self.fine_requested(tx, actor)
+            return
+        if tx["type"] == "fine":
+            await self.send(user["telegram_id"], f"💸 Вам начислен штраф {amount} ₽.\nПричина: {reason}")
+            tags, line = ["штраф"], f"💸 ШТРАФ {amount} ₽"
+        elif tx["type"] == "bonus":
+            await self.send(user["telegram_id"], f"🎁 Вам начислен бонус {amount} ₽.\nЗа что: {reason}")
+            tags, line = ["бонус"], f"🎁 БОНУС {amount} ₽"
+        else:
+            await self.send(user["telegram_id"], f"➖ Вычет {amount} ₽ из выплаты.\nПричина: {reason}")
+            tags, line = ["вычет"], f"➖ ВЫЧЕТ {amount} ₽"
+        role = perms.ROLE_TITLES[perms.role_of(actor)].lower()
+        await self.archive(tags, f"{line} — {who(user)}\nПричина: {reason}\nНачислил: {who(actor)} ({role})",
+                           user, tx["media_file_id"])
+
+    async def tx_decided(self, tx: dict, actor: dict) -> None:
+        user = svc.get_user(self.conn, tx["user_id"])
+        trainer = svc.get_user_by_tg(self.conn, tx["created_by"])
+        comment = f"\nКомментарий: {escape(tx['decision_comment'])}" if tx["decision_comment"] else ""
+        if tx["status"] == "active":
+            await self.send(user["telegram_id"], f"💸 Вам начислен штраф {tx['amount']} ₽.\nПричина: {escape(tx['reason'])}")
+            verdict, tags = "✅ ОДОБРЕН", ["штраф"]
+        else:
+            verdict, tags = "❌ ОТКЛОНЁН", ["штраф", "отклонён"]  # the employee is not told (ТЗ 5.3)
+        if trainer:
+            await self.send(trainer["telegram_id"], f"Заявка на штраф {tx['amount']} ₽ ({who(user)}): "
+                            f"{'одобрена' if tx['status'] == 'active' else 'отклонена'}.{comment}")
+        await self.archive(tags, f"{verdict} ШТРАФ {tx['amount']} ₽ — {who(user)}\nПричина: {escape(tx['reason'])}"
+                           f"{comment}\nРешил: {who(actor)}", user)
+
+    async def tx_cancelled(self, tx: dict, actor: dict, was: str) -> None:
+        user = svc.get_user(self.conn, tx["user_id"])
+        title = finance.TYPE_TITLES[tx["type"]]
+        amount = f" {tx['amount']} ₽" if tx["amount"] else ""
+        if was != "pending_admin_approval":
+            await self.send(user["telegram_id"], f"↩️ {title}{amount} аннулирован.\nПричина: {escape(tx['decision_comment'] or '')}")
+        await self.archive(["аннулирование", {"fine": "штраф", "bonus": "бонус"}.get(tx["type"], "вычет")],
+                           f"↩️ АННУЛИРОВАН {title.upper()}{amount} — {who(user)}\nБыло: {escape(tx['reason'])}\n"
+                           f"Причина: {escape(tx['decision_comment'] or '')}\nАннулировал: {who(actor)}", user)
+
+    async def fines_paid(self, user_id: int, rows: list[dict], actor: dict) -> None:
+        user = svc.get_user(self.conn, user_id)
+        total = sum(r["amount"] for r in rows)
+        await self.send(user["telegram_id"], f"✅ Штрафы погашены: {len(rows)} на {total} ₽. Долг по штрафам — 0 ₽.")
+        await self.archive(["погашение", "штраф"], f"✅ ПОГАШЕНО {total} ₽ ({len(rows)} шт.) — {who(user)}\n"
+                           f"Погасил: {who(actor)}", user)
 
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5)
 
