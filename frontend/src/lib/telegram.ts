@@ -64,24 +64,49 @@ export function tapHaptic() {
   }
 }
 
+/** «Как в Telegram» follows the client's night mode; light/dark are the person's own choice on this device. */
+export type ThemePref = "auto" | "light" | "dark";
+const THEME_KEY = "vykhod-theme";
+let reapplyTheme: (() => void) | null = null;
+let memoryPref: ThemePref | null = null; // the choice made in this session (storage may be unavailable)
+
+export function getThemePref(): ThemePref {
+  if (memoryPref) return memoryPref;
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    return v === "light" || v === "dark" ? v : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+export function setThemePref(pref: ThemePref) {
+  memoryPref = pref;
+  try {
+    if (pref === "auto") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, pref);
+  } catch {
+    /* private mode: the choice lasts until the app is closed */
+  }
+  reapplyTheme?.();
+}
+
+function systemScheme(): "light" | "dark" {
+  const tg = webApp();
+  if (tg) return tg.colorScheme;
+  return typeof matchMedia !== "undefined" && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 export function setupWebApp(onScheme: (scheme: "light" | "dark") => void): () => void {
   const tg = webApp();
-  if (!tg) return () => {};
-  tg.ready();
-  tg.expand();
-  try {
-    tg.disableVerticalSwipes?.();
-    // phones get true fullscreen (Bot API 8.0+); content is padded by Telegram's safe-area CSS vars
-    if (["ios", "android"].includes(tg.platform) && tg.isVersionAtLeast("8.0")) tg.requestFullscreen?.();
-  } catch {
-    /* not supported */
-  }
   const apply = () => {
+    const pref = getThemePref();
+    const scheme = pref === "auto" ? systemScheme() : pref;
     // switch the class first so the colours read below belong to the new scheme
-    document.documentElement.classList.toggle("dark", tg.colorScheme === "dark");
-    onScheme(tg.colorScheme);
+    document.documentElement.classList.toggle("dark", scheme === "dark");
+    onScheme(scheme);
     const bg = getComputedStyle(document.documentElement).getPropertyValue("--background").trim();
-    if (bg && tg.isVersionAtLeast("6.1")) {
+    if (tg && bg && tg.isVersionAtLeast("6.1")) {
       // Telegram expects hex; resolve the CSS colour through a canvas
       const hex = cssColorToHex(bg);
       if (hex) {
@@ -94,9 +119,28 @@ export function setupWebApp(onScheme: (scheme: "light" | "dark") => void): () =>
       }
     }
   };
+  reapplyTheme = apply;
+  if (!tg) {
+    apply();
+    return () => {
+      reapplyTheme = null;
+    };
+  }
+  tg.ready();
+  tg.expand();
+  try {
+    tg.disableVerticalSwipes?.();
+    // phones get true fullscreen (Bot API 8.0+); content is padded by Telegram's safe-area CSS vars
+    if (["ios", "android"].includes(tg.platform) && tg.isVersionAtLeast("8.0")) tg.requestFullscreen?.();
+  } catch {
+    /* not supported */
+  }
   apply();
   tg.onEvent("themeChanged", apply);
-  return () => tg.offEvent("themeChanged", apply);
+  return () => {
+    reapplyTheme = null;
+    tg.offEvent("themeChanged", apply);
+  };
 }
 
 function cssColorToHex(color: string): string | null {

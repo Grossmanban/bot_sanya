@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Bell, ChevronLeft, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
+import { Bell, ChevronLeft, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { DayTrack } from "../day-line";
 import { BalanceCard, TxRow } from "../finance/money";
 import { Avatar } from "../avatar";
+import { ThemeChoice } from "../theme-toggle";
 
 type View = "main" | "history" | "penalties" | "requisites";
 
@@ -125,6 +126,19 @@ export function ProfileScreen({
             }}
           />
         </label>
+
+        <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">
+          <div className="flex items-center gap-4">
+            <span className="grid size-10 place-items-center rounded-xl bg-muted">
+              <Palette className="size-5" strokeWidth={1.8} />
+            </span>
+            <span className="flex-1">
+              <span className="block font-medium">Тема оформления</span>
+              <span className="block text-sm text-muted-foreground">«Как в Telegram» — следует ночному режиму Telegram</span>
+            </span>
+          </div>
+          <ThemeChoice />
+        </section>
 
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <MenuRow icon={History} label="История выходов" onClick={() => setView("history")} />

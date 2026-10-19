@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { CalendarDays, ShieldCheck, Trophy, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
-import { initData, setupWebApp, tapHaptic } from "@/lib/telegram";
+import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
+import { ThemeContext } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
 import { ScheduleScreen } from "./schedule/schedule-screen";
@@ -12,6 +13,7 @@ import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
 import { EventsScreen } from "./events/live";
 import { Avatar } from "./avatar";
+import { ThemeButton, ThemeChoice } from "./theme-toggle";
 
 type Tab = "schedule" | "events" | "profile" | "admin";
 
@@ -28,6 +30,11 @@ export function Wordmark({ className }: { className?: string }) {
 
 export function MiniApp() {
   const [scheme, setScheme] = useState<"light" | "dark">("light");
+  const [pref, setPrefState] = useState<ThemePref>("auto");
+  const setPref = useCallback((p: ThemePref) => {
+    setThemePref(p);
+    setPrefState(p);
+  }, []);
   const [me, setMe] = useState<Me | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("schedule");
@@ -43,6 +50,7 @@ export function MiniApp() {
 
   useEffect(() => {
     // the SDK script is loaded synchronously in <head>, so WebApp is ready here
+    setPrefState(getThemePref());
     const cleanup = setupWebApp(setScheme);
     if (!initData()) {
       setFatal("outside");
@@ -101,9 +109,11 @@ export function MiniApp() {
               </button>
             ))}
           </nav>
+          <p className="mt-auto mb-1.5 px-3 text-xs font-medium text-muted-foreground">Тема: как в Telegram, светлая, тёмная</p>
+          <ThemeChoice compact className="mb-3" />
           <button
             onClick={() => go("profile")}
-            className="press mt-auto flex items-center gap-3 rounded-2xl p-3 text-left hover:bg-muted"
+            className="press flex items-center gap-3 rounded-2xl p-3 text-left hover:bg-muted"
           >
             <Avatar user={user} className="size-10 rounded-xl text-sm" />
             <span className="min-w-0">
@@ -121,16 +131,19 @@ export function MiniApp() {
           {/* phone / iPad portrait: compact top bar under Telegram's controls */}
           <header className="pt-safe flex items-center justify-between px-5 pb-3 lg:hidden">
             <Wordmark className="text-xl" />
-            <button
-              onClick={() => go("profile")}
-              className={cn(
-                "press flex items-center gap-2 rounded-full py-1 pr-1 pl-3 text-xs font-semibold",
-                working ? "bg-go-soft text-go" : "bg-muted text-muted-foreground",
-              )}
-            >
-              {user.account_state === "paused" ? "На паузе" : working ? "Работаю" : "Не работаю"}
-              <Avatar user={user} className="size-7 rounded-full text-[11px]" />
-            </button>
+            <div className="flex items-center gap-2">
+              <ThemeButton />
+              <button
+                onClick={() => go("profile")}
+                className={cn(
+                  "press flex items-center gap-2 rounded-full py-1 pr-1 pl-3 text-xs font-semibold",
+                  working ? "bg-go-soft text-go" : "bg-muted text-muted-foreground",
+                )}
+              >
+                {user.account_state === "paused" ? "На паузе" : working ? "Работаю" : "Не работаю"}
+                <Avatar user={user} className="size-7 rounded-full text-[11px]" />
+              </button>
+            </div>
           </header>
 
           <main key={tab} className="screen-in mx-auto w-full max-w-2xl flex-1 px-4 pb-36 md:px-6 lg:max-w-6xl lg:px-10 lg:pt-10 lg:pb-12">
@@ -171,9 +184,11 @@ export function MiniApp() {
   }
 
   return (
-    <div className="min-h-dvh">
-      {body}
-      <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }} />
-    </div>
+    <ThemeContext.Provider value={{ pref, scheme, setPref }}>
+      <div className="min-h-dvh">
+        {body}
+        <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }} />
+      </div>
+    </ThemeContext.Provider>
   );
 }
