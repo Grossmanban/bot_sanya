@@ -756,3 +756,96 @@ def test_migration_creates_networks_for_existing_ids(tmp_path):
         db.MIGRATIONS[:] = saved
     row = old.execute("SELECT id, name, trainer_id FROM networks").fetchone()
     assert tuple(row) == (3, "Сеть 3", 1)
+
+
+# ---------------------------------------------------------------- SBP profile and payouts (ТЗ модули 9–10)
+
+
+def test_payment_profile_validation_and_audit(conn, make_user):
+    from app import payouts
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    u, other = make_user(), make_user(first="Чужой")
+    with pytest.raises(svc.ServiceError) as e:
+        payouts.save_profile(conn, u, u["id"], "123", "Сбербанк", "Иван Петров", svc.new_key())
+    assert e.value.code == "bad_phone"
+    with pytest.raises(svc.ServiceError) as e:
+        payouts.save_profile(conn, u, u["id"], "8 900 123 45 67", "Банк Луны", "Иван Петров", svc.new_key())
+    assert e.value.code == "bad_bank"
+    p = payouts.save_profile(conn, u, u["id"], "8 (900) 123-45-67", "Сбербанк", "Иван Петров", svc.new_key())
+    assert p["phone"] == "+79001234567"
+    with pytest.raises(svc.ServiceError) as e:  # nobody else but owners changes it
+        payouts.save_profile(conn, other, u["id"], "+79000000000", "ВТБ", "Чужой Человек", svc.new_key())
+    assert e.value.status == 403
+    payouts.save_profile(conn, owner, u["id"], "+7 900 765 43 21", "Т-Банк", "Иван Петров", svc.new_key())
+    log = payouts.profile_history(conn, u["id"])
+    assert len(log) == 2 and '"Сбербанк"' in log[0]["old_value"]
+    assert payouts.public_profile(payouts.get_profile(conn, u["id"]), False)["phone"] == "+7 *** ***-43-21"
+    assert payouts.can_see(owner, u) and not payouts.can_see(other, u)
+
+
+def test_payout_calculation_and_commit(conn, make_user):
+    from app import finance, networks, payouts
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer, a, b = make_user(first="Тренер"), make_user(first="Аня"), make_user(first="Боря")
+    net = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
+    networks.set_member(conn, owner, a["id"], net["id"], svc.new_key())
+    a, b = svc.get_user(conn, a["id"]), svc.get_user(conn, b["id"])
+    payouts.save_profile(conn, a, a["id"], "+79001112233", "Сбербанк", "Анна Аня", svc.new_key())
+
+    s1 = shift(conn, a)                                         # 25 планом
+    s2 = shift(conn, a, THU + timedelta(days=1), {**P, "volume": 10})
+    report(conn, a, s1, 30)                                     # approved, 30 × 120
+    report(conn, a, s2, 12, now=at(THU + timedelta(days=1), "19:30"))  # approved, lazy: 12 × 100
+    sb = shift(conn, b)
+    report(conn, b, sb, 10)                                     # below plan, not approved → not paid
+    finance.create(conn, owner, a["id"], "fine", 500, "Опоздание", svc.new_key(), event_date=THU)
+    finance.create(conn, owner, a["id"], "bonus", 300, "Помощь", svc.new_key(), event_date=THU)
+    finance.create(conn, owner, a["id"], "deduction", 200, "Форма", svc.new_key())
+    finance.create(conn, owner, b["id"], "fine", 2000, "Поломка", svc.new_key(), event_date=THU)
+
+    rates = payouts.Rates.from_dict(None)
+    rows = {r["name"].split()[0]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), rates)}
+    ra = rows["Аня"]
+    assert ra["personal_volume"] == 42 and ra["base_calc"] == 30 * 120 + 12 * 100
+    assert (ra["bonuses"], ra["fines"], ra["deductions"]) == (300, 500, 200)
+    assert ra["total"] == 4800 + 300 - 500 - 200 and ra["bank"] == "Сбербанк"
+    assert rows["Тренер"]["team_volume"] == 42 and rows["Тренер"]["base_calc"] == 42 * 10
+    rb = rows["Боря"]  # no approved work: the fine doesn't fit, the debt is kept, nothing negative
+    assert rb["total"] == 0 and rb["fines"] == 0 and rb["carried_debt"] == 2000
+
+    # a custom commission and a base override for a bonus
+    custom = payouts.Rates.from_dict({"trainer_commission": 20})
+    assert {r["name"].split()[0]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), custom)}["Тренер"]["base_calc"] == 840
+
+    with pytest.raises(svc.ServiceError) as e:
+        payouts.commit(conn, a, "x", TODAY, THU, rates, None, [{"user_id": a["id"]}], [], [], svc.new_key())
+    assert e.value.status == 403
+    batch = payouts.commit(conn, owner, "Зарплата 12–18", TODAY, THU + timedelta(days=3), rates, None,
+                           [{"user_id": a["id"]}, {"user_id": b["id"]}, {"user_id": trainer["id"], "base_override": 1000}],
+                           ["proof-1"], [], svc.new_key())
+    items = {i["name"].split()[0]: i for i in batch["items"]}
+    assert items["Аня"]["total"] == 4400 and items["Тренер"]["base"] == 1000 and items["Боря"]["carried_debt"] == 2000
+    assert batch["total"] == 4400 + 1000 and batch["proof_media"] == ["proof-1"]
+    assert finance.balance(conn, a["id"])["balance"] == 0  # fine, bonus and deduction settled
+    assert [t["status"] for t in finance.journal(conn, user_id=a["id"])] == ["offset", "offset", "offset"]
+    assert finance.balance(conn, b["id"])["fines"] == 2000  # the debt stays for the next payout
+    text = payouts.bank_text(batch)
+    assert "Сбербанк:" in text and "Анна Аня — +7 900 111-22-33 — 4400 ₽" in text and "Всего к выплате: 5400 ₽" in text
+
+    from app import export
+    wb = load_workbook(io.BytesIO(export.payout_xlsx(batch)))
+    assert wb.sheetnames == ["Реестр", "По банкам"]
+
+
+def test_rates_come_from_settings(conn):
+    from app import pricing
+
+    app_settings.update(conn, {"rate_base": 150, "rate_lazy": 90, "lazy_threshold": 15})
+    try:
+        assert pricing.expected_pay(20) == 3000 and pricing.expected_pay(10) == 900
+        assert pricing.pricing_info() == {"base_rate": 150, "lazy_rate": 90, "lazy_threshold": 15}
+    finally:
+        app_settings.update(conn, {"rate_base": 120, "rate_lazy": 100, "lazy_threshold": 20})

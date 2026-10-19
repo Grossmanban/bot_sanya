@@ -161,3 +161,35 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
 
 def export_filename(date_from: date, date_to: date) -> str:
     return f"grafik_{date_from:%d.%m}-{date_to:%d.%m.%Y}.xlsx"
+
+
+ROLE_RU = {"owner": "Владелец", "admin": "Администратор", "trainer": "Тренер", "employee": "Сотрудник"}
+
+
+def payout_xlsx(batch: dict) -> bytes:
+    """Payout registry (ТЗ 11.3): one row per person, then a sheet grouped by bank."""
+    wb = Workbook()
+    rows = [
+        [it["name"], ROLE_RU.get(it["role"], it["role"]), it["network"] or "", it["phone"] or "", it["bank"] or "",
+         it["recipient"] or "", it["personal_volume"], it["team_volume"], it["base"], it["bonuses"], it["fines"],
+         it["deductions"], it["total"], it["carried_debt"] or ""]
+        for it in batch["items"]
+    ]
+    rows.append(["Итого", "", "", "", "", "", sum(r[6] for r in rows), sum(r[7] for r in rows), sum(r[8] for r in rows),
+                 sum(r[9] for r in rows), sum(r[10] for r in rows), sum(r[11] for r in rows), batch["total"],
+                 sum(r[13] or 0 for r in rows)])
+    ws = _sheet(
+        wb, "Реестр",
+        ["ФИО", "Роль", "Сеть", "Телефон (СБП)", "Банк", "Получатель", "Объём, шт.", "Командный объём, шт.", "База, ₽",
+         "Бонусы, ₽", "Штрафы, ₽", "Вычеты, ₽", "Итого к выплате, ₽", "Остаток долга, ₽"],
+        rows, [24, 14, 12, 18, 16, 26, 11, 18, 11, 11, 11, 11, 18, 16], first=True,
+    )
+    for cell in ws[ws.max_row]:
+        cell.font = Font(bold=True)
+    by_bank = sorted((it for it in batch["items"] if it["total"] > 0), key=lambda it: (it["bank"] or "яя", it["name"]))
+    _sheet(wb, "По банкам", ["Банк", "Получатель", "Телефон (СБП)", "Сумма, ₽"],
+           [[it["bank"] or "Реквизиты не указаны", it["recipient"] or it["name"], it["phone"] or "", it["total"]] for it in by_bank],
+           [20, 28, 18, 12])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

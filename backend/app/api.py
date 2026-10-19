@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, finance, networks, reports
+from . import day_actual, finance, networks, payouts, reports
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -67,6 +67,41 @@ class AccessBody(BaseModel):
 class StateBody(BaseModel):
     state: str
     reason: str | None = None
+    idempotency_key: str
+
+
+class ProfileBody(BaseModel):
+    phone: str
+    bank: str
+    recipient: str
+    idempotency_key: str
+
+
+class PayoutRates(BaseModel):
+    rate_base: int | None = None
+    rate_lazy: int | None = None
+    lazy_threshold: int | None = None
+    trainer_commission: int | None = None
+
+
+class PayoutPreview(BaseModel):
+    date_from: str
+    date_to: str
+    network_id: int | None = None
+    rates: PayoutRates = PayoutRates()
+
+
+class PayoutChoice(BaseModel):
+    user_id: int
+    include: bool = True
+    base_override: int | None = None
+
+
+class PayoutCommit(PayoutPreview):
+    title: str
+    choices: list[PayoutChoice]
+    proof: list[str] = []
+    deduction_proof: list[str] = []
     idempotency_key: str
 
 
@@ -201,6 +236,7 @@ def public_user(user: dict) -> dict:
 def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str | None = None) -> FastAPI:
     app = FastAPI(title="Schedule Mini App API", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.bot_username = bot_username
+    app_settings.load_pricing(conn)  # rates from settings (ТЗ 11.1)
 
     @app.exception_handler(svc.ServiceError)
     async def service_error(_: Request, exc: svc.ServiceError):
@@ -315,6 +351,15 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.get("/me/penalties")
     async def my_penalties(user: dict = Depends(current_user)):
         return {"items": svc.user_penalties(conn, user["id"])}
+
+    @api.get("/me/payment-profile")
+    async def my_payment_profile(user: dict = Depends(current_user)):
+        return {"profile": payouts.public_profile(payouts.get_profile(conn, user["id"]), True), "banks": payouts.BANKS}
+
+    @api.put("/me/payment-profile")
+    async def save_payment_profile(body: ProfileBody, user: dict = Depends(current_user)):
+        profile = payouts.save_profile(conn, user, user["id"], body.phone, body.bank, body.recipient, body.idempotency_key)
+        return {"profile": payouts.public_profile(profile, True), "banks": payouts.BANKS}
 
     @api.get("/me/finances")
     async def my_finances(user: dict = Depends(current_user)):
@@ -688,6 +733,69 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if rows:
             notifier.spawn(notifier.fines_paid(body.user_id, rows, owner))
         return {"paid": len(rows), "total": sum(r["amount"] for r in rows)}
+
+    # ------------------------------------------------------------ payouts and SBP requisites (ТЗ модули 9–10, owners)
+
+    @api.get("/admin/users/{user_id}/payment-profile")
+    async def admin_payment_profile(user_id: int, admin: dict = Depends(admin_user)):
+        target = svc.get_user(conn, user_id)
+        if target is None:
+            raise svc.ServiceError("Пользователь не найден", 404, "not_found")
+        full = payouts.can_see(admin, target)
+        history = payouts.profile_history(conn, user_id)[:10] if full else []
+        return {"profile": payouts.public_profile(payouts.get_profile(conn, user_id), full), "full": full,
+                "banks": payouts.BANKS, "history": history}
+
+    @api.put("/admin/users/{user_id}/payment-profile")
+    async def admin_save_payment_profile(user_id: int, body: ProfileBody, owner: dict = Depends(staff("money"))):
+        profile = payouts.save_profile(conn, owner, user_id, body.phone, body.bank, body.recipient, body.idempotency_key)
+        return {"profile": payouts.public_profile(profile, True)}
+
+    @api.post("/admin/media")
+    async def admin_upload_media(request: Request, admin: dict = Depends(admin_user)):
+        """An image for a payout or a fine (proof); kept in Telegram, the id goes back to the client."""
+        data, ext = await read_photo(request, required=True)
+        file_id = await notifier.store_photo(admin["telegram_id"], data, ext, "📎 Документ загружен в приложение")
+        return {"file_id": file_id}
+
+    @api.post("/admin/payouts/preview")
+    async def admin_payout_preview(body: PayoutPreview, _: dict = Depends(staff("money"))):
+        rates = payouts.Rates.from_dict(body.rates.model_dump())
+        rows = payouts.calculate(conn, svc.parse_date(body.date_from), svc.parse_date(body.date_to), rates, body.network_id)
+        return {"rows": [{k: v for k, v in r.items() if k != "tx_ids"} for r in rows], "rates": rates.as_dict()}
+
+    @api.post("/admin/payouts")
+    async def admin_payout_commit(body: PayoutCommit, owner: dict = Depends(staff("money"))):
+        batch = payouts.commit(conn, owner, body.title, svc.parse_date(body.date_from), svc.parse_date(body.date_to),
+                               payouts.Rates.from_dict(body.rates.model_dump()), body.network_id,
+                               [c.model_dump() for c in body.choices], body.proof, body.deduction_proof,
+                               body.idempotency_key)
+        notifier.spawn(notifier.payout_committed(batch, owner))
+        return {"batch": batch, "bank_text": payouts.bank_text(batch)}
+
+    @api.get("/admin/payouts")
+    async def admin_payouts(_: dict = Depends(staff("money"))):
+        return {"items": payouts.history(conn), "rates": pricing.current()}
+
+    @api.get("/admin/payouts/{batch_id}")
+    async def admin_payout(batch_id: int, _: dict = Depends(staff("money"))):
+        batch = payouts.batch(conn, batch_id)
+        if batch is None:
+            raise svc.ServiceError("Выплата не найдена", 404, "not_found")
+        return {"batch": batch, "bank_text": payouts.bank_text(batch)}
+
+    @api.post("/admin/payouts/{batch_id}/excel")
+    async def admin_payout_excel(batch_id: int, owner: dict = Depends(staff("money"))):
+        batch = payouts.batch(conn, batch_id)
+        if batch is None:
+            raise svc.ServiceError("Выплата не найдена", 404, "not_found")
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен: файл некуда отправить", 503, "no_bot")
+        ok = await notifier.send_document(owner["telegram_id"], export.payout_xlsx(batch), f"vyplata_{batch_id}.xlsx",
+                                          f"Реестр выплаты «{batch['title']}»")
+        if not ok:
+            raise svc.ServiceError("Не удалось отправить файл. Напишите боту /start", 502, "send_failed")
+        return {"ok": True}
 
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5, owners)
 

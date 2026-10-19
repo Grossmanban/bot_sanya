@@ -342,6 +342,8 @@ function MemberSheet({
                 )}
               </dl>
 
+              {approved && <Requisites userId={user.id} />}
+
               {!isSelf && (
                 <Button variant="secondary" className="press mt-5 h-12 w-full rounded-2xl text-[15px] font-semibold"
                         onClick={() => openChat(user)}>
@@ -487,5 +489,25 @@ function MemberSheet({
         </AlertDialogContent>
       </AlertDialog>
     </>
+  );
+}
+
+/** SBP requisites in the member card: full for owners, masked for everyone else (ТЗ 10.2). */
+function Requisites({ userId }: { userId: number }) {
+  const { data } = useLoad(() => api.admin.userPaymentProfile(userId), [userId]);
+  if (!data) return null;
+  const p = data.profile;
+  return (
+    <div className="mt-5 rounded-2xl bg-muted/60 px-4 py-3 text-sm">
+      <p className="text-xs text-muted-foreground">Реквизиты СБП</p>
+      {p ? (
+        <p className="mt-0.5 font-semibold">
+          {p.bank}, <span className="tabular">{p.phone}</span>
+          {p.recipient && <span className="block font-normal text-muted-foreground">{p.recipient}</span>}
+        </p>
+      ) : (
+        <p className="mt-0.5 font-semibold text-wait">не заполнены</p>
+      )}
+    </div>
   );
 }

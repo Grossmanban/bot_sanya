@@ -692,6 +692,41 @@ class Notifier:
         await self.archive(["погашение", "штраф"], f"✅ ПОГАШЕНО {total} ₽ ({len(rows)} шт.) — {who(user)}\n"
                            f"Погасил: {who(actor)}", user)
 
+    # ------------------------------------------------------------ payouts (ТЗ модуль 10)
+
+    async def payout_committed(self, batch: dict, actor: dict) -> None:
+        from . import export, payouts
+
+        period = f"{batch['period_from'][8:10]}.{batch['period_from'][5:7]}–{batch['period_to'][8:10]}.{batch['period_to'][5:7]}"
+        lines = [f"💸 <b>ВЕДОМОСТЬ ЗАФИКСИРОВАНА: {escape(batch['title'])}</b>", f"Период {period}, итого {batch['total']} ₽",
+                 f"Зафиксировал: {who(actor)}", "", "<b>📂 ДОКУМЕНТЫ ОСНОВАНИЯ:</b>",
+                 f"1️⃣ Подтверждение перевода денег: {len(batch['proof_media'])} файл(ов)",
+                 f"2️⃣ Документы по вычетам: {len(batch['deduction_media'])} файл(ов)", "", "<b>ДЕТАЛИЗАЦИЯ ПО СОТРУДНИКАМ:</b>"]
+        for it in batch["items"]:
+            parts = [f"База {it['base']}"]
+            if it["bonuses"]:
+                parts.append(f"Бонус +{it['bonuses']}")
+            if it["fines"]:
+                parts.append(f"Штраф -{it['fines']}")
+            if it["deductions"]:
+                parts.append(f"<b>Вычет -{it['deductions']}</b>")
+            debt = f" (долг остаётся {it['carried_debt']} ₽)" if it["carried_debt"] else ""
+            lines.append(f"• {escape(it['name'])}: {' | '.join(parts)} | <b>Итого {it['total']} ₽</b>{debt}")
+        await self.archive(["выплата"], "\n".join(lines)[:3900])
+        chat = app_settings.get_raw(self.conn, "archive_chat_id")
+        if chat:
+            for i, fid in enumerate(batch["proof_media"]):
+                await self._photo_or_text(int(chat), fid, f"#выплата 1️⃣ Подтверждение перевода — {escape(batch['title'])} ({i + 1})")
+            for i, fid in enumerate(batch["deduction_media"]):
+                await self._photo_or_text(int(chat), fid, f"#выплата #вычет 2️⃣ Документы по вычетам — {escape(batch['title'])} ({i + 1})")
+        await self.send_document(actor["telegram_id"], export.payout_xlsx(batch), f"vyplata_{batch['id']}.xlsx",
+                                 f"Реестр выплаты «{escape(batch['title'])}»")
+        await self.send(actor["telegram_id"], f"<pre>{escape(payouts.bank_text(batch))}</pre>")
+        for it in batch["items"]:
+            user = svc.get_user(self.conn, it["user_id"])
+            if it["total"] > 0:
+                await self.send(user["telegram_id"], f"💸 Начислена выплата {it['total']} ₽ за {period}.")
+
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5)
 
     async def team_approved(self, shift: dict, report: dict | None = None) -> None:
