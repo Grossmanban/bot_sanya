@@ -8,7 +8,6 @@ import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type Them
 import { ThemeContext } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
-import { EasterEgg } from "./easter-egg";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
@@ -199,7 +198,6 @@ export function MiniApp() {
     <ThemeContext.Provider value={{ pref, scheme, setPref }}>
       <div className="min-h-dvh">
         {body}
-        <EasterEgg />
         <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }} />
       </div>
     </ThemeContext.Provider>
