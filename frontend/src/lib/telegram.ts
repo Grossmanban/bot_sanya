@@ -11,6 +11,9 @@ interface TelegramWebApp {
   platform: string;
   isFullscreen?: boolean;
   requestFullscreen?: () => void;
+  /** Bot API 8.0: a shortcut on the phone's home screen */
+  addToHomeScreen?: () => void;
+  checkHomeScreenStatus?: (cb: (status: "unsupported" | "unknown" | "added" | "missed") => void) => void;
   ready(): void;
   expand(): void;
   isVersionAtLeast(version: string): boolean;
@@ -178,4 +181,28 @@ export function openChat(user: { username: string | null; telegram_id: number })
   } else {
     window.location.href = `tg://user?id=${user.telegram_id}`;
   }
+}
+
+export type HomeScreenStatus = "unsupported" | "unknown" | "added" | "missed";
+
+/** Whether the client can put the Mini App on the home screen, and whether it is there already. */
+export function homeScreenStatus(): Promise<HomeScreenStatus> {
+  const tg = webApp();
+  return new Promise((resolve) => {
+    if (!tg?.checkHomeScreenStatus || !tg.isVersionAtLeast("8.0")) return resolve("unsupported");
+    try {
+      tg.checkHomeScreenStatus((status) => resolve(status));
+    } catch {
+      resolve("unsupported");
+    }
+    setTimeout(() => resolve("unknown"), 1500); // older clients never answer
+  });
+}
+
+export function addToHomeScreen(onAdded: () => void): () => void {
+  const tg = webApp();
+  if (!tg?.addToHomeScreen) return () => {};
+  tg.onEvent("homeScreenAdded", onAdded);
+  tg.addToHomeScreen();
+  return () => tg.offEvent("homeScreenAdded", onAdded);
 }

@@ -62,6 +62,10 @@ REASONS = {
 }
 
 
+WELCOME = ("Добро пожаловать в систему!\n\nСовет: в приложении → «Профиль» → «Быстрый доступ» можно добавить "
+           "иконку на главный экран телефона и открывать график, не заходя в чат.")
+
+
 def open_app_keyboard() -> InlineKeyboardMarkup | None:
     if not settings.webapp_url.startswith("https://"):
         return None
@@ -126,7 +130,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             await message.answer("⛔ Аккаунт заблокирован. Если это ошибка — свяжитесь с руководителем.")
         else:
             if svc.claim_welcome(conn, user["id"]):
-                await message.answer("Добро пожаловать в систему!")
+                await message.answer(WELCOME)
             if user["account_state"] == "paused":
                 reason = f"\nПричина: {escape(user['state_reason'])}" if user["state_reason"] else ""
                 await message.answer(f"⏸ Аккаунт на паузе — новые смены пока недоступны.{reason}", parse_mode="HTML")
