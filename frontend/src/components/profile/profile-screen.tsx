@@ -63,8 +63,8 @@ export function ProfileScreen({
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-6">
-      <div className="space-y-4">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-6">
+      <div className="min-w-0 space-y-4">
         <section className="flex items-center gap-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
           <Avatar user={user} className="size-16 rounded-2xl text-xl" />
           <div className="min-w-0">
@@ -112,7 +112,7 @@ export function ProfileScreen({
         </section>
       </div>
 
-      <div className="space-y-4">
+      <div className="min-w-0 space-y-4">
         <QuickAccess botUsername={botUsername} />
 
         <label className="flex cursor-pointer items-center gap-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">

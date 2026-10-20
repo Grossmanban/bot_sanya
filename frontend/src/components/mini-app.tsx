@@ -63,6 +63,13 @@ export function MiniApp() {
     return cleanup;
   }, [loadMe]);
 
+  // iOS ignores user-scalable=no: block pinch zoom so the app never ends up zoomed in and cut off
+  useEffect(() => {
+    const stop = (e: Event) => e.preventDefault();
+    document.addEventListener("gesturestart", stop);
+    return () => document.removeEventListener("gesturestart", stop);
+  }, []);
+
   const updateUser = useCallback((user: User) => setMe((m) => (m ? { ...m, user } : m)), []);
 
   const go = (id: Tab) => {
@@ -198,7 +205,9 @@ export function MiniApp() {
     <ThemeContext.Provider value={{ pref, scheme, setPref }}>
       <div className="min-h-dvh">
         {body}
-        <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }} />
+        {/* phones (≤600px) use mobileOffset, not offset: both must clear the notch and Telegram's buttons */}
+        <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }}
+                 mobileOffset={{ top: "calc(var(--safe-top) + 8px)", left: "16px", right: "16px" }} />
       </div>
     </ThemeContext.Provider>
   );

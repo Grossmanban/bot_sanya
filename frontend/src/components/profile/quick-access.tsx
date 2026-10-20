@@ -20,7 +20,7 @@ export function QuickAccess({ botUsername }: { botUsername?: string | null }) {
     <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">
       <div className="flex items-center gap-4">
         <span className="grid size-10 place-items-center rounded-xl bg-muted"><Smartphone className="size-5" strokeWidth={1.8} /></span>
-        <span className="flex-1">
+        <span className="min-w-0 flex-1">
           <span className="block font-medium">Быстрый доступ</span>
           <span className="block text-sm text-muted-foreground">Открывайте приложение сразу, не заходя в чат с ботом</span>
         </span>
@@ -30,7 +30,7 @@ export function QuickAccess({ botUsername }: { botUsername?: string | null }) {
           <Check className="size-4" /> Иконка уже на главном экране
         </p>
       ) : status !== "unsupported" && (
-        <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
+        <Button className="press h-auto min-h-12 w-full rounded-2xl py-2 text-[15px] font-semibold whitespace-normal"
                 onClick={() => addToHomeScreen(() => { setStatus("added"); haptic("success"); toast.success("Иконка добавлена на главный экран"); })}>
           <Smartphone /> Добавить на главный экран
         </Button>
