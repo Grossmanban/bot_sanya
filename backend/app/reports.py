@@ -10,7 +10,9 @@ One shift has a chain of report attempts; the shift row carries the summary:
                   NULL ── deadline passed ──> no_show ── fine | excuse | manual result
     any state ── manual result by staff ──> approved
 
-Deadline: max(00:00 after the shift day, shift end + 2h). Fines for reports reuse the
+Opens at 00:00 of the shift day: the fact can be sent any time that day, before or after the shift itself.
+Deadline: max(00:00 after the shift day, shift end + 2h). Once a report is in, the employee can't edit or
+cancel the shift themselves (services.edit_shift / cancel_shift) — the plan stays what the report was against. Fines for reports reuse the
 shortfall_* columns of the shift, so stats, the penalty log and the Excel export keep working.
 """
 
@@ -49,6 +51,11 @@ def shift_start(shift: dict) -> datetime:
 def shift_end(shift: dict) -> datetime:
     end = datetime.combine(date.fromisoformat(shift["shift_date"]), time.fromisoformat(shift["end_time"]), tzinfo=settings.tz)
     return end if end > shift_start(shift) else end + timedelta(days=1)
+
+
+def opens_at(shift: dict) -> datetime:
+    """The shift day has come: from 00:00 the report can be sent."""
+    return datetime.combine(date.fromisoformat(shift["shift_date"]), time(0), tzinfo=settings.tz)
 
 
 def deadline(shift: dict) -> datetime:
@@ -97,7 +104,7 @@ def can_submit(shift: dict, now: datetime) -> bool:
         return True
     if state not in (None, "pending_review"):
         return False
-    return shift_start(shift) <= now < deadline(shift)
+    return opens_at(shift) <= now < deadline(shift)
 
 
 def view(conn: sqlite3.Connection, shift: dict, now: datetime | None = None) -> dict | None:
@@ -109,7 +116,7 @@ def view(conn: sqlite3.Connection, shift: dict, now: datetime | None = None) -> 
         "state": shift.get("report_state"),
         "deadline": deadline(shift).isoformat(timespec="minutes"),
         "can_submit": can_submit(shift, now),
-        "started": shift_start(shift) <= now,
+        "started": opens_at(shift) <= now,
         "note": shift.get("report_note"),
         **_fine_view(conn, shift),
         "decided": shift.get("shortfall_status"),
@@ -202,8 +209,8 @@ def check_submittable(shift: dict | None, user: dict, now: datetime) -> dict:
     if state == "no_show":
         raise ServiceError("Срок сдачи прошёл — решение за администратором", 409, "deadline_passed")
     if state != "needs_fix":
-        if now < shift_start(shift):
-            raise ServiceError("Отчёт можно сдать после начала смены", 409, "too_early")
+        if now < opens_at(shift):
+            raise ServiceError("Отчёт можно сдать в день смены", 409, "too_early")
         if now >= deadline(shift):
             raise ServiceError("Срок сдачи прошёл — решение за администратором", 409, "deadline_passed")
     return shift
