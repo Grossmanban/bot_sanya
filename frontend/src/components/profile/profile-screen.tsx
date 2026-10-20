@@ -241,6 +241,9 @@ function HistoryView({ onBack }: { onBack: () => void }) {
                         {s.location ? `${s.location}, план ${s.volume} шт.` : ""}
                         {s.fact_volume != null ? `, факт ${s.fact_volume} шт.` : ""}
                         {s.shortfall > 0 && <span className="font-semibold text-cancel">, не по норме −{s.shortfall}</span>}
+                        {s.fact_volume != null && s.volume != null && s.fact_volume > s.volume && (
+                          <span className="font-semibold text-go">, перевыполнение +{s.fact_volume - s.volume}</span>
+                        )}
                         {s.shortfall_status === "fined" && <span className="text-final">, штраф {rub(s.shortfall_penalty ?? 0)}</span>}
                         {s.lazy ? ", налог на лень" : ""}
                         {s.status === "finally_cancelled" &&

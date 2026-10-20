@@ -9,6 +9,7 @@ import { useCan } from "@/lib/caps";
 import { dayMonth, rub } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
+import { PhotoPicker, PhotoThumb } from "../report/photo";
 
 export const TYPE_META: Record<TxType, { label: string; icon: typeof Gift; sign: "+" | "−"; tone: string }> = {
   fine: { label: "Штраф", icon: Receipt, sign: "−", tone: "text-cancel" },
@@ -83,6 +84,7 @@ export function TxRow({ tx, showName, actions, onChanged }: { tx: Tx; showName?:
             {tx.decision_comment && ` · ${tx.decision_comment}`}
           </p>
         </div>
+        {tx.media_url && <PhotoThumb src={tx.media_url} className="size-10 rounded-lg" />}
         <span className={cn("shrink-0 font-display font-semibold tabular", dead ? "text-muted-foreground line-through" : meta.tone)}>
           {tx.amount != null ? `${meta.sign}${rub(tx.amount)}` : "—"}
         </span>
@@ -180,17 +182,28 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
   const [type, setType] = useState<"fine" | "bonus" | "deduction">(types.includes(initial) ? initial : types[0]);
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
+  const [photo, setPhoto] = useState<Blob | null>(null);
+  const [uploaded, setUploaded] = useState<{ blob: Blob; id: string } | null>(null);
   const { busy, run } = useAction();
   const n = Number(amount);
   if (types.length === 0) return null;
 
   async function submit() {
     try {
-      const res = await run("tx", (k) => api.admin.createTx(userId, type, n, reason.trim(), k));
+      const res = await run("tx", async (k) => {
+        // the photo goes to Telegram first; a retry reuses the uploaded file
+        let media: string | null = null;
+        if (photo) {
+          media = uploaded?.blob === photo ? uploaded.id : (await api.admin.uploadMedia(photo)).file_id;
+          setUploaded({ blob: photo, id: media });
+        }
+        return api.admin.createTx(userId, type, n, reason.trim(), k, media);
+      });
       if (res) {
         toast.success(res.tx.status === "pending_admin_approval" ? "Заявка на штраф отправлена владельцу" : `${TYPE_META[type].label} ${rub(n)} начислен`);
         setAmount("");
         setReason("");
+        setPhoto(null);
         onDone?.();
       }
     } catch {
@@ -231,6 +244,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
       </div>
       <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 500))} placeholder="Причина"
                 className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
+      <PhotoPicker value={photo} onChange={setPhoto} label="Фото или скриншот" optional />
       {type === "fine" && !canFine && <p className="text-xs text-muted-foreground">Штраф от тренера вступит в силу после одобрения владельцем.</p>}
       <Button className={cn("press h-12 w-full rounded-2xl text-[15px] font-semibold", type === "bonus" && "bg-go text-white hover:bg-go/90",
         type === "fine" && "bg-cancel text-white hover:bg-cancel/90")}

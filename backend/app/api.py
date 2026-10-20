@@ -163,6 +163,7 @@ class TxBody(BaseModel):
     amount: int
     reason: str
     event_date: str | None = None
+    media_file_id: str | None = None
     idempotency_key: str
 
 
@@ -194,6 +195,11 @@ class ActualBody(BaseModel):
 
 class AnnulBody(BaseModel):
     shift_ids: list[int] | None = None  # None = every shortfall fine of the day
+    idempotency_key: str
+
+
+class NormBody(BaseModel):
+    norm: int | None = None  # None = the common norm
     idempotency_key: str
 
 
@@ -284,6 +290,7 @@ def public_user(user: dict) -> dict:
         "network_id": user["network_id"],
         "is_owner": svc.is_owner(user),
         "notify_reminders": bool(user.get("notify_reminders", 1)),
+        "min_weekly_shifts": user.get("min_weekly_shifts"),
         "created_at": user["created_at"],
     }
 
@@ -476,7 +483,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/schedule/week")
     async def week(offset: int = Query(0, ge=-52, le=svc.BOOKING_WEEKS_AHEAD), user: dict = Depends(current_user)):
-        return svc.week_view(conn, user, offset)
+        hide = not perms.is_staff(user) and not app_settings.get_all(conn)["show_colleague_names"]
+        return svc.week_view(conn, user, offset, hide_names=hide)
 
     @api.get("/history")
     async def history(weeks_back: int = Query(8, ge=1, le=52), user: dict = Depends(current_user)):
@@ -607,7 +615,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return settings_view()
 
     @api.patch("/admin/settings")
-    async def admin_settings_set(body: dict, _: dict = Depends(staff("settings"))):
+    async def admin_settings_set(body: dict, admin: dict = Depends(staff("settings"))):
+        # rates are money: only owners change them (admins keep the schedule settings)
+        if any(k in pricing.DEFAULTS and body[k] != app_settings.get_all(conn).get(k) for k in body) \
+                and not perms.can(admin, "money"):
+            raise svc.ServiceError("Ставки меняет только владелец", 403, "owner_only")
         app_settings.update(conn, body)
         return settings_view()
 
@@ -692,6 +704,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.get("/admin/raspred/tomorrow")
     async def admin_raspred(_: dict = Depends(staff("raspred"))):
         return svc.raspred(conn, today_local() + timedelta(days=1))
+
+    @api.get("/admin/raspred/today")
+    async def admin_raspred_today(_: dict = Depends(staff("raspred"))):
+        return svc.raspred(conn, today_local())
 
     @api.get("/admin/day")
     async def admin_day(day: str = Query(...), admin: dict = Depends(admin_user)):
@@ -789,13 +805,20 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.get("/admin/violations")
     async def admin_violations(status: str = "pending", admin: dict = Depends(staff("review"))):
         items = [with_media(i) for i in violations.listing(conn, admin, status)]
-        quota = app_settings.get_all(conn)["weekly_attendance_quota"]
-        return {"items": items, "pending": violations.pending_count(conn, admin), "quota": quota}
+        cfg = app_settings.get_all(conn)
+        quota = cfg["weekly_attendance_quota"] if cfg["attendance_check_enabled"] else 0
+        return {"items": items, "pending": violations.pending_count(conn, admin), "quota": quota,
+                "personal": violations.has_personal_norms(conn)}
+
+    @api.post("/admin/team/{user_id}/norm")
+    async def admin_set_norm(user_id: int, body: NormBody, admin: dict = Depends(staff("review"))):
+        return {"user": public_user(violations.set_norm(conn, admin, user_id, body.norm, body.idempotency_key))}
 
     @api.post("/admin/violations/scan")
     async def admin_violations_scan(admin: dict = Depends(staff("settings"))):
         """Check the last finished week right now (the Monday job does the same; repeats create nothing)."""
-        created = violations.scan(conn, app_settings.get_all(conn)["weekly_attendance_quota"])
+        cfg = app_settings.get_all(conn)
+        created = violations.scan(conn, cfg["weekly_attendance_quota"] if cfg["attendance_check_enabled"] else 0)
         if created:
             notifier.spawn(notifier.violations_found(created))
         return {"created": len(created)}
@@ -814,6 +837,16 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if result.changed:
             notifier.spawn(notifier.violation_resolved(result.violation, None, admin))
         return {"violation": violation_out(result.violation), "changed": result.changed}
+
+    @api.get("/media/tx/{tx_id}")
+    async def tx_photo(tx_id: int, exp: int, sig: str):
+        if not media.verify(tx_id, exp, sig, kind="tx"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        tx = finance.get(conn, tx_id)
+        found = await notifier.fetch_photo(tx["media_file_id"]) if tx and tx["media_file_id"] else None
+        if found is None:
+            raise svc.ServiceError("Файл не найден", 404, "not_found")
+        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
     @api.get("/media/violation/{violation_id}/{index}")
     async def violation_photo(violation_id: int, index: int, exp: int, sig: str):
@@ -942,8 +975,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/finances")
     async def admin_tx_create(body: TxBody, admin: dict = Depends(admin_user)):
         require(admin, "review", body.user_id)
+        if body.media_file_id and len(body.media_file_id) > 300:
+            raise svc.ServiceError("Некорректный файл", 422, "bad_media")
         result = finance.create(conn, admin, body.user_id, body.type, body.amount, body.reason, body.idempotency_key,
-                                svc.parse_date(body.event_date) if body.event_date else None)
+                                svc.parse_date(body.event_date) if body.event_date else None, body.media_file_id or None)
         if result.changed:
             notifier.spawn(notifier.tx_created(result.tx, admin))
         return {"tx": finance.public(result.tx), "changed": result.changed}

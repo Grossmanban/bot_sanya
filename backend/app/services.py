@@ -489,7 +489,8 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
     return data
 
 
-def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
+def week_view(conn, user: dict, offset: int, today: date | None = None, hide_names: bool = False) -> dict:
+    """hide_names: colleagues stay on the timeline as «Коллега» (the setting «show_colleague_names», ТЗ №9)."""
     today = today or today_local()
     days = week_dates(offset, today)
     first, last = days[0].isoformat(), days[-1].isoformat()
@@ -521,7 +522,9 @@ def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
         iso = d.isoformat()
         colleagues, off = [], []
         for c in others.get(iso, []):
-            name = full_name(c)
+            name = "Коллега" if hide_names else full_name(c)
+            if hide_names:
+                c = {**c, "first_name": ""}
             if c["status"] == "pre_declared_off":
                 off.append({"name": name, "first_name": c["first_name"]})
             else:
@@ -543,6 +546,7 @@ def week_view(conn, user: dict, offset: int, today: date | None = None) -> dict:
                 "my_shift": serialize_shift(mine.get(iso), today, conn),
                 "colleagues": colleagues,
                 "colleagues_off": off,
+                "names_hidden": hide_names,
                 "points_load": load.get(iso, {}),
             }
         )
@@ -929,7 +933,7 @@ def raspred(conn, day: date) -> dict:
             + f"\n\nВсего сотрудников: {len(shifts)}\nОбщий плановый объём: {total_volume} шт."
         )
     else:
-        text = f"Распред на {day.strftime('%d.%m.%y')}\n\nНа завтра нет сотрудников в графике."
+        text = f"Распред на {day.strftime('%d.%m.%y')}\n\nВ этот день нет сотрудников в графике."
     return {
         "date": day.isoformat(),
         "rows": [

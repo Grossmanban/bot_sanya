@@ -24,6 +24,9 @@ const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
   { id: "admin", label: "Админ", icon: ShieldCheck },
 ];
 
+// role colours in the header (ТЗ №1): owner, admin, trainer, employee
+const ROLE_DOT: Record<User["role"], string> = { owner: "bg-final", admin: "bg-primary", trainer: "bg-wait", employee: "bg-go" };
+
 export function Wordmark({ className }: { className?: string }) {
   return <span className={cn("font-display font-semibold tracking-tight lowercase", className)}>выход</span>;
 }
@@ -122,15 +125,23 @@ export function MiniApp() {
                 <span className={cn("size-1.5 rounded-full", working ? "bg-go" : "bg-idle")} />
                 {user.account_state === "paused" ? "На паузе" : working ? "Работаю" : "Не работаю"}
               </span>
-              {staff && <span className="block text-xs text-muted-foreground">{ROLE_TITLES[user.role]}</span>}
+              <span className="block text-xs text-muted-foreground">
+                {ROLE_TITLES[user.role]}{me.network ? ` · ${me.network}` : ""}
+              </span>
             </span>
           </button>
         </aside>
 
         <div className="flex min-h-dvh min-w-0 flex-col">
           {/* phone / iPad portrait: compact top bar under Telegram's controls */}
-          <header className="pt-safe flex items-center justify-between px-5 pb-3 lg:hidden">
-            <Wordmark className="text-xl" />
+          <header className="pt-safe flex items-center justify-between gap-3 px-5 pb-3 lg:hidden">
+            <div className="min-w-0">
+              <Wordmark className="block text-xl leading-tight" />
+              <span className="flex items-center gap-1.5 truncate text-[11px] font-semibold text-muted-foreground">
+                <span className={cn("size-1.5 shrink-0 rounded-full", ROLE_DOT[user.role])} />
+                {ROLE_TITLES[user.role]}{me.network ? ` · ${me.network}` : ""}
+              </span>
+            </div>
             <div className="flex items-center gap-2">
               <ThemeButton />
               <button
