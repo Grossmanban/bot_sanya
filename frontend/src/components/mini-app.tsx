@@ -8,6 +8,7 @@ import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type Them
 import { ThemeContext } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
+import { EasterEgg } from "./easter-egg";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
@@ -41,12 +42,6 @@ export function MiniApp() {
   const [me, setMe] = useState<Me | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("schedule");
-  // пасхалка: при каждом открытии фото на 0,2 секунды поверх экрана загрузки
-  const [egg, setEgg] = useState(true);
-  useEffect(() => {
-    const t = setTimeout(() => setEgg(false), 200);
-    return () => clearTimeout(t);
-  }, []);
 
   const loadMe = useCallback(async () => {
     try {
@@ -204,10 +199,7 @@ export function MiniApp() {
     <ThemeContext.Provider value={{ pref, scheme, setPref }}>
       <div className="min-h-dvh">
         {body}
-        {egg && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src="/hello.webp" alt="" aria-hidden className="fixed inset-0 z-[100] size-full bg-background object-cover" />
-        )}
+        <EasterEgg />
         <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }} />
       </div>
     </ThemeContext.Provider>
