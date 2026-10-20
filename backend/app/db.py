@@ -655,6 +655,33 @@ ALTER TABLE payout_items ADD COLUMN commission INTEGER NOT NULL DEFAULT 0;
 DROP INDEX IF EXISTS ux_networks_trainer;
 """)
 
+# ТЗ №20 + №22: live editing (optimistic version), prize type + photo, visibility in the feed
+# (auto — hidden N days after the end; shown/hidden — set by hand), soft delete; annulled results.
+# Old «archived» goals become hidden ones: they stay out of the feed and show up in «Архив».
+MIGRATIONS.append("""
+ALTER TABLE events ADD COLUMN prize_type TEXT;
+ALTER TABLE events ADD COLUMN prize_photo TEXT;
+ALTER TABLE events ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE events ADD COLUMN visibility TEXT NOT NULL DEFAULT 'auto' CHECK (visibility IN ('auto','shown','hidden'));
+ALTER TABLE events ADD COLUMN hidden_at TEXT;
+ALTER TABLE events ADD COLUMN deleted_at TEXT;
+ALTER TABLE events ADD COLUMN updated_at TEXT;
+ALTER TABLE goals ADD COLUMN prize TEXT;
+ALTER TABLE goals ADD COLUMN prize_type TEXT;
+ALTER TABLE goals ADD COLUMN prize_photo TEXT;
+ALTER TABLE goals ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE goals ADD COLUMN visibility TEXT NOT NULL DEFAULT 'auto' CHECK (visibility IN ('auto','shown','hidden'));
+ALTER TABLE goals ADD COLUMN hidden_at TEXT;
+ALTER TABLE goals ADD COLUMN deleted_at TEXT;
+ALTER TABLE goals ADD COLUMN updated_at TEXT;
+ALTER TABLE goal_participants ADD COLUMN annulled_at TEXT;
+ALTER TABLE goal_participants ADD COLUMN annul_reason TEXT;
+ALTER TABLE event_entries ADD COLUMN annulled_at TEXT;
+UPDATE goals SET visibility = 'hidden', hidden_at = COALESCE(completed_at, created_at),
+                 status = CASE WHEN completed_at IS NOT NULL THEN 'completed' ELSE 'active' END
+ WHERE status = 'archived';
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

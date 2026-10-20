@@ -164,9 +164,13 @@ const lanesFrom = (rows: { name: string; start_time: string | null; end_time: st
   }));
 
 function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
-  const [when, setWhen] = useState<"today" | "tomorrow">("tomorrow");
-  const { data, loading, reload } = useLoad(() => api.admin.raspred(when), [version, when]);
+  const today = moscowToday();
+  const tomorrow = addDays(today, 1);
+  // ТЗ №21: «На сегодня», «На завтра» or any day from the calendar
+  const [day, setDay] = useState(tomorrow);
+  const { data, loading, reload } = useLoad(() => api.admin.raspredOn(day), [version, day]);
   const [copied, setCopied] = useState(false);
+  const other = day !== today && day !== tomorrow;
 
   async function copy(text: string) {
     try {
@@ -185,18 +189,27 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
     setTimeout(() => setCopied(false), 1800);
   }
 
+  const tab = (active: boolean) =>
+    cn("press relative h-10 flex-1 rounded-xl text-sm font-semibold transition-colors",
+      active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground");
   const tabs = (
     <div className="flex gap-1 rounded-2xl bg-card p-1 shadow-lift">
-      {(["today", "tomorrow"] as const).map((w) => (
-        <button key={w} onClick={() => { tapHaptic(); setWhen(w); }}
-                className={cn("press h-10 flex-1 rounded-xl text-sm font-semibold transition-colors",
-                  when === w ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
-          {w === "today" ? "На сегодня" : "На завтра"}
+      {[today, tomorrow].map((d) => (
+        <button key={d} onClick={() => { tapHaptic(); setDay(d); }} className={tab(day === d)}>
+          {d === today ? "На сегодня" : "На завтра"}
         </button>
       ))}
+      <label className={cn(tab(other), "grid cursor-pointer place-items-center")}>
+        <span className="pointer-events-none truncate px-2">{other ? `📅 ${dayMonth(day)}` : "📅 Дата"}</span>
+        <input type="date" aria-label="Распред на другую дату" value={day}
+               onChange={(e) => { if (e.target.value) { tapHaptic(); setDay(e.target.value); } }}
+               className="absolute inset-0 cursor-pointer opacity-0" />
+      </label>
     </div>
   );
-  if (!data || data.date !== (when === "today" ? moscowToday() : addDays(moscowToday(), 1)))
+  const caption = day === today ? "Сегодня" : day === tomorrow ? "Завтра"
+    : `${WEEKDAYS[parseDay(day).weekday]}${day < today ? " · прошедший день" : ""}`;
+  if (!data || data.date !== day)
     return <div className="space-y-4">{tabs}<Skeleton className="h-72 rounded-3xl" /></div>;
   return (
     <div className="space-y-4">
@@ -204,7 +217,7 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
       <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-sm text-muted-foreground">{when === "today" ? "Сегодня" : "Завтра"}</p>
+            <p className="text-sm text-muted-foreground">{caption}</p>
             <h2 className="font-display text-2xl font-semibold">{dayMonth(data.date)}</h2>
             <p className="mt-1 text-[15px] text-muted-foreground">
               {data.total_count
@@ -260,7 +273,7 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
           {copied ? <Check key="ok" className="pop" /> : <Copy />}
           {copied ? "Скопировано" : "Скопировать"}
         </Button>
-        {when === "tomorrow" && <p className="mt-3 text-sm text-muted-foreground">В боте тот же текст по команде /raspred_zavtra.</p>}
+        {day === tomorrow && <p className="mt-3 text-sm text-muted-foreground">В боте тот же текст по команде /raspred_zavtra.</p>}
       </section>
     </div>
   );

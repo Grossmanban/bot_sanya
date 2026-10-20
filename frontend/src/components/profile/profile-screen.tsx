@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Bell, ChevronLeft, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
+import { Archive, Bell, ChevronLeft, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -15,8 +15,9 @@ import { BalanceCard, TxRow } from "../finance/money";
 import { Avatar } from "../avatar";
 import { ThemeChoice } from "../theme-toggle";
 import { QuickAccess } from "./quick-access";
+import { ArchiveList } from "../archive";
 
-type View = "main" | "history" | "penalties" | "requisites";
+type View = "main" | "history" | "penalties" | "requisites" | "archive";
 
 export function ProfileScreen({
   user,
@@ -39,6 +40,14 @@ export function ProfileScreen({
   if (view === "history") return <HistoryView onBack={() => setView("main")} />;
   if (view === "penalties") return <PenaltiesView onBack={() => setView("main")} />;
   if (view === "requisites") return <RequisitesView onBack={() => setView("main")} />;
+  if (view === "archive") {
+    return (
+      <div className="mx-auto max-w-2xl">
+        <SubHeader title="Архив целей и событий" onBack={() => setView("main")} />
+        <ArchiveList />
+      </div>
+    );
+  }
 
   const working = user.work_status === "working";
   const bal = money.data?.balance.balance ?? 0;
@@ -153,6 +162,7 @@ export function ProfileScreen({
             value={money.data ? (bal ? `${bal > 0 ? "+" : "−"}${rub(Math.abs(bal))}` : "0 ₽") : undefined}
             onClick={() => setView("penalties")}
           />
+          <MenuRow icon={Archive} label="Архив целей и событий" onClick={() => setView("archive")} />
           <MenuRow icon={CreditCard} label="Реквизиты для выплат" value={profile.data ? (profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
                    onClick={() => setView("requisites")} />
         </section>

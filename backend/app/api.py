@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, events, finance, goals, networks, payouts, rates, reports, violations
+from . import day_actual, events, finance, goals, lifecycle, networks, payouts, rates, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -117,6 +117,55 @@ class EventBody(BaseModel):
     max_winners: int = 1
     max_attempts: int = 3
     network_id: int | None = None
+    prize_type: str | None = None
+    prize_photo: str | None = None
+    idempotency_key: str
+
+
+class EventPatch(BaseModel):
+    """ТЗ №20: only the fields sent are changed; `version` — what the editor saw (optimistic locking)."""
+    version: int
+    notify: bool = False
+    title: str | None = None
+    description: str | None = None
+    starts_at: str | None = None
+    ends_at: str | None = None
+    target: int | None = None
+    max_winners: int | None = None
+    max_attempts: int | None = None
+    prize: str | None = None
+    prize_type: str | None = None
+    prize_photo: str | None = None
+    idempotency_key: str
+
+
+class GoalPatch(BaseModel):
+    version: int
+    notify: bool = False
+    title: str | None = None
+    description: str | None = None
+    target: int | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    prize: str | None = None
+    prize_type: str | None = None
+    prize_photo: str | None = None
+    idempotency_key: str
+
+
+class Visibility(BaseModel):
+    hidden: bool
+    idempotency_key: str
+
+
+class ReasonBody(BaseModel):
+    reason: str
+    idempotency_key: str
+
+
+class GoalAnnul(BaseModel):
+    user_id: int
+    reason: str
     idempotency_key: str
 
 
@@ -136,6 +185,9 @@ class GoalBody(BaseModel):
     user_id: int | None = None
     network_id: int | None = None
     mode: str = "shared"
+    prize: str | None = None
+    prize_type: str | None = None
+    prize_photo: str | None = None
     idempotency_key: str
 
 
@@ -465,10 +517,23 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/events/{event_id}")
     async def my_event(event_id: int, user: dict = Depends(current_user)):
-        event = events.get(conn, event_id)
-        if event is None or event["id"] not in {e["id"] for e in events.visible(conn, user, days=30)}:
-            raise svc.ServiceError("Событие не найдено", 404, "not_found")
-        return {"event": events.view(conn, event, user)}
+        return {"event": events.view(conn, events.readable(conn, user, event_id), user)}
+
+    @api.get("/archive")
+    async def my_archive(user: dict = Depends(current_user)):
+        """ТЗ №22: hidden and long finished goals and events, with their results."""
+        return {"events": [events.view(conn, e, user) for e in events.archived(conn, user)],
+                "goals": goals.archived(conn, user)}
+
+    @api.get("/media/prize_{kind}/{item_id}")
+    async def prize_photo(kind: str, item_id: int, exp: int, sig: str):
+        if kind not in lifecycle.TABLES or not media.verify(item_id, exp, sig, kind=f"prize_{kind}"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        row = conn.execute(f"SELECT prize_photo FROM {lifecycle.TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
+        found = await notifier.fetch_photo(row[0]) if row and row[0] else None
+        if found is None:
+            raise svc.ServiceError("Фото недоступно", 404, "not_found")
+        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
     @api.post("/events/{event_id}/entries")
     async def event_entry(event_id: int, request: Request, value: int = Query(...), idempotency_key: str = Query(...),
@@ -750,6 +815,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_raspred_today(_: dict = Depends(staff("raspred"))):
         return svc.raspred(conn, today_local())
 
+    @api.get("/admin/raspred")
+    async def admin_raspred_day(date: str, _: dict = Depends(staff("raspred"))):
+        """ТЗ №21: the same text for any day, past or future."""
+        return svc.raspred(conn, svc.parse_date(date))
+
     @api.get("/admin/day")
     async def admin_day(day: str = Query(...), admin: dict = Depends(admin_user)):
         d = svc.parse_date(day)
@@ -902,57 +972,149 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     # ------------------------------------------------------------ live events (ТЗ модуль 7)
 
+    def event_admin_view(e: dict, admin: dict) -> dict:
+        return {**events.view(conn, e), "in_feed": events.in_feed(conn, e),
+                "can_manage": lifecycle.can_manage(conn, admin, "event", e),
+                "entries": [{"id": x["id"], "user_id": x["user_id"], "value": x["value"], "status": x["status"],
+                             "annulled": bool(x["annulled_at"]), "reason": x["reason"]}
+                            for x in events.entries(conn, e["id"]) if x["status"] == "confirmed"]}
+
+    def when(value: str | None):
+        if value is None:
+            return None
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise svc.ServiceError("Некорректное время", 422, "bad_time") from exc
+        return dt if dt.tzinfo else dt.replace(tzinfo=settings.tz)
+
     @api.get("/admin/events")
     async def admin_events(admin: dict = Depends(staff("review"))):
-        rows = events.visible(conn, admin, days=14)
-        if not perms.sees_everyone(admin):
-            rows = [e for e in rows if e["network_id"] == admin["network_id"]]
-        return {"items": [events.view(conn, e) for e in rows], "pending": events.pending_entries(conn, admin)}
+        return {"items": [event_admin_view(e, admin) for e in events.managed(conn, admin)],
+                "pending": events.pending_entries(conn, admin), "prize_types": lifecycle.PRIZE_TYPES,
+                "hide_after_days": lifecycle.hide_after_days(conn)}
 
     @api.post("/admin/events")
     async def admin_event_create(body: EventBody, admin: dict = Depends(staff("review"))):
-        def when(value: str):
-            try:
-                dt = datetime.fromisoformat(value)
-            except ValueError as exc:
-                raise svc.ServiceError("Некорректное время", 422, "bad_time") from exc
-            return dt if dt.tzinfo else dt.replace(tzinfo=settings.tz)
         event = events.create(conn, admin, title=body.title, mode=body.mode, starts_at=when(body.starts_at),
                               ends_at=when(body.ends_at), key=body.idempotency_key, description=body.description,
                               prize=body.prize, target=body.target, max_winners=body.max_winners,
-                              max_attempts=body.max_attempts, network_id=body.network_id)
+                              max_attempts=body.max_attempts, network_id=body.network_id, prize_type=body.prize_type,
+                              prize_photo=body.prize_photo)
         notifier.spawn(notifier.event_created(event))
         return {"event": events.view(conn, event)}
 
+    @api.patch("/admin/events/{event_id}")
+    async def admin_event_update(event_id: int, body: EventPatch, admin: dict = Depends(staff("review"))):
+        """ТЗ №20: critical changes are announced only when the editor confirmed «уведомить»."""
+        sent = body.model_fields_set - {"version", "notify", "idempotency_key"}
+        changes = {k: getattr(body, k) for k in sent}
+        for k in ("starts_at", "ends_at"):
+            if k in changes:
+                changes[k] = when(changes[k])
+        result = events.update(conn, admin, event_id, body.version, changes, body.idempotency_key)
+        if result.finished:
+            notifier.spawn(notifier.event_finished(result.event))
+        elif result.critical and body.notify:
+            notifier.spawn(notifier.event_updated(result))
+        return {"event": event_admin_view(result.event, admin), "changed": result.changed, "critical": result.critical,
+                "finished": result.finished, "restarted": result.restarted}
+
+    @api.post("/admin/events/{event_id}/visibility")
+    async def admin_event_visibility(event_id: int, body: Visibility, admin: dict = Depends(staff("review"))):
+        event = lifecycle.set_visibility(conn, admin, "event", event_id, body.hidden, body.idempotency_key)
+        return {"event": event_admin_view(event, admin)}
+
+    @api.post("/admin/events/{event_id}/delete")
+    async def admin_event_delete(event_id: int, body: KeyOnly, admin: dict = Depends(staff("review"))):
+        lifecycle.delete(conn, admin, "event", event_id, body.idempotency_key)
+        return {"deleted": True}
+
     @api.post("/admin/events/{event_id}/cancel")
     async def admin_event_cancel(event_id: int, body: KeyOnly, admin: dict = Depends(staff("review"))):
-        return {"event": events.view(conn, events.cancel(conn, admin, event_id, body.idempotency_key))}
+        return {"event": event_admin_view(events.cancel(conn, admin, event_id, body.idempotency_key), admin)}
+
+    @api.post("/admin/event-entries/{entry_id}/annul")
+    async def admin_entry_annul(entry_id: int, body: ReasonBody, admin: dict = Depends(staff("review"))):
+        result = events.annul_entry(conn, admin, entry_id, body.reason, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.entry_annulled(result, admin))
+        return {"event": event_admin_view(result.event, admin), "changed": result.changed, "reopened": result.reopened}
 
     @api.post("/admin/event-entries/{entry_id}/review")
     async def admin_event_review(entry_id: int, body: EntryReview, admin: dict = Depends(staff("review"))):
         result = events.review(conn, admin, entry_id, body.approve, body.reason, body.idempotency_key)
         if result.changed:
             notifier.spawn(notifier.event_reviewed(result, admin))
-        return {"event": events.view(conn, result.event), "changed": result.changed}
+        return {"event": event_admin_view(result.event, admin), "changed": result.changed}
 
     # ------------------------------------------------------------ goals (ТЗ модуль 5)
 
     @api.get("/admin/goals")
     async def admin_goals(admin: dict = Depends(admin_user)):
-        return {"items": goals.listing(conn, admin)}
+        return {"items": goals.listing(conn, admin), "prize_types": lifecycle.PRIZE_TYPES,
+                "hide_after_days": lifecycle.hide_after_days(conn)}
+
+    def goal_admin_view(goal: dict, admin: dict) -> dict:
+        return {**goals.view(conn, goal), "in_feed": goals.in_feed(conn, goal),
+                "can_manage": lifecycle.can_manage(conn, admin, "goal", goal)}
 
     @api.post("/admin/goals")
     async def admin_goal_create(body: GoalBody, admin: dict = Depends(admin_user)):
         goal = goals.create(conn, admin, title=body.title, kind=body.kind, target=body.target,
                             date_from=svc.parse_date(body.date_from), date_to=svc.parse_date(body.date_to),
                             key=body.idempotency_key, description=body.description, user_id=body.user_id,
-                            network_id=body.network_id, mode=body.mode)
+                            network_id=body.network_id, mode=body.mode, prize=body.prize, prize_type=body.prize_type,
+                            prize_photo=body.prize_photo)
         notifier.spawn(notifier.goal_created(goal))
-        return {"goal": goals.view(conn, goal)}
+        return {"goal": goal_admin_view(goal, admin)}
+
+    @api.patch("/admin/goals/{goal_id}")
+    async def admin_goal_update(goal_id: int, body: GoalPatch, admin: dict = Depends(admin_user)):
+        sent = body.model_fields_set - {"version", "notify", "idempotency_key"}
+        changes = {k: getattr(body, k) for k in sent}
+        for k in ("date_from", "date_to"):
+            if changes.get(k) is not None:
+                changes[k] = svc.parse_date(changes[k])
+        result = goals.update(conn, admin, goal_id, body.version, changes, body.idempotency_key)
+        if result.critical and body.notify:
+            notifier.spawn(notifier.goal_updated(result))
+        # a lowered target: those who reach it now hear about it at once, not on the next tick
+        done = goals.check_completions(conn)
+        if done:
+            notifier.spawn(notifier.goals_completed(done))
+        return {"goal": goal_admin_view(goals.get(conn, goal_id), admin), "changed": result.changed,
+                "critical": result.critical}
+
+    @api.post("/admin/goals/{goal_id}/visibility")
+    async def admin_goal_visibility(goal_id: int, body: Visibility, admin: dict = Depends(admin_user)):
+        goal = lifecycle.set_visibility(conn, admin, "goal", goal_id, body.hidden, body.idempotency_key)
+        return {"goal": goal_admin_view(goal, admin)}
 
     @api.post("/admin/goals/{goal_id}/archive")
     async def admin_goal_archive(goal_id: int, body: KeyOnly, admin: dict = Depends(admin_user)):
-        return {"goal": goals.view(conn, goals.archive(conn, admin, goal_id, body.idempotency_key))}
+        """Older clients: «В архив» is hiding now (ТЗ №22)."""
+        goal = lifecycle.set_visibility(conn, admin, "goal", goal_id, True, body.idempotency_key)
+        return {"goal": goal_admin_view(goal, admin)}
+
+    @api.post("/admin/goals/{goal_id}/delete")
+    async def admin_goal_delete(goal_id: int, body: KeyOnly, admin: dict = Depends(admin_user)):
+        lifecycle.delete(conn, admin, "goal", goal_id, body.idempotency_key)
+        return {"deleted": True}
+
+    @api.post("/admin/goals/{goal_id}/revoke")
+    async def admin_goal_revoke(goal_id: int, body: KeyOnly, admin: dict = Depends(admin_user)):
+        goal, lost = goals.revoke(conn, admin, goal_id, body.idempotency_key)
+        if lost:
+            notifier.spawn(notifier.goal_revoked(goal, lost))
+        return {"goal": goal_admin_view(goal, admin), "revoked": len(lost)}
+
+    @api.post("/admin/goals/{goal_id}/annul")
+    async def admin_goal_annul(goal_id: int, body: GoalAnnul, admin: dict = Depends(admin_user)):
+        goal, changed = goals.annul(conn, admin, goal_id, body.user_id, body.reason, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.goal_annulled(goal, body.user_id, admin))
+        return {"goal": goal_admin_view(goal, admin), "changed": changed}
 
     # ------------------------------------------------------------ networks (ТЗ модуль 8)
 

@@ -1,14 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, LoaderCircle, Plus, X } from "lucide-react";
+import { Check, LoaderCircle, Plus, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type LiveEvent, type PendingEntry, type User } from "@/lib/api";
+import { api, type EventChanges, type LiveEvent, type PendingEntry, type User } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
+import {
+  ANNUL_PRESETS, DeleteButton, EditButton, NotifyDialog, PrizeFields, PrizeThumb, ReasonInput, VisibilityButton,
+  prizePhotoValue, prizeState, prizeText,
+} from "../lifecycle";
 import { PhotoThumb } from "../report/photo";
 import { Leaderboard, RULE } from "./live";
 
@@ -25,7 +29,7 @@ export function EventsAdmin({ me }: { me: User }) {
 
   return (
     <div className="space-y-4">
-      <CreateEvent everyone={everyone} myNetwork={me.network_id} onDone={reload} />
+      <CreateEvent everyone={everyone} myNetwork={me.network_id} types={data?.prize_types ?? []} onDone={reload} />
       {!data ? <Skeleton className="h-40 rounded-3xl" /> : (
         <>
           {data.pending.length > 0 && (
@@ -36,7 +40,7 @@ export function EventsAdmin({ me }: { me: User }) {
           )}
           {data.items.length === 0 ? (
             <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">Событий пока не было.</p>
-          ) : data.items.map((e) => <EventCard key={e.id} event={e} onDone={reload} />)}
+          ) : data.items.map((e) => <EventCard key={e.id} event={e} types={data.prize_types} days={data.hide_after_days} onDone={reload} />)}
         </>
       )}
     </div>
@@ -82,10 +86,22 @@ function EntryRow({ entry, onDone }: { entry: PendingEntry; onDone: () => void }
   );
 }
 
-function EventCard({ event, onDone }: { event: LiveEvent; onDone: () => void }) {
+const FEED: Record<string, string> = { hidden: "скрыто из ленты", shown: "закреплено в ленте" };
+
+function feedNote(e: LiveEvent, days: number) {
+  if (e.visibility !== "auto") return FEED[e.visibility];
+  if (e.in_feed === false) return "в архиве";
+  return e.status === "active" ? null : `уйдёт в архив через ${days} дн. после финиша`;
+}
+
+function EventCard({ event, types, days, onDone }: { event: LiveEvent; types: string[]; days: number; onDone: () => void }) {
   const { busy, run } = useAction();
+  const [editing, setEditing] = useState<"edit" | "restart" | null>(null);
+  const names = new Map(event.leaderboard.map((r) => [r.user_id, r.name]));
+  const note = feedNote(event, days);
+  const prize = prizeText(event);
   return (
-    <section className="row-in space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+    <section className={cn("row-in space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6", event.visibility === "hidden" && "opacity-80")}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="font-display text-lg font-semibold">{event.title}</h3>
@@ -94,55 +110,95 @@ function EventCard({ event, onDone }: { event: LiveEvent; onDone: () => void }) 
           </p>
           <p className={cn("mt-1 text-xs font-semibold", event.phase === "live" ? "text-go" : "text-muted-foreground")}>
             {{ upcoming: "скоро старт", live: "идёт", review: "проверка последних заявок", finished: "завершено", cancelled: "отменено" }[event.phase]}
-            {event.prize ? ` · приз: ${event.prize}` : ""}
+            {prize ? ` · приз: ${prize}` : ""}
+            {note && <span className="text-wait"> · {note}</span>}
           </p>
         </div>
-        {event.status === "active" && (
-          <Button variant="ghost" size="sm" className="h-8 shrink-0 rounded-lg text-muted-foreground" disabled={!!busy}
-                  onClick={async () => { try { await run("cancel", (k) => api.admin.cancelEvent(event.id, k), "Событие отменено"); onDone(); } catch { /* toast */ } }}>
-            Отменить
-          </Button>
-        )}
+        <PrizeThumb url={event.prize_photo_url} className="size-14" />
       </div>
+      {event.can_manage && (
+        <div className="-mx-2 flex flex-wrap items-center gap-0.5">
+          {event.status !== "cancelled" && <EditButton onClick={() => setEditing(editing ? null : "edit")} />}
+          <VisibilityButton item={event} noun="событие" onToggle={async (hidden, k) => { await api.admin.eventVisibility(event.id, hidden, k); onDone(); }} />
+          <DeleteButton noun="событие" onDelete={async (k) => { await api.admin.deleteEvent(event.id, k); onDone(); }} />
+          <span className="flex-1" />
+          {event.status === "finished" && (
+            <Button variant="ghost" size="sm" className="h-8 rounded-lg text-muted-foreground" onClick={() => setEditing("restart")}>
+              <RotateCcw /> Перезапустить
+            </Button>
+          )}
+          {event.status === "active" && (
+            <Button variant="ghost" size="sm" className="h-8 shrink-0 rounded-lg text-muted-foreground" disabled={!!busy}
+                    onClick={async () => { try { await run("cancel", (k) => api.admin.cancelEvent(event.id, k), "Событие отменено"); onDone(); } catch { /* toast */ } }}>
+              Отменить
+            </Button>
+          )}
+        </div>
+      )}
+      {editing && (
+        <div className="row-in rounded-2xl bg-muted/50 p-4">
+          {editing === "restart" && (
+            <p className="mb-3 text-sm text-muted-foreground">
+              Поставьте новый финиш позже текущего времени — событие снова примет заявки, результаты сохранятся.
+              {event.mode === "first_to_reach" && event.winners_count >= event.max_winners ? " Все победители уже есть — увеличьте их число." : ""}
+            </p>
+          )}
+          <EventForm initial={event} types={types} everyone={false} myNetwork={null}
+                     onDone={() => { setEditing(null); onDone(); }} onCancel={() => setEditing(null)} />
+        </div>
+      )}
       {event.leaderboard.length > 0 ? <Leaderboard event={event} /> : <p className="text-sm text-muted-foreground">Заявок пока нет.</p>}
+      {event.can_manage && (event.entries?.length ?? 0) > 0 && (
+        <details className="group rounded-2xl bg-muted/40 px-4 py-3">
+          <summary className="cursor-pointer text-sm font-medium">Подтверждённые результаты <span className="text-muted-foreground">{event.entries!.length}</span></summary>
+          <ul className="mt-2 divide-y">
+            {event.entries!.map((x) => <ConfirmedEntry key={x.id} id={x.id} name={names.get(x.user_id) ?? "Участник"} value={x.value} onDone={onDone} />)}
+          </ul>
+        </details>
+      )}
     </section>
   );
 }
 
-function CreateEvent({ everyone, myNetwork, onDone }: { everyone: boolean; myNetwork: number | null; onDone: () => void }) {
-  const nets = useLoad(() => api.admin.networks(), []);
-  const today = moscowToday();
+/** ТЗ №20: take a confirmed result back — conditions changed or the work was dishonest. */
+function ConfirmedEntry({ id, name, value, onDone }: { id: number; name: string; value: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<LiveEvent["mode"]>("accumulative");
-  const [title, setTitle] = useState("");
-  const [prize, setPrize] = useState("");
-  const [description, setDescription] = useState("");
-  const [target, setTarget] = useState("");
-  const [winners, setWinners] = useState("3");
-  const [attempts, setAttempts] = useState("3");
-  const [starts, setStarts] = useState(`${today}T10:00`);
-  const [ends, setEnds] = useState(`${today}T20:00`);
-  const [network, setNetwork] = useState<number | null>(everyone ? null : myNetwork);
+  const [reason, setReason] = useState("");
   const { busy, run } = useAction();
+  return (
+    <li className="space-y-2 py-2.5">
+      <div className="flex items-center gap-3 text-sm">
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <span className="font-semibold tabular">{value} шт.</span>
+        <Button variant="ghost" size="sm" className="h-8 rounded-lg text-muted-foreground" onClick={() => setOpen((v) => !v)}>
+          <Undo2 /> Отменить
+        </Button>
+      </div>
+      {open && (
+        <div className="row-in space-y-2">
+          <ReasonInput value={reason} onChange={setReason} presets={ANNUL_PRESETS} />
+          <Button className="press h-10 w-full rounded-xl" disabled={!!busy || !reason.trim()}
+                  onClick={async () => {
+                    try {
+                      const res = await run("annul", (k) => api.admin.annulEntry(id, reason.trim(), k));
+                      if (res) {
+                        toast.success(res.reopened ? "Результат отменён, гонка продолжается" : "Результат отменён, участник получил уведомление");
+                        onDone();
+                      }
+                    } catch {
+                      /* toast shown */
+                    }
+                  }}>
+            {busy && <LoaderCircle className="animate-spin" />} Отменить результат
+          </Button>
+        </div>
+      )}
+    </li>
+  );
+}
 
-  async function create() {
-    try {
-      const res = await run("create", (k) => api.admin.createEvent({
-        title: title.trim(), mode, starts_at: starts, ends_at: ends, prize: prize.trim() || undefined,
-        description: description.trim() || undefined, target: mode === "first_to_reach" ? Number(target) : null,
-        max_winners: Number(winners) || 1, max_attempts: Number(attempts) || 3, network_id: network,
-      }, k));
-      if (res) {
-        toast.success("Событие запущено, участники получили уведомление");
-        setOpen(false);
-        setTitle("");
-        onDone();
-      }
-    } catch {
-      /* toast shown */
-    }
-  }
-
+function CreateEvent({ everyone, myNetwork, types, onDone }: { everyone: boolean; myNetwork: number | null; types: string[]; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
   return (
     <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <button className="flex w-full items-center gap-3 text-left" onClick={() => setOpen((v) => !v)}>
@@ -153,47 +209,134 @@ function CreateEvent({ everyone, myNetwork, onDone }: { everyone: boolean; myNet
         </span>
       </button>
       {open && (
-        <div className="row-in mt-4 space-y-3">
-          <div className="grid grid-cols-2 gap-1 rounded-2xl bg-muted p-1">
-            {(["accumulative", "first_to_reach"] as const).map((m) => (
-              <button key={m} onClick={() => setMode(m)} className={cn("press h-10 rounded-xl text-sm font-semibold", mode === m ? "bg-card shadow-lift" : "text-muted-foreground")}>
-                {m === "accumulative" ? "Кто больше" : "Гонка до цели"}
-              </button>
-            ))}
-          </div>
-          <input className={field} placeholder="Название, например «Пятничный спринт»" value={title} onChange={(e) => setTitle(e.target.value.slice(0, 80))} />
-          <input className={field} placeholder="Приз" value={prize} onChange={(e) => setPrize(e.target.value.slice(0, 200))} />
-          <div className="grid grid-cols-3 gap-2">
-            {mode === "first_to_reach" && (
-              <label className="space-y-1"><span className="text-xs text-muted-foreground">Цель, шт.</span>
-                <input inputMode="numeric" className={field} value={target} onChange={(e) => setTarget(e.target.value.replace(/\D/g, "").slice(0, 6))} /></label>
-            )}
-            <label className="space-y-1"><span className="text-xs text-muted-foreground">Победителей</span>
-              <input inputMode="numeric" className={field} value={winners} onChange={(e) => setWinners(e.target.value.replace(/\D/g, "").slice(0, 3))} /></label>
-            <label className="space-y-1"><span className="text-xs text-muted-foreground">Попыток</span>
-              <input inputMode="numeric" className={field} value={attempts} onChange={(e) => setAttempts(e.target.value.replace(/\D/g, "").slice(0, 3))} /></label>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <label className="space-y-1"><span className="text-xs text-muted-foreground">Старт</span>
-              <input type="datetime-local" className={field} value={starts} onChange={(e) => setStarts(e.target.value)} /></label>
-            <label className="space-y-1"><span className="text-xs text-muted-foreground">Финиш</span>
-              <input type="datetime-local" className={field} value={ends} onChange={(e) => setEnds(e.target.value)} /></label>
-          </div>
-          {everyone && (nets.data?.items.length ?? 0) > 0 && (
-            <select className={field} value={network ?? ""} onChange={(e) => setNetwork(e.target.value ? Number(e.target.value) : null)}>
-              <option value="">Для всех</option>
-              {nets.data!.items.map((n) => <option key={n.id} value={n.id}>Сеть «{n.name}»</option>)}
-            </select>
-          )}
-          <textarea rows={2} className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25"
-                    placeholder="Правила (необязательно)" value={description} onChange={(e) => setDescription(e.target.value.slice(0, 500))} />
-          <p className="text-xs text-muted-foreground">После финиша ещё 15 минут на проверку последних заявок, затем итоги уходят всем участникам.</p>
-          <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
-                  disabled={!!busy || !title.trim() || (mode === "first_to_reach" && !Number(target))} onClick={create}>
-            {busy && <LoaderCircle className="animate-spin" />} Запустить
-          </Button>
+        <div className="row-in mt-4">
+          <EventForm types={types} everyone={everyone} myNetwork={myNetwork} onDone={() => { setOpen(false); onDone(); }} />
         </div>
       )}
     </section>
+  );
+}
+
+const local = (iso: string) => iso.slice(0, 16);
+const CRITICAL: (keyof EventChanges)[] = ["starts_at", "ends_at", "target", "max_winners", "max_attempts", "prize", "prize_type"];
+
+/** One form to create and to edit (ТЗ №20: the same form, filled in). */
+function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
+  initial?: LiveEvent; types: string[]; everyone: boolean; myNetwork: number | null; onDone: () => void; onCancel?: () => void;
+}) {
+  const nets = useLoad(() => (everyone && !initial ? api.admin.networks() : Promise.resolve({ items: [] })), [everyone, initial]);
+  const today = moscowToday();
+  const editing = !!initial;
+  const [mode, setMode] = useState<LiveEvent["mode"]>(initial?.mode ?? "accumulative");
+  const [title, setTitle] = useState(initial?.title ?? "");
+  const [prize, setPrize] = useState(prizeState(initial));
+  const [description, setDescription] = useState(initial?.description ?? "");
+  const [target, setTarget] = useState(initial?.target ? String(initial.target) : "");
+  const [winners, setWinners] = useState(String(initial?.max_winners ?? 3));
+  const [attempts, setAttempts] = useState(String(initial?.max_attempts ?? 3));
+  const [starts, setStarts] = useState(initial ? local(initial.starts_at) : `${today}T10:00`);
+  const [ends, setEnds] = useState(initial ? local(initial.ends_at) : `${today}T20:00`);
+  const [network, setNetwork] = useState<number | null>(everyone ? null : myNetwork);
+  const [asking, setAsking] = useState<string[] | null>(null);
+  const { busy, run } = useAction();
+  const started = !!initial && initial.phase !== "upcoming";
+  const raceLocked = !!initial && initial.mode === "first_to_reach" && initial.winners_count > 0;
+
+  function changes(): EventChanges {
+    const next: EventChanges = {
+      title: title.trim(), description: description.trim() || null, prize: prize.prize.trim() || null,
+      prize_type: prize.type.trim() || null, starts_at: starts, ends_at: ends,
+      max_winners: Number(winners) || 1, max_attempts: Number(attempts) || 3,
+      ...(mode === "first_to_reach" ? { target: Number(target) } : {}),
+    };
+    if (!initial) return next;
+    const was: Record<string, unknown> = { ...initial, starts_at: local(initial.starts_at), ends_at: local(initial.ends_at) };
+    return Object.fromEntries(Object.entries(next).filter(([k, v]) => (was[k] ?? null) !== v)) as EventChanges;
+  }
+
+  async function save(notify: boolean) {
+    setAsking(null);
+    try {
+      const res = await run("save", async (k) => {
+        const photo = await prizePhotoValue(prize);
+        const body = { ...changes(), ...(photo !== undefined ? { prize_photo: photo } : {}) };
+        if (!initial) {
+          return api.admin.createEvent({
+            title: body.title!, mode, starts_at: starts, ends_at: ends, prize: body.prize ?? undefined, prize_type: body.prize_type,
+            prize_photo: photo ?? null, description: body.description ?? undefined,
+            target: mode === "first_to_reach" ? Number(target) : null, max_winners: body.max_winners!, max_attempts: body.max_attempts!,
+            network_id: network,
+          }, k);
+        }
+        return api.admin.updateEvent(initial.id, { ...body, version: initial.version, notify }, k);
+      });
+      if (!res) return;
+      if (!initial) toast.success("Событие запущено, участники получили уведомление");
+      else if ("restarted" in res && res.restarted) toast.success("Событие перезапущено");
+      else if ("finished" in res && res.finished) toast.success("Финиш уже прошёл — событие завершено, итоги разосланы");
+      else toast.success(notify ? "Сохранено, участники уведомлены" : "Сохранено");
+      onDone();
+    } catch {
+      /* toast shown; a stale version asks to reopen */
+    }
+  }
+
+  function submit() {
+    const critical = initial ? CRITICAL.filter((k) => k in changes()) : [];
+    if (critical.length) setAsking(critical);
+    else void save(false);
+  }
+
+  const nothing = editing && Object.keys(changes()).length === 0 && !prize.file && !prize.cleared;
+  return (
+    <div className="space-y-3">
+      {!editing && (
+        <div className="grid grid-cols-2 gap-1 rounded-2xl bg-muted p-1">
+          {(["accumulative", "first_to_reach"] as const).map((m) => (
+            <button key={m} onClick={() => setMode(m)} className={cn("press h-10 rounded-xl text-sm font-semibold", mode === m ? "bg-card shadow-lift" : "text-muted-foreground")}>
+              {m === "accumulative" ? "Кто больше" : "Гонка до цели"}
+            </button>
+          ))}
+        </div>
+      )}
+      <input className={field} placeholder="Название, например «Пятничный спринт»" value={title} onChange={(e) => setTitle(e.target.value.slice(0, 80))} />
+      <div className="grid grid-cols-3 gap-2">
+        {mode === "first_to_reach" && (
+          <label className="space-y-1"><span className="text-xs text-muted-foreground">Цель, шт.</span>
+            <input inputMode="numeric" className={cn(field, raceLocked && "opacity-60")} disabled={raceLocked} value={target}
+                   onChange={(e) => setTarget(e.target.value.replace(/\D/g, "").slice(0, 6))} /></label>
+        )}
+        <label className="space-y-1"><span className="text-xs text-muted-foreground">Победителей</span>
+          <input inputMode="numeric" className={field} value={winners} onChange={(e) => setWinners(e.target.value.replace(/\D/g, "").slice(0, 3))} /></label>
+        <label className="space-y-1"><span className="text-xs text-muted-foreground">Попыток</span>
+          <input inputMode="numeric" className={field} value={attempts} onChange={(e) => setAttempts(e.target.value.replace(/\D/g, "").slice(0, 3))} /></label>
+      </div>
+      {raceLocked && <p className="text-xs text-muted-foreground">У гонки уже есть победители — цель не меняется. Чтобы изменить, сначала отмените их результат.</p>}
+      <div className="grid grid-cols-2 gap-2">
+        <label className="space-y-1"><span className="text-xs text-muted-foreground">Старт</span>
+          <input type="datetime-local" className={cn(field, started && "opacity-60")} disabled={started} value={starts} onChange={(e) => setStarts(e.target.value)} /></label>
+        <label className="space-y-1"><span className="text-xs text-muted-foreground">Финиш</span>
+          <input type="datetime-local" className={field} value={ends} onChange={(e) => setEnds(e.target.value)} /></label>
+      </div>
+      {started && <p className="text-xs text-muted-foreground">Событие уже началось — старт не меняется. Финиш раньше текущего времени завершит его сразу.</p>}
+      {everyone && !editing && (nets.data?.items.length ?? 0) > 0 && (
+        <select className={field} value={network ?? ""} onChange={(e) => setNetwork(e.target.value ? Number(e.target.value) : null)}>
+          <option value="">Для всех</option>
+          {nets.data!.items.map((n) => <option key={n.id} value={n.id}>Сеть «{n.name}»</option>)}
+        </select>
+      )}
+      <PrizeFields types={types} value={prize} onChange={setPrize} currentUrl={initial?.prize_photo_url} />
+      <textarea rows={2} className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25"
+                placeholder="Правила (необязательно)" value={description} onChange={(e) => setDescription(e.target.value.slice(0, 500))} />
+      {!editing && <p className="text-xs text-muted-foreground">После финиша ещё 15 минут на проверку последних заявок, затем итоги уходят всем участникам.</p>}
+      <div className="flex gap-2">
+        {onCancel && <Button variant="secondary" className="press h-12 rounded-2xl px-5" onClick={onCancel}>Отмена</Button>}
+        <Button className="press h-12 flex-1 rounded-2xl text-[15px] font-semibold"
+                disabled={!!busy || !title.trim() || (mode === "first_to_reach" && !Number(target)) || nothing} onClick={submit}>
+          {busy && <LoaderCircle className="animate-spin" />} {editing ? "Сохранить" : "Запустить"}
+        </Button>
+      </div>
+      <NotifyDialog fields={asking} onChoose={save} onCancel={() => setAsking(null)} />
+    </div>
   );
 }

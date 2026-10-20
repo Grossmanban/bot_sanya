@@ -55,6 +55,34 @@ def who(user: dict) -> str:
     return f'<a href="tg://user?id={user["telegram_id"]}">{name}</a> (без username)'
 
 
+def prize_line(item: dict) -> str:
+    """«Подарок — Наушники» / just one of them."""
+    return " — ".join(x for x in (item.get("prize_type"), item.get("prize")) if x)
+
+
+CHANGE_LABELS = {"starts_at": "Старт", "ends_at": "Финиш", "date_from": "Начало", "date_to": "Конец",
+                 "target": "Цель", "max_winners": "Победителей", "max_attempts": "Попыток",
+                 "prize": "Приз", "prize_type": "Тип приза"}
+
+
+def _shown(field: str, value) -> str:
+    if value is None or value == "":
+        return "—"
+    if field in ("starts_at", "ends_at"):
+        return f"{value[8:10]}.{value[5:7]} {value[11:16]}"
+    if field in ("date_from", "date_to"):
+        return f"{value[8:10]}.{value[5:7]}"
+    if field == "target":
+        return f"{value} шт."
+    return str(value)
+
+
+def change_lines(old: dict | None, new: dict, fields: list[str]) -> list[str]:
+    """ТЗ №20: what exactly changed, «Финиш: 20.10 18:00 → 21.10 18:00»."""
+    return [f"• {CHANGE_LABELS.get(f, f)}: {escape(_shown(f, (old or {}).get(f)))} → <b>{escape(_shown(f, new.get(f)))}</b>"
+            for f in fields]
+
+
 def handle(user: dict) -> str:
     if user.get("username"):
         return f"@{escape(user['username'])}"
@@ -951,16 +979,19 @@ class Notifier:
                 f"{'Норма' if goal['mode'] == 'each' or goal['kind'] == 'personal' else 'Общая норма'}: {goal['target']} шт., {period}")
         if goal["description"]:
             text += f"\n{escape(goal['description'])}"
+        if goal["prize"] or goal["prize_type"]:
+            text += f"\n🏆 Приз: {escape(prize_line(goal))}"
         if goal["kind"] == "personal":
             user = svc.get_user(self.conn, goal["user_id"])
             _, mine = goals.counted_so_far(self.conn, goal, [user["id"]])
             already = f"\nУже учтены ваши принятые отчёты с начала периода: {mine} шт." if mine else ""
-            return await self.send(user["telegram_id"], text + "\n\nПрогресс считается по принятым отчётам." + already)
+            return await self._photo_or_text(user["telegram_id"], goal["prize_photo"],
+                                             text + "\n\nПрогресс считается по принятым отчётам." + already)
         join = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🙋 Участвую", callback_data=f"goal:{goal['id']}")]])
         sent = 0
         for user in svc.list_users(self.conn):
             if user["account_state"] == "active" and goals.eligible(self.conn, goal, user):
-                sent += await self.send(user["telegram_id"], text, join)
+                sent += await self._photo_or_text(user["telegram_id"], goal["prize_photo"], text, join)
                 await asyncio.sleep(0.05)
         return sent
 
@@ -972,6 +1003,39 @@ class Notifier:
             if creator:
                 names = ", ".join(escape(svc.full_name(p)) for p in people)
                 await self.send(creator["telegram_id"], f"🎯 Цель «{escape(goal['title'])}» выполнена: {names}")
+
+    async def goal_updated(self, update) -> int:
+        """ТЗ №20: a critical change, the editor chose «уведомить» — every participant learns what changed."""
+        from . import goals
+
+        goal = update.goal
+        text = (f"⚠️ <b>Важное обновление по цели «{escape(goal['title'])}»</b>: изменены условия или сроки. "
+                f"Проверьте детали.\n" + "\n".join(change_lines(update.old, goal, update.critical)))
+        sent = 0
+        for p in goals.participants(self.conn, goal["id"]):
+            sent += await self.send(p["telegram_id"], text, self._event_markup())
+            await asyncio.sleep(0.05)
+        return sent
+
+    async def goal_revoked(self, goal: dict, people: list[dict]) -> None:
+        from . import goals
+
+        for p in people:
+            _, mine = goals.counted_so_far(self.conn, goal, [p["user_id"]])
+            total = goals.view(self.conn, goal)["total"] if goal["mode"] == "shared" else mine
+            await self.send(p["telegram_id"],
+                            f"📈 Норму цели «{escape(goal['title'])}» подняли до {goal['target']} шт. "
+                            f"Отметка «выполнено» снята — до цели осталось {max(0, goal['target'] - total)} шт.")
+
+    async def goal_annulled(self, goal: dict, user_id: int, actor: dict) -> None:
+        user = svc.get_user(self.conn, user_id)
+        reason = self.conn.execute("SELECT annul_reason FROM goal_participants WHERE goal_id = ? AND user_id = ?",
+                                   (goal["id"], user_id)).fetchone()[0]
+        await self.send(user["telegram_id"], f"🚫 Ваш результат в цели «{escape(goal['title'])}» аннулирован.\n"
+                                             f"Причина: {escape(reason or '')}")
+        await self.archive(["цель", "аннулирование"], (
+            f"🚫 <b>РЕЗУЛЬТАТ В ЦЕЛИ АННУЛИРОВАН</b>\nЦель: {escape(goal['title'])}\nСотрудник: {who(user)}\n"
+            f"Причина: {escape(reason or '')}\nРешение: {who(actor)}"))
 
     # ------------------------------------------------------------ live events (ТЗ модуль 7)
 
@@ -988,14 +1052,14 @@ class Notifier:
                 else f"Кто больше сделает: топ-{event['max_winners']}")
         text = (f"🏁 <b>Событие: {escape(event['title'])}</b>\n{rule}\n"
                 f"До {event['ends_at'][11:16]} {event['ends_at'][8:10]}.{event['ends_at'][5:7]}")
-        if event["prize"]:
-            text += f"\n🏆 Приз: {escape(event['prize'])}"
+        if event["prize"] or event["prize_type"]:
+            text += f"\n🏆 Приз: {escape(prize_line(event))}"
         if event["description"]:
             text += f"\n{escape(event['description'])}"
         sent = 0
         for user in svc.list_users(self.conn):
             if events.eligible(event, user):
-                sent += await self.send(user["telegram_id"], text, self._event_markup())
+                sent += await self._photo_or_text(user["telegram_id"], event["prize_photo"], text, self._event_markup())
                 await asyncio.sleep(0.05)
         return sent
 
@@ -1028,6 +1092,39 @@ class Notifier:
         if result.finished:
             await self.event_finished(event)
 
+    def _event_people(self, event: dict) -> list[int]:
+        """Everyone who may take part, plus those already on the board — each once."""
+        from . import events
+
+        on_board = {r["user_id"] for r in events.leaderboard(self.conn, event)}
+        chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u)]
+        return list(dict.fromkeys(chats))
+
+    async def event_updated(self, update) -> int:
+        """ТЗ №20: a critical change confirmed with «уведомить»."""
+        event = update.event
+        head = (f"🔄 <b>Событие «{escape(event['title'])}» перезапущено</b>" if update.restarted
+                else f"⚠️ <b>Важное обновление по событию «{escape(event['title'])}»</b>: изменены условия или сроки. "
+                     f"Проверьте детали.")
+        text = head + "\n" + "\n".join(change_lines(update.old, event, update.critical))
+        sent = 0
+        for chat in self._event_people(event):
+            sent += await self.send(chat, text, self._event_markup())
+            await asyncio.sleep(0.05)
+        return sent
+
+    async def entry_annulled(self, result, actor: dict) -> None:
+        entry, event = result.entry, result.event
+        user = svc.get_user(self.conn, entry["user_id"])
+        text = (f"↩️ Ваш результат в событии «{escape(event['title'])}» ({entry['value']} шт.) отменён.\n"
+                f"Причина: {escape(entry['reason'] or '')}")
+        if event["status"] == "active":
+            text += "\nПопытка не сгорела — можно отправить заявку снова."
+        await self.send(user["telegram_id"], text, self._event_markup())
+        await self.archive(["событие", "аннулирование"], (
+            f"↩️ <b>РЕЗУЛЬТАТ В СОБЫТИИ ОТМЕНЁН</b>\nСобытие: {escape(event['title'])}\nСотрудник: {who(user)}, "
+            f"{entry['value']} шт.\nПричина: {escape(entry['reason'] or '')}\nРешение: {who(actor)}"))
+
     async def event_finished(self, event: dict) -> None:
         from . import events
 
@@ -1038,8 +1135,8 @@ class Notifier:
             lines.append("👑 Победители: " + ", ".join(f"{escape(r['name'])} ({r['confirmed']} шт.)" for r in winners))
         else:
             lines.append("Победителей нет.")
-        if event["prize"]:
-            lines.append(f"🏆 Приз: {escape(event['prize'])}")
+        if event["prize"] or event["prize_type"]:
+            lines.append(f"🏆 Приз: {escape(prize_line(event))}")
         text = "\n".join(lines)
         on_board = {r["user_id"] for r in board}
         chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u)]

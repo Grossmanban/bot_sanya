@@ -9,7 +9,9 @@ import { plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
+import { PrizeThumb, prizeText } from "../lifecycle";
 import { PhotoPicker } from "../report/photo";
+import { ArchiveList } from "../archive";
 
 /** Countdown to a moment, ticking every second. */
 export function useCountdown(iso: string) {
@@ -43,19 +45,41 @@ const PHASE: Record<LiveEvent["phase"], string> = {
 export function EventsScreen() {
   const { data, reload } = useLoad(() => api.events(), []);
   const [openId, setOpenId] = useState<number | null>(null);
+  const [archive, setArchive] = useState(false);
   useEffect(() => {
     const t = setInterval(reload, 5000);
     return () => clearInterval(t);
   }, [reload]);
+  if (archive) {
+    return (
+      <div className="mx-auto max-w-2xl space-y-4">
+        <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={() => setArchive(false)}><ChevronLeft /> События</Button>
+        <ArchiveList />
+      </div>
+    );
+  }
   if (!data) return <Skeleton className="h-96 rounded-3xl" />;
   const items = data.items;
   const current = items.find((e) => e.id === openId) ?? (items.length === 1 ? items[0] : null);
-  if (current) return <EventView event={current} onBack={items.length > 1 ? () => setOpenId(null) : undefined} onChanged={reload} />;
+  const toArchive = (
+    <button onClick={() => { tapHaptic(); setArchive(true); }} className="press mx-auto block text-sm font-medium text-muted-foreground underline-offset-4 hover:underline">
+      Архив прошедших событий и целей
+    </button>
+  );
+  if (current) {
+    return (
+      <div className="space-y-6">
+        <EventView event={current} onBack={items.length > 1 ? () => setOpenId(null) : undefined} onChanged={reload} />
+        {toArchive}
+      </div>
+    );
+  }
   if (!items.length) {
-    return <p className="rounded-3xl bg-card p-6 text-muted-foreground shadow-lift">Сейчас событий нет.</p>;
+    return <div className="mx-auto max-w-2xl space-y-4"><p className="rounded-3xl bg-card p-6 text-muted-foreground shadow-lift">Сейчас событий нет.</p>{toArchive}</div>;
   }
   return (
-    <ul className="mx-auto max-w-2xl space-y-3">
+    <div className="mx-auto max-w-2xl space-y-6">
+    <ul className="space-y-3">
       {items.map((e) => (
         <li key={e.id}>
           <button onClick={() => { tapHaptic(); setOpenId(e.id); }}
@@ -64,11 +88,15 @@ export function EventsScreen() {
             <span className="min-w-0 flex-1">
               <span className="block truncate font-semibold">{e.title}</span>
               <span className="block text-sm text-muted-foreground">{RULE(e)} · {PHASE[e.phase]}</span>
+              {prizeText(e) && <span className="block truncate text-sm">🏆 {prizeText(e)}</span>}
             </span>
+            {e.prize_photo_url && <PrizeThumb url={e.prize_photo_url} className="size-12" />}
           </button>
         </li>
       ))}
     </ul>
+    {toArchive}
+    </div>
   );
 }
 
@@ -79,6 +107,7 @@ function EventView({ event, onBack, onChanged }: { event: LiveEvent; onBack?: ()
   const goal = event.mode === "first_to_reach" ? event.target ?? 1 : Math.max(leader, 1);
   const pct = Math.min(100, Math.round((event.my.score / goal) * 100));
   const lastRejected = event.my.entries.find((e) => e.status === "rejected");
+  const prize = prizeText(event);
   const showRejected = lastRejected && !event.my.pending && event.my.entries[0]?.status === "rejected";
 
   return (
@@ -91,18 +120,24 @@ function EventView({ event, onBack, onChanged }: { event: LiveEvent; onBack?: ()
             <span className={cn("size-2 rounded-full", event.phase === "live" ? "animate-pulse bg-[#6ee7a8]" : "bg-white/40")} />
             {PHASE[event.phase]}{event.network ? ` · сеть «${event.network}»` : ""}
           </p>
-          <h1 className="mt-2 font-display text-2xl font-semibold">{event.title}</h1>
-          <p className="mt-1 text-[15px] text-hero-muted">{RULE(event)}</p>
+          <div className="mt-2 flex items-start gap-4">
+            <div className="min-w-0 flex-1">
+              <h1 className="font-display text-2xl font-semibold">{event.title}</h1>
+              <p className="mt-1 text-[15px] text-hero-muted">{RULE(event)}</p>
+            </div>
+            {/* ТЗ №20: the prize photo on the right, full screen on tap; 🎁 when there is none */}
+            {(prize || event.prize_photo_url) && <PrizeThumb url={event.prize_photo_url} className="size-20 bg-white/10" />}
+          </div>
           <div className="mt-5 flex flex-wrap items-end gap-6">
             <div>
               <p className="flex items-center gap-1.5 text-xs text-hero-muted"><Timer className="size-3.5" />
                 {event.phase === "upcoming" ? "до старта" : event.phase === "live" ? "до конца" : "время вышло"}</p>
               <p className="font-display text-3xl font-semibold tabular">{event.phase === "upcoming" ? starts.text : event.phase === "live" ? ends.text : "00:00:00"}</p>
             </div>
-            {event.prize && (
+            {prize && (
               <div className="min-w-0">
                 <p className="flex items-center gap-1.5 text-xs text-hero-muted"><Trophy className="size-3.5" /> приз</p>
-                <p className="truncate text-lg font-semibold">{event.prize}</p>
+                <p className="truncate text-lg font-semibold">{prize}</p>
               </div>
             )}
           </div>
@@ -126,10 +161,13 @@ function EventView({ event, onBack, onChanged }: { event: LiveEvent; onBack?: ()
             <div className="row-in flex items-start gap-3 rounded-2xl bg-cancel-soft p-4 text-sm">
               <XCircle className="mt-0.5 size-5 shrink-0 text-cancel" />
               <div>
-                <p className="font-semibold text-cancel">Заявка отклонена (попытка {lastRejected!.attempt})</p>
+                <p className="font-semibold text-cancel">
+                  {lastRejected!.annulled ? `Результат отменён (${lastRejected!.value} шт.)` : `Заявка отклонена (попытка ${lastRejected!.attempt})`}
+                </p>
                 <p className="mt-0.5">{lastRejected!.reason}</p>
                 <p className="mt-1 text-muted-foreground">
-                  {event.my.attempts_left ? `Исправьте и отправьте снова — осталось ${event.my.attempts_left}.` : "Попытки закончились, участие закрыто."}
+                  {lastRejected!.annulled && event.my.can_submit ? "Попытка не сгорела — можно отправить заявку снова."
+                    : event.my.attempts_left ? `Исправьте и отправьте снова — осталось ${event.my.attempts_left}.` : "Попытки закончились, участие закрыто."}
                 </p>
               </div>
             </div>
