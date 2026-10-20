@@ -41,6 +41,8 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "weekly_attendance_quota": ("3", "days"),
     "attendance_check_enabled": ("1", "bool"),
     "attendance_check_time": ("10:30", "time"),
+    # ТЗ №9: employees see who else works that day (off — only how many)
+    "show_colleague_names": ("1", "bool"),
     "weekly_report_enabled": ("1", "bool"),
     "weekly_report_time": ("10:00", "time"),
     "backup_enabled": ("1", "bool"),

@@ -49,8 +49,8 @@ def _sig(object_id: int, exp: int, kind: str) -> str:
 
 
 def photo_url(object_id: int, now: float | None = None, kind: str = "report") -> str:
-    """kind: report (shift report), event (live event entry) or violation<N> (N-th proof of a schedule
-    violation decision) — each signed separately."""
+    """kind: report (shift report), event (live event entry), tx (proof of a fine/bonus/deduction) or
+    violation<N> (N-th proof of a schedule violation decision) — each signed separately."""
     # rounded expiry keeps the URL stable for a while, so the browser can cache the image
     exp = (int((now or time.time()) // 600) * 600) + LINK_TTL
     path = f"violation/{object_id}/{kind[9:]}" if kind.startswith("violation") else f"{kind}/{object_id}"

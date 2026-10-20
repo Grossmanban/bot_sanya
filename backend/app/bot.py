@@ -565,7 +565,12 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         except svc.ServiceError as exc:
             await call.answer(exc.message, show_alert=True)
             return
-        await call.answer("Вы участвуете! Прогресс — в приложении" if joined else "Вы уже участвуете")
+        if joined:
+            _, pieces = goals.counted_so_far(conn, goal, [user["id"]])
+            note = f" Уже учтено ваших принятых отчётов с начала цели: {pieces} шт." if pieces else ""
+            await call.answer(f"Вы участвуете!{note} Прогресс — в приложении", show_alert=bool(pieces))
+        else:
+            await call.answer("Вы уже участвуете")
         try:
             await call.message.edit_reply_markup(reply_markup=None)
         except Exception:

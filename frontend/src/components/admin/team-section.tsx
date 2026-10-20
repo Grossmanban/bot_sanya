@@ -107,6 +107,10 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
           setSelected(null);
           await reload();
         }}
+        onUpdated={(u) => {
+          setSelected((cur) => (cur ? { ...cur, ...u } : cur));
+          void reload();
+        }}
       />
     </div>
   );
@@ -231,12 +235,15 @@ function MemberSheet({
   caps,
   onClose,
   onChanged,
+  onUpdated,
 }: {
   user: User | null;
   me: User;
   caps: Capability[];
   onClose: () => void;
   onChanged: () => void;
+  /** the card stays open, the person's data changed (e.g. the weekly norm) */
+  onUpdated: (u: User) => void;
 }) {
   const wide = useWide();
   const { busy, run } = useAction();
@@ -362,6 +369,10 @@ function MemberSheet({
                     </div>
                   )}
                 </div>
+              )}
+
+              {approved && !isSelf && !user.is_owner && (user.role === "employee" || user.role === "trainer") && caps.includes("review") && (
+                <NormPicker user={user} onUpdated={onUpdated} />
               )}
 
               {canRole && (
@@ -509,5 +520,43 @@ function Requisites({ userId }: { userId: number }) {
         <p className="mt-0.5 font-semibold text-wait">не заполнены</p>
       )}
     </div>
+  );
+}
+
+/** ТЗ 12.4: a personal norm of work days a week — over the common one, or none at all. */
+function NormPicker({ user, onUpdated }: { user: User; onUpdated: (u: User) => void }) {
+  const { busy, run } = useAction();
+  const value = user.min_weekly_shifts == null ? "common" : String(user.min_weekly_shifts);
+  return (
+    <label className="mt-4 flex items-center gap-3 rounded-2xl bg-muted/50 px-4 py-3">
+      <span className="min-w-0 flex-1">
+        <span className="block text-[15px] font-semibold">Норма выходов в неделю</span>
+        <span className="block text-xs text-muted-foreground">Меньше — заявка в «Дисциплину» по понедельникам</span>
+      </span>
+      {busy && <LoaderCircle className="size-4 animate-spin text-muted-foreground" />}
+      <select
+        aria-label="Норма выходов в неделю"
+        disabled={!!busy}
+        value={value}
+        onChange={async (e) => {
+          const v = e.target.value;
+          const norm = v === "common" ? null : Number(v);
+          try {
+            const res = await run("norm", (k) => api.admin.setNorm(user.id, norm, k),
+              norm == null ? "Действует общая норма" : norm === 0 ? "Норма выходов отключена" : `Личная норма: ${norm} в неделю`);
+            if (res) onUpdated(res.user);
+          } catch {
+            /* toast shown */
+          }
+        }}
+        className="h-10 shrink-0 rounded-xl border-0 bg-card px-3 text-sm font-semibold outline-none"
+      >
+        <option value="common">Общая</option>
+        <option value="0">Без нормы</option>
+        {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+          <option key={n} value={n}>{n} {n === 1 ? "день" : n < 5 ? "дня" : "дней"}</option>
+        ))}
+      </select>
+    </label>
   );
 }

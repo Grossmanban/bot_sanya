@@ -18,6 +18,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
+from . import media
 from . import permissions as perms
 from . import services as svc
 from .db import transaction
@@ -94,6 +95,7 @@ def public(tx: dict, names: dict[int, str] | None = None) -> dict:
         "decided_by": names.get(tx["decided_by"]) if tx["decided_by"] else None,
         "decision_comment": tx["decision_comment"],
         "has_media": bool(tx["media_file_id"]),
+        "media_url": media.photo_url(tx["id"], kind="tx") if tx["media_file_id"] else None,
     }
 
 

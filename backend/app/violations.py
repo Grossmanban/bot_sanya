@@ -1,4 +1,8 @@
-"""Schedule violations (ТЗ 12.4): fewer work days in a week than `weekly_attendance_quota`.
+"""Schedule violations (ТЗ 12.4): fewer work days in a week than the person's norm.
+
+The norm is personal (users.min_weekly_shifts, set by owners, admins or the person's trainer) or,
+when not set, the common `weekly_attendance_quota` — which can be switched off; personal norms
+are checked either way. A personal norm of 0 means «no norm» for that person.
 
 Every Monday the past week is checked; each person below the norm gets one attendance_violation
 waiting for a decision. Staff resolve it exactly once:
@@ -135,11 +139,19 @@ def work_days(conn: sqlite3.Connection, user_id: int, start: date, end: date) ->
         (user_id, start.isoformat(), end.isoformat()))}
 
 
-def scan(conn: sqlite3.Connection, quota: int, today: date | None = None) -> list[dict]:
-    """Create violations for the last finished week (Mon–Sun before `today`). Safe to run again:
-    one violation per person and week. People paused, blocked or approved during that week are skipped."""
-    if quota <= 0:
-        return []
+def norm_of(user: dict, common: int) -> int:
+    personal = user.get("min_weekly_shifts")
+    return common if personal is None else personal
+
+
+def has_personal_norms(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM users WHERE min_weekly_shifts > 0 LIMIT 1").fetchone() is not None
+
+
+def scan(conn: sqlite3.Connection, common: int, today: date | None = None) -> list[dict]:
+    """Create violations for the last finished week (Mon–Sun before `today`). `common` is the common
+    norm (0 = switched off). Safe to run again: one violation per person and week. People paused,
+    blocked or approved during that week are skipped."""
     today = today or today_local()
     start = week_start(today) - timedelta(days=7)
     end = start + timedelta(days=6)
@@ -149,7 +161,8 @@ def scan(conn: sqlite3.Connection, quota: int, today: date | None = None) -> lis
             """SELECT * FROM users WHERE status = 'approved' AND account_state = 'active'
                AND (decided_at IS NULL OR substr(decided_at, 1, 10) < ?)""", (start.isoformat(),)).fetchall():
             u = dict(u)
-            if perms.role_of(u) not in (perms.EMPLOYEE, perms.TRAINER):
+            quota = norm_of(u, common)
+            if quota <= 0 or perms.role_of(u) not in (perms.EMPLOYEE, perms.TRAINER):
                 continue
             worked = work_days(conn, u["id"], start, end)
             if len(worked) >= quota:
@@ -166,6 +179,28 @@ def scan(conn: sqlite3.Connection, quota: int, today: date | None = None) -> lis
                           new={"violation": cur.lastrowid, "required": quota, "actual": len(worked)},
                           description=f"{start.isoformat()}…{end.isoformat()}")
     return created
+
+
+def set_norm(conn: sqlite3.Connection, actor: dict, user_id: int, norm: int | None, key: str) -> dict:
+    """A personal norm: owners and admins for anyone, a trainer for people of their network."""
+    if norm is not None and (isinstance(norm, bool) or not isinstance(norm, int) or not 0 <= norm <= 7):
+        raise ServiceError("Норма — от 0 до 7 дней в неделю", 422, "bad_norm")
+    _check_key(key)
+    with transaction(conn):
+        target = svc.get_user(conn, user_id)
+        if target is None:
+            raise ServiceError("Пользователь не найден", 404, "not_found")
+        if _seen(conn, key):
+            return target
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "review", target):
+            raise ServiceError("Недостаточно прав", 403, "forbidden")
+        if target["min_weekly_shifts"] == norm:
+            return target
+        conn.execute("UPDATE users SET min_weekly_shifts = ? WHERE id = ?", (norm, user_id))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="WEEKLY_NORM_SET", key=key,
+                  old={"norm": target["min_weekly_shifts"]}, new={"norm": norm})
+    return svc.get_user(conn, user_id)
 
 
 # ---------------------------------------------------------------- decisions

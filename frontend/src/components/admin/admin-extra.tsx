@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Point, type ScheduleSettings, type SettingsResponse, type User } from "@/lib/api";
 import { WEEKDAYS, plural } from "@/lib/format";
+import { useCan } from "@/lib/caps";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
@@ -192,11 +193,12 @@ const ROWS: Row[] = [
   { title: "Общий факт: вечером", text: "Владельцам, если общий факт за сегодня ещё не введён.", enabled: "global_actual_evening_enabled", time: "global_actual_evening_time" },
   { title: "Общий факт: утром", text: "Владельцам, если общий факт за вчера так и не введён.", enabled: "global_actual_morning_enabled", time: "global_actual_morning_time" },
   { title: "Итоги недели", text: "Админам: план и факт по каждому и файл Excel за прошлую неделю.", enabled: "weekly_report_enabled", time: "weekly_report_time", fixedDay: "по понедельникам" },
-  { title: "Норма выходов", text: "Кто за прошлую неделю вышел меньше нормы — заявка в «Дисциплину»: штраф или оправдание.", enabled: "attendance_check_enabled", time: "attendance_check_time", fixedDay: "по понедельникам", days: "weekly_attendance_quota" },
+  { title: "Общая норма выходов", text: "Кто за прошлую неделю вышел меньше нормы — заявка в «Дисциплину». Личная норма задаётся в карточке сотрудника («Команда») и проверяется, даже если общая выключена.", enabled: "attendance_check_enabled", time: "attendance_check_time", fixedDay: "по понедельникам", days: "weekly_attendance_quota" },
   { title: "Резервная копия базы", text: "Владельцам: файл базы данных каждый день.", enabled: "backup_enabled", time: "backup_time" },
 ];
 
 export function SettingsSection() {
+  const canRates = useCan("money"); // rates are money: owners only
   const { data } = useLoad(() => api.admin.settings(), []);
   const [cfg, setCfg] = useState<ScheduleSettings | null>(null);
   const { busy, run } = useAction();
@@ -301,10 +303,23 @@ export function SettingsSection() {
           })}
         </ul>
       </section>
+      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <label className="flex cursor-pointer items-start gap-4">
+          <span className="flex-1">
+            <span className="block font-medium">Имена коллег в графике</span>
+            <span className="block text-sm text-muted-foreground">
+              {cfg.show_colleague_names
+                ? "Сотрудники видят, кто ещё выходит в их день."
+                : "Сотрудники видят только, сколько человек выходит. Руководители видят имена всегда."}
+            </span>
+          </span>
+          <Switch checked={cfg.show_colleague_names} onCheckedChange={(v) => set({ show_colleague_names: v })} />
+        </label>
+      </section>
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!dirty || !!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} {dirty ? "Сохранить настройки" : "Всё сохранено"}
       </Button>
-      <RatesCard cfg={cfg} set={set} />
+      {canRates && <RatesCard cfg={cfg} set={set} />}
       <ArchiveCard archive={data.archive} />
     </div>
   );

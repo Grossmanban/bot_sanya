@@ -2,6 +2,9 @@
 
 Progress = approved report volume (incl. auto- and team-approved) inside the goal's period, so every
 approval counts in every active goal at once and a correction of a report is reflected automatically.
+It is computed, never accumulated: a goal created on Wednesday for Monday–Sunday already includes the
+reports approved for Monday and Tuesday (ТЗ №18 «backfill»), and one report can't be counted twice.
+Reports still waiting for review are shown apart («на проверке») and join the progress once approved.
 
     personal — one person, joined automatically;
     team     — everyone may press «Участвую»; network — people of one network.
@@ -9,7 +12,7 @@ approval counts in every active goal at once and a correction of a report is ref
 """
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 from . import networks
 from . import permissions as perms
@@ -42,6 +45,38 @@ def volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_
     return {r["user_id"]: r["v"] for r in rows}
 
 
+def pending_volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_to: str) -> dict[int, int]:
+    """Facts sent but not reviewed yet — shown next to the progress, not in it."""
+    if not user_ids:
+        return {}
+    rows = conn.execute(
+        f"""SELECT user_id, SUM(fact_volume) AS v FROM shifts WHERE status IN {ACTIVE} AND report_state = 'pending_review'
+            AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
+            GROUP BY user_id""", (date_from, date_to, *user_ids))
+    return {r["user_id"]: r["v"] or 0 for r in rows}
+
+
+def history_before(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) -> dict[int, int]:
+    """Approved volume for days before the goal was created: counted automatically (ТЗ №18)."""
+    created = goal["created_at"][:10]
+    if created <= goal["date_from"]:
+        return {}
+    last = min(goal["date_to"], (date.fromisoformat(created) - timedelta(days=1)).isoformat())
+    return volumes(conn, user_ids, goal["date_from"], last)
+
+
+def counted_so_far(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) -> tuple[int, int]:
+    """(approved reports, pieces) already inside the goal's period — what a new goal or a new participant
+    starts with (ТЗ №18)."""
+    if not user_ids:
+        return 0, 0
+    row = conn.execute(
+        f"""SELECT COUNT(*), COALESCE(SUM(fact_volume), 0) FROM shifts WHERE status IN {ACTIVE}
+            AND report_state = 'approved' AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ?
+            AND user_id IN ({','.join('?' * len(user_ids))})""", (goal["date_from"], goal["date_to"], *user_ids)).fetchone()
+    return row[0], row[1]
+
+
 def eligible(conn: sqlite3.Connection, goal: dict, user: dict) -> bool:
     if goal["kind"] == "personal":
         return goal["user_id"] == user["id"]
@@ -56,6 +91,13 @@ def view(conn: sqlite3.Connection, goal: dict, viewer: dict | None = None) -> di
     total = sum(vols.values())
     me = next((p for p in people if viewer and p["user_id"] == viewer["id"]), None)
     mine = vols.get(viewer["id"], 0) if viewer else 0
+    # the breakdown follows what the bar shows: the team's sum, or the viewer's own result («each» mode)
+    if goal["mode"] == "each" and goal["kind"] != "personal" and viewer is not None:
+        ids = [viewer["id"]] if me else []
+    else:
+        ids = [p["user_id"] for p in people]
+    before = sum(history_before(conn, goal, ids).values())
+    pending = sum(pending_volumes(conn, ids, goal["date_from"], goal["date_to"]).values())
     out = {
         "id": goal["id"], "title": goal["title"], "description": goal["description"], "kind": goal["kind"],
         "mode": goal["mode"], "target": goal["target"], "date_from": goal["date_from"], "date_to": goal["date_to"],
@@ -65,6 +107,8 @@ def view(conn: sqlite3.Connection, goal: dict, viewer: dict | None = None) -> di
                           "done": bool(p["completed_at"])} for p in people],
         "joined": me is not None, "done": bool(me and me["completed_at"]) or goal["status"] == "completed",
         "my_volume": mine,
+        # ТЗ №18: what was counted from before the goal existed, and what is still being reviewed
+        "backfill": before, "pending": pending,
     }
     if goal["kind"] == "personal" and goal["user_id"]:
         out["person"] = svc.full_name(svc.get_user(conn, goal["user_id"]))

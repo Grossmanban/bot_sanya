@@ -929,13 +929,24 @@ class Notifier:
         from . import goals
 
         period = f"{goal['date_from'][8:10]}.{goal['date_from'][5:7]}–{goal['date_to'][8:10]}.{goal['date_to'][5:7]}"
+        # ТЗ №18: the reports already approved inside the period count from the start
+        pool = [u for u in svc.list_users(self.conn) if goals.eligible(self.conn, goal, u)]
+        reports, pieces = goals.counted_so_far(self.conn, goal, [u["id"] for u in pool])
+        creator = svc.get_user_by_tg(self.conn, goal["created_by"])
+        kind = {"personal": "личная", "team": "командная", "network": "сетевая"}[goal["kind"]]
+        await self.archive(["цель"], (
+            f"🎯 <b>ЦЕЛЬ СОЗДАНА: {escape(goal['title'])}</b>\nТип: {kind}, норма {goal['target']} шт., период {period}\n"
+            f"Принятых отчётов за период уже: {reports} ({pieces} шт.) — учитываются автоматически"
+            + (f"\nСоздал: {who(creator)}" if creator else "")))
         text = (f"🎯 <b>Новая цель: {escape(goal['title'])}</b>\n"
                 f"{'Норма' if goal['mode'] == 'each' or goal['kind'] == 'personal' else 'Общая норма'}: {goal['target']} шт., {period}")
         if goal["description"]:
             text += f"\n{escape(goal['description'])}"
         if goal["kind"] == "personal":
             user = svc.get_user(self.conn, goal["user_id"])
-            return await self.send(user["telegram_id"], text + "\n\nПрогресс считается по принятым отчётам.")
+            _, mine = goals.counted_so_far(self.conn, goal, [user["id"]])
+            already = f"\nУже учтены ваши принятые отчёты с начала периода: {mine} шт." if mine else ""
+            return await self.send(user["telegram_id"], text + "\n\nПрогресс считается по принятым отчётам." + already)
         join = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🙋 Участвую", callback_data=f"goal:{goal['id']}")]])
         sent = 0
         for user in svc.list_users(self.conn):

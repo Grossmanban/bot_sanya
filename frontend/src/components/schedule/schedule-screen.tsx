@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { ChevronLeft, ChevronRight, Pause, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pause, Trophy, X } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Day, type Pricing, type User, type Week } from "@/lib/api";
@@ -365,13 +365,20 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
                   {mine.fact_volume} из {mine.volume} шт. (−{mine.shortfall})
                   {mine.shortfall_status === "fined" ? `, штраф ${rub(mine.shortfall_penalty ?? 0)}` : ""}
                 </span>
+              ) : mine.volume != null && mine.fact_volume > mine.volume ? (
+                <span className="font-semibold text-go">
+                  <Trophy className="mb-0.5 inline size-3.5" /> {mine.fact_volume} из {mine.volume} шт. — перевыполнение на{" "}
+                  {Math.round((mine.fact_volume / Math.max(mine.volume, 1)) * 100) - 100}%
+                </span>
               ) : (
                 `${mine.location}, план ${mine.volume}, факт ${mine.fact_volume} шт.`
               )
             ) : isGoing(mine) || state === "awaiting_approval"
               ? `${mine!.location}, ${mine!.volume} шт.`
               : names.length
-                ? `Выходят: ${names.join(", ")}`
+                ? day.names_hidden
+                  ? `Выходят: ${names.length} ${plural(names.length, "человек", "человека", "человек")}`
+                  : `Выходят: ${names.join(", ")}`
                 : day.is_past
                   ? ""
                   : "Пока никто не выходит"}

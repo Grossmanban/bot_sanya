@@ -630,6 +630,12 @@ def _attendance(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_attendance)
 
 
+# 15: a personal norm of work days a week (ТЗ 12.4); NULL = the common norm, 0 = no norm for this person
+MIGRATIONS.append("""
+ALTER TABLE users ADD COLUMN min_weekly_shifts INTEGER CHECK (min_weekly_shifts IS NULL OR min_weekly_shifts BETWEEN 0 AND 7);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

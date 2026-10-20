@@ -164,7 +164,8 @@ const lanesFrom = (rows: { name: string; start_time: string | null; end_time: st
   }));
 
 function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }) {
-  const { data, loading, reload } = useLoad(() => api.admin.raspred(), [version]);
+  const [when, setWhen] = useState<"today" | "tomorrow">("tomorrow");
+  const { data, loading, reload } = useLoad(() => api.admin.raspred(when), [version, when]);
   const [copied, setCopied] = useState(false);
 
   async function copy(text: string) {
@@ -184,13 +185,26 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
     setTimeout(() => setCopied(false), 1800);
   }
 
-  if (!data) return <Skeleton className="h-72 rounded-3xl" />;
+  const tabs = (
+    <div className="flex gap-1 rounded-2xl bg-card p-1 shadow-lift">
+      {(["today", "tomorrow"] as const).map((w) => (
+        <button key={w} onClick={() => { tapHaptic(); setWhen(w); }}
+                className={cn("press h-10 flex-1 rounded-xl text-sm font-semibold transition-colors",
+                  when === w ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+          {w === "today" ? "На сегодня" : "На завтра"}
+        </button>
+      ))}
+    </div>
+  );
+  if (!data || data.date !== (when === "today" ? moscowToday() : addDays(moscowToday(), 1)))
+    return <div className="space-y-4">{tabs}<Skeleton className="h-72 rounded-3xl" /></div>;
   return (
     <div className="space-y-4">
+      {tabs}
       <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-sm text-muted-foreground">Завтра</p>
+            <p className="text-sm text-muted-foreground">{when === "today" ? "Сегодня" : "Завтра"}</p>
             <h2 className="font-display text-2xl font-semibold">{dayMonth(data.date)}</h2>
             <p className="mt-1 text-[15px] text-muted-foreground">
               {data.total_count
@@ -246,7 +260,7 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
           {copied ? <Check key="ok" className="pop" /> : <Copy />}
           {copied ? "Скопировано" : "Скопировать"}
         </Button>
-        <p className="mt-3 text-sm text-muted-foreground">В боте тот же текст по команде /raspred_zavtra.</p>
+        {when === "tomorrow" && <p className="mt-3 text-sm text-muted-foreground">В боте тот же текст по команде /raspred_zavtra.</p>}
       </section>
     </div>
   );
@@ -370,10 +384,13 @@ function presets(today: string) {
   const monday = addDays(today, -weekday);
   const monthStart = `${y}-${String(m).padStart(2, "0")}-01`;
   const nextMonth = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  const prevMonth = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, "0")}-01`;
   return [
+    { label: "Сегодня", from: today, to: today },
     { label: "Эта неделя", from: monday, to: addDays(monday, 6) },
     { label: "Прошлая неделя", from: addDays(monday, -7), to: addDays(monday, -1) },
     { label: "Этот месяц", from: monthStart, to: addDays(nextMonth, -1) },
+    { label: "Прошлый месяц", from: prevMonth, to: addDays(monthStart, -1) },
   ];
 }
 
@@ -381,7 +398,7 @@ function StatsSection({ version, onEdit }: { version: number; onEdit: EditFn }) 
   const users = useLoad(() => api.admin.users(), [version]);
   const [user, setUser] = useState<User | null>(null);
   const ranges = useMemo(() => presets(moscowToday()), []);
-  const [range, setRange] = useState(ranges[0]);
+  const [range, setRange] = useState(ranges[1]);
   const stats = useLoad(
     () => (user ? api.admin.stats(user.id, range.from, range.to) : Promise.resolve(null)),
     [user?.id, range.from, range.to, version],

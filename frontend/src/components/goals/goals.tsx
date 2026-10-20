@@ -27,6 +27,20 @@ function Progress({ value, target, done }: { value: number; target: number; done
   );
 }
 
+/** ТЗ №18: where the numbers come from — earlier approved reports, new ones, and what is still being checked. */
+function Breakdown({ g }: { g: Goal }) {
+  const before = g.backfill ?? 0;
+  const pending = g.pending ?? 0;
+  if (!before && !pending) return null;
+  return (
+    <p className="text-xs text-muted-foreground">
+      {before > 0 && <>Учтено автоматически за дни до создания цели: <b className="text-foreground">{before} шт.</b></>}
+      {before > 0 && pending > 0 && " · "}
+      {pending > 0 && <>на проверке: <b className="text-wait">{pending} шт.</b> — добавятся после принятия</>}
+    </p>
+  );
+}
+
 /** The employee's goals with «Участвую» (ТЗ 6.2); shown on the schedule screen when there are any. */
 export function MyGoals() {
   const { data, reload } = useLoad(() => api.goals(), []);
@@ -56,6 +70,7 @@ export function MyGoals() {
             </div>
             {g.description && <p className="text-sm text-muted-foreground">{g.description}</p>}
             {(g.joined || g.mode === "shared") && <Progress value={g.progress} target={g.target} done={g.done} />}
+            {(g.joined || g.mode === "shared") && <Breakdown g={g} />}
             {g.joined && g.mode === "shared" && g.kind !== "personal" && (
               <p className="text-xs text-muted-foreground">Ваш вклад: {g.my_volume} шт.</p>
             )}
@@ -185,6 +200,7 @@ export function GoalsSection({ me }: { me: User }) {
                 <ArchiveGoal goal={g} onDone={reload} />
               </div>
               {g.mode === "shared" ? <Progress value={g.total} target={g.target} done={g.status === "completed"} /> : null}
+              <Breakdown g={g} />
               {g.participants.length > 0 ? (
                 <ul className="space-y-1.5">
                   {[...g.participants].sort((a, b) => b.volume - a.volume).map((p) => (

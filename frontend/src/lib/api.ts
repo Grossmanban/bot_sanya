@@ -27,6 +27,8 @@ export interface User {
   is_owner?: boolean;
   created_at?: string;
   notify_reminders?: boolean;
+  /** personal norm of work days a week; null — the common norm, 0 — no norm */
+  min_weekly_shifts?: number | null;
 }
 
 export type Role = "owner" | "admin" | "trainer" | "employee";
@@ -123,6 +125,9 @@ export interface Goal {
   joined: boolean;
   done: boolean;
   my_volume: number;
+  /** ТЗ №18: approved before the goal was created (counted automatically) and still under review */
+  backfill?: number;
+  pending?: number;
 }
 
 export interface NetworkMember {
@@ -309,6 +314,7 @@ export interface Tx {
   decided_by: string | null;
   decision_comment: string | null;
   has_media: boolean;
+  media_url?: string | null;
   /** journal rows carry the person */
   name?: string;
   username?: string | null;
@@ -354,6 +360,8 @@ export interface Day {
   my_shift: Shift | null;
   colleagues: Colleague[];
   colleagues_off: { name: string; first_name: string }[];
+  /** the owner hid colleagues' names from employees: only how many */
+  names_hidden?: boolean;
   points_load: Record<string, number>;
 }
 
@@ -441,6 +449,7 @@ export interface PenaltyRow {
 
 export interface ScheduleSettings {
   weekly_attendance_quota: number;
+  show_colleague_names: boolean;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
   eve_reminder_enabled: boolean;
@@ -701,8 +710,9 @@ export const api = {
       return request<{ items: Tx[]; balance: Balance | null }>(`/api/admin/finances?${q}`);
     },
     financeSummary: () => request<{ people: MoneyPerson[]; pending: Tx[]; drafts: Tx[] }>("/api/admin/finances/summary"),
-    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, amount: number, reason: string, key: string) =>
-      post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, amount, reason, idempotency_key: key }),
+    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, amount: number, reason: string, key: string,
+               media_file_id: string | null = null) =>
+      post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, amount, reason, media_file_id, idempotency_key: key }),
     decideTx: (id: number, approve: boolean, comment: string | null, key: string) =>
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/decide`, { approve, comment, idempotency_key: key }),
     cancelTx: (id: number, reason: string, key: string) =>
@@ -756,7 +766,7 @@ export const api = {
     ) => post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/payouts", { ...body, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
     violations: (status: "pending" | "resolved") =>
-      request<{ items: Violation[]; pending: number; quota: number }>(`/api/admin/violations?status=${status}`),
+      request<{ items: Violation[]; pending: number; quota: number; personal: boolean }>(`/api/admin/violations?status=${status}`),
     scanViolations: () => post<{ created: number }>("/api/admin/violations/scan", {}),
     fineViolation: (id: number, body: { amount: number; comment: string; media_files: string[] }, key: string) =>
       post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/fine`, { ...body, idempotency_key: key }),
@@ -778,7 +788,9 @@ export const api = {
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/access`, { allow, idempotency_key: key }),
     setState: (userId: number, state: User["account_state"], reason: string | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/state`, { state, reason, idempotency_key: key }),
-    raspred: () => request<Raspred>("/api/admin/raspred/tomorrow"),
+    raspred: (when: "today" | "tomorrow" = "tomorrow") => request<Raspred>(`/api/admin/raspred/${when}`),
+    setNorm: (userId: number, norm: number | null, key: string) =>
+      post<{ user: User }>(`/api/admin/team/${userId}/norm`, { norm, idempotency_key: key }),
     day: (day: string) =>
       request<{ date: string; items: AdminShift[]; total_count: number; total_volume: number }>(`/api/admin/day?day=${day}`),
     stats: (userId: number, from: string, to: string) =>

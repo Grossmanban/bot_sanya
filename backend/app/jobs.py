@@ -71,9 +71,9 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
                 lambda: week_reminders(conn, notifier, today), weekday=cfg["week_reminder_weekday"])
     await daily("weekly_report", cfg["weekly_report_enabled"], cfg["weekly_report_time"],
                 lambda: weekly_report(conn, notifier, today), weekday=0)
-    await daily("attendance_check", cfg["attendance_check_enabled"] and cfg["weekly_attendance_quota"] > 0,
-                cfg["attendance_check_time"], lambda: attendance_check(conn, notifier, today, cfg["weekly_attendance_quota"]),
-                weekday=0)
+    common = cfg["weekly_attendance_quota"] if cfg["attendance_check_enabled"] else 0
+    await daily("attendance_check", common > 0 or violations.has_personal_norms(conn),
+                cfg["attendance_check_time"], lambda: attendance_check(conn, notifier, today, common), weekday=0)
     await daily("backup", cfg["backup_enabled"], cfg["backup_time"], lambda: backup(conn, notifier))
     await daily("global_actual_evening", cfg["global_actual_evening_enabled"], cfg["global_actual_evening_time"],
                 lambda: notifier.global_actual_reminder(today, morning=False))
@@ -307,9 +307,9 @@ async def weekly_report(conn, notifier: Notifier, today: date) -> None:
         await notifier.send_document(admin_id, data, export.export_filename(start, end))
 
 
-async def attendance_check(conn, notifier: Notifier, today: date, quota: int) -> int:
-    """ТЗ 12.4: Monday — people below the weekly norm of work days get a violation to decide on."""
-    created = violations.scan(conn, quota, today)
+async def attendance_check(conn, notifier: Notifier, today: date, common: int) -> int:
+    """ТЗ 12.4: Monday — people below their weekly norm of work days get a violation to decide on."""
+    created = violations.scan(conn, common, today)
     if created:
         await notifier.violations_found(created)
     return len(created)
