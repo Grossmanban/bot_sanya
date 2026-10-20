@@ -287,9 +287,10 @@ def finish_due(conn: sqlite3.Connection, now: datetime | None = None) -> list[di
     for e in [dict(r) for r in conn.execute("SELECT * FROM events WHERE status = 'active'")]:
         if now >= _dt(e["ends_at"]) + timedelta(minutes=e["buffer_min"]):
             with transaction(conn):
-                conn.execute("UPDATE events SET status = 'finished', finished_at = ? WHERE id = ? AND status = 'active'",
-                             (now_iso(), e["id"]))
-            done.append(get(conn, e["id"]))
+                flipped = conn.execute("UPDATE events SET status = 'finished', finished_at = ? WHERE id = ? AND status = 'active'",
+                                       (now_iso(), e["id"])).rowcount
+            if flipped:  # only the run that finished it announces it
+                done.append(get(conn, e["id"]))
     return done
 
 
