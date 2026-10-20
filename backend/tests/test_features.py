@@ -1039,6 +1039,10 @@ def test_accumulative_scoreboard_and_finish(conn, make_user):
     board = events.leaderboard(conn, events.get(conn, ev["id"]))
     assert [r["name"].split()[0] for r in board if r["winner"]] == ["Боря"]  # prizes by confirmed score: 12 > 10
     assert any("Победители" in t and "Боря" in t for chat, t in n.sent if chat == a["telegram_id"])
+    # the creator is also an eligible participant: one message, not two; a later tick doesn't repeat it
+    run(jobs.tick(conn, n, at(THU, "18:17")))
+    assert [chat for chat, t in n.sent if "завершено" in t].count(999) == 1
+    assert [chat for chat, t in n.sent if "завершено" in t].count(a["telegram_id"]) == 1
 
 
 def test_event_network_scope(conn, make_user):

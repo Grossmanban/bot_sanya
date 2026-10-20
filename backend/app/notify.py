@@ -1041,14 +1041,12 @@ class Notifier:
         if event["prize"]:
             lines.append(f"🏆 Приз: {escape(event['prize'])}")
         text = "\n".join(lines)
-        notified = {r["user_id"] for r in board}
-        for user in svc.list_users(self.conn):
-            if user["id"] in notified or events.eligible(event, user):
-                await self.send(user["telegram_id"], text)
-                await asyncio.sleep(0.05)
-        creator = svc.get_user_by_tg(self.conn, event["created_by"])
-        if creator and creator["id"] not in notified:
-            await self.send(creator["telegram_id"], text)
+        on_board = {r["user_id"] for r in board}
+        chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u)]
+        chats.append(event["created_by"])
+        for chat in dict.fromkeys(chats):  # each person once, even the creator who is also a participant
+            await self.send(chat, text)
+            await asyncio.sleep(0.05)
 
     # ------------------------------------------------------------ the day's global actual (ТЗ 3.5)
 
