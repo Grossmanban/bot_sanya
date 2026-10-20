@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { ChevronLeft, ChevronRight, Pause, Trophy, X } from "lucide-react";
+import { Camera, ChevronLeft, ChevronRight, Pause, RotateCcw, Trophy, X } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Day, type Pricing, type User, type Week } from "@/lib/api";
-import { STATUS_META, WEEKDAYS_SHORT, dayState, isGoing, parseDay, plural, rub, timeRange, weekRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS_SHORT, dayMonth, dayState, isGoing, parseDay, plural, rub, timeRange, weekRange } from "@/lib/format";
 import { moscowTime, readLocal, useAction, useLoad, writeLocal } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { MyGoals } from "../goals/goals";
 import { DayTrack, HourAxis } from "../day-line";
 import { DayDetail, DaySheet } from "./day-sheet";
+import { deadlineText } from "../report/report-block";
 
 const HINT_KEY = "hint-dismissed";
 
@@ -101,6 +102,8 @@ export function ScheduleScreen({
         ) : (
           user.work_status !== "working" && <WorkToggle onUserChange={onUserChange} />
         )}
+
+        <ReportDue week={week} onOpen={open} />
 
         <MyGoals />
 
@@ -391,5 +394,38 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
         </span>
       </span>
     </button>
+  );
+}
+
+/** The shift day has come: the report can be sent right away — one tap from the main screen. */
+function ReportDue({ week, onOpen }: { week: Week | null | undefined; onOpen: (day: Day) => void }) {
+  const due = (week?.days ?? []).filter((d) => {
+    const r = d.my_shift?.report;
+    return r?.can_submit && (r.state === null || r.state === "needs_fix");
+  });
+  if (!due.length) return null;
+  return (
+    <>
+      {due.map((d) => {
+        const shift = d.my_shift!;
+        const back = shift.report!.state === "needs_fix";
+        const Icon = back ? RotateCcw : Camera;
+        return (
+          <button key={d.date} onClick={() => onOpen(d)}
+                  className="press row-in flex w-full items-center gap-4 rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-lift">
+            <span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-white/15"><Icon className="size-5" /></span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-semibold">
+                {back ? "Отчёт вернули — сдай заново" : d.is_today ? "Сдать отчёт за сегодня" : `Сдать отчёт за ${dayMonth(d.date)}`}
+              </span>
+              <span className="block text-sm opacity-80">
+                {timeRange(shift)} · план {shift.volume} шт. · {deadlineText(shift.report!.deadline, d.date)}
+              </span>
+            </span>
+            <ChevronRight className="size-5 shrink-0 opacity-80" />
+          </button>
+        );
+      })}
+    </>
   );
 }

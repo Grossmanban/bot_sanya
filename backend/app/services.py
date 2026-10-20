@@ -453,6 +453,7 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
     past = day < today
     status = shift["status"]
     volume = shift["volume"]
+    reported = bool(shift.get("report_state"))
     data = {
         "id": shift["id"],
         "date": shift["shift_date"],
@@ -465,9 +466,10 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
         "is_urgent": bool(shift["is_urgent"]),
         "penalty_amount": shift["penalty_amount"],
         "admin_locked": bool(shift["admin_locked"]),
-        "can_edit": not past and status in ACTIVE and shift["edit_count"] == 0,
-        "can_cancel": not past and status == "active",
-        "can_final_cancel": not past and status == "restored",
+        # a report was sent: the shift stays as reported (changes — through an admin)
+        "can_edit": not past and not reported and status in ACTIVE and shift["edit_count"] == 0,
+        "can_cancel": not past and not reported and status == "active",
+        "can_final_cancel": not past and not reported and status == "restored",
         "can_restore": not past and status == "cancelled" and not shift["admin_locked"] and not shift["restored_at"],
         "can_clear_off": not past and status == "pre_declared_off",
         "fact_volume": shift.get("fact_volume"),
@@ -630,6 +632,12 @@ def _own_shift(conn, user: dict, shift_id: int, today: date) -> dict:
     return shift
 
 
+def _require_no_report(shift: dict) -> None:
+    """A report was sent: the plan it was checked against stays; changes go through an admin."""
+    if shift.get("report_state"):
+        raise ServiceError("По этой смене уже сдан отчёт — изменить или отменить её может администратор", 409, "has_report")
+
+
 def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: date | None = None) -> Result:
     today = today or today_local()
     _check_key(key)
@@ -669,6 +677,7 @@ def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: 
         shift = _own_shift(conn, user, shift_id, today)
         if shift["status"] not in ACTIVE:
             raise ServiceError("Изменить можно только активную смену", 409, "bad_status")
+        _require_no_report(shift)
         if shift["edit_count"] >= 1:
             raise ServiceError("Смену можно изменить только один раз. Дальше — через администратора", 409, "edit_limit")
         data["location"] = check_point(conn, date.fromisoformat(shift["shift_date"]), data["location"], exclude=shift_id)
@@ -690,6 +699,7 @@ def cancel_shift(conn, user: dict, shift_id: int, key: str, today: date | None =
         if _seen(conn, key):
             return Result(get_shift(conn, shift_id), False)
         shift = _own_shift(conn, user, shift_id, today)
+        _require_no_report(shift)
         if shift["status"] == "restored":
             raise ServiceError(
                 "Это будет окончательная отмена со штрафом — нужно подтверждение", 409, "final_confirm_required"
@@ -735,6 +745,7 @@ def final_cancel_shift(conn, user: dict, shift_id: int, key: str, today: date | 
         if _seen(conn, key):
             return Result(get_shift(conn, shift_id), False)
         shift = _own_shift(conn, user, shift_id, today)
+        _require_no_report(shift)
         if shift["status"] != "restored":
             raise ServiceError("Окончательная отмена возможна только после восстановления", 409, "bad_status")
         now = now_iso()

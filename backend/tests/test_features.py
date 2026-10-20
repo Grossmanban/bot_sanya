@@ -107,14 +107,22 @@ def test_report_window_auto_approve_and_stats(conn, make_user):
     assert reports.deadline(s) == at(THU + timedelta(days=1), "00:00")
     late = shift(conn, u, THU + timedelta(days=1), {**P, "start_time": "20:00", "end_time": "23:30"})
     assert reports.deadline(late) == at(THU + timedelta(days=2), "01:30")  # end + 2h is later than midnight
-    with pytest.raises(svc.ServiceError) as e:
-        report(conn, u, s, 20, now=at(THU, "15:00"))
+    with pytest.raises(svc.ServiceError) as e:  # the day before the shift
+        report(conn, u, s, 20, now=at(THU - timedelta(days=1), "23:59"))
     assert e.value.code == "too_early"
+    # from 00:00 of the shift day — any time, also before the shift starts (16:00)
+    assert reports.can_submit(s, at(THU, "00:00")) and reports.view(conn, s, at(THU, "09:00"))["started"]
     with pytest.raises(svc.ServiceError) as e:
         reports.submit(conn, u, s["id"], 20, "", "app", svc.new_key(), now=at(THU, "19:30"))
     assert e.value.code == "photo_required"
     res = report(conn, u, s, 30)
     assert res.changed and res.report["status"] == "auto_approved" and res.shift["report_state"] == "approved"
+    # with a report in, the plan it was checked against stays: no edits or cancelling by the employee
+    for action in (lambda: svc.edit_shift(conn, u, s["id"], {**P, "volume": 20}, svc.new_key(), today=THU),
+                   lambda: svc.cancel_shift(conn, u, s["id"], svc.new_key(), today=THU)):
+        with pytest.raises(svc.ServiceError) as e:
+            action()
+        assert e.value.code == "has_report"
     view = svc.serialize_shift(res.shift, THU)
     assert view["fact_pay"] == 30 * 120 and view["report_state"] == "approved"
     with pytest.raises(svc.ServiceError) as e:
