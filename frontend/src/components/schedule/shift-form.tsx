@@ -167,7 +167,8 @@ export function ShiftForm({
         </div>
         <p className={cn("pt-1 text-sm", lazy ? "text-wait" : "text-muted-foreground")}>
           {!hasVolume
-            ? `${pricing.base_rate} ₽ за штуку. Меньше ${pricing.lazy_threshold} шт. за день — ${pricing.lazy_rate} ₽.`
+            ? `${pricing.base_rate} ₽ за штуку.` +
+              (pricing.lazy_threshold > 0 ? ` Меньше ${pricing.lazy_threshold} шт. за день — ${pricing.lazy_rate} ₽.` : "")
             : lazy
               ? `Налог на лень: меньше ${pricing.lazy_threshold} шт., ставка ${pricing.lazy_rate} ₽. План ${rub(volume * rate)}.`
               : `${volume} × ${rate} ₽, план ${rub(volume * rate)}`}

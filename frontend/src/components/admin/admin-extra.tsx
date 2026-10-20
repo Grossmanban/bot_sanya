@@ -360,11 +360,12 @@ function ArchiveCard({ archive }: { archive: SettingsResponse["archive"] }) {
   );
 }
 
-const RATES: { key: "rate_base" | "rate_lazy" | "lazy_threshold" | "trainer_commission"; label: string; unit: string }[] = [
+const RATES: { key: "rate_base" | "rate_lazy" | "lazy_threshold" | "trainer_commission" | "revenue_per_piece"; label: string; unit: string }[] = [
   { key: "rate_base", label: "Ставка", unit: "₽ за шт." },
   { key: "rate_lazy", label: "Налог на лень: ставка", unit: "₽ за шт." },
   { key: "lazy_threshold", label: "Налог на лень, если меньше", unit: "шт. за день" },
   { key: "trainer_commission", label: "Тренеру с объёма сети", unit: "₽ за шт." },
+  { key: "revenue_per_piece", label: "Доход бизнеса за штуку", unit: "₽ — для заработка владельца" },
 ];
 
 /** Piece rates (ТЗ 11.1): used by cards, stats, Excel and as defaults in the payout wizard. */

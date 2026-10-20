@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
 import { dayMonth } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
@@ -374,6 +375,9 @@ function MemberSheet({
               {approved && !isSelf && !user.is_owner && (user.role === "employee" || user.role === "trainer") && caps.includes("review") && (
                 <NormPicker user={user} onUpdated={onUpdated} />
               )}
+              {approved && !user.is_owner && caps.includes("money") && user.role !== "admin" && (
+                <PersonalRates key={user.id} user={user} onUpdated={onUpdated} />
+              )}
 
               {canRole && (
                 <div className="mt-6">
@@ -558,5 +562,51 @@ function NormPicker({ user, onUpdated }: { user: User; onUpdated: (u: User) => v
         ))}
       </select>
     </label>
+  );
+}
+
+/** Owner only (customer round B): a personal rate over the network's/common one and «не применять налог на лень». */
+function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) => void }) {
+  const { busy, run } = useAction();
+  const [rate, setRate] = useState(user.personal_rate != null ? String(user.personal_rate) : "");
+  const saved = user.personal_rate != null ? String(user.personal_rate) : "";
+  async function save(body: Parameters<typeof api.admin.setUserRates>[1], ok: string) {
+    try {
+      const res = await run("rates", (k) => api.admin.setUserRates(user.id, body, k), ok);
+      if (res) onUpdated(res.user);
+    } catch {
+      /* toast shown */
+    }
+  }
+  return (
+    <div className="mt-4 space-y-3 rounded-2xl bg-muted/50 px-4 py-3">
+      <div className="flex items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px] font-semibold">Личная ставка</span>
+          <span className="block text-xs text-muted-foreground">Пусто — ставка сети или общая. Видит и меняет только владелец</span>
+        </span>
+        <div className="relative w-24 shrink-0">
+          <input inputMode="numeric" aria-label="Личная ставка, ₽ за штуку" placeholder="общая" value={rate}
+                 onChange={(e) => setRate(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                 className="h-10 w-full rounded-xl border-0 bg-card pr-7 pl-3 text-sm font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
+          <span className="absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">₽</span>
+        </div>
+      </div>
+      {rate !== saved && (
+        <Button size="sm" className="press h-9 w-full rounded-xl" disabled={!!busy}
+                onClick={() => save(rate ? { personal_rate: Number(rate) } : { clear_personal_rate: true },
+                  rate ? `Личная ставка: ${rate} ₽ за штуку` : "Личная ставка снята")}>
+          {busy && <LoaderCircle className="animate-spin" />} Сохранить ставку
+        </Button>
+      )}
+      <label className="flex cursor-pointer items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px] font-semibold">Не применять налог на лень</span>
+          <span className="block text-xs text-muted-foreground">Полная ставка, даже если за день сделано меньше порога</span>
+        </span>
+        <Switch checked={!!user.lazy_exempt} disabled={!!busy}
+                onCheckedChange={(v) => save({ lazy_exempt: v }, v ? "Налог на лень не применяется" : "Налог на лень применяется")} />
+      </label>
+    </div>
   );
 }

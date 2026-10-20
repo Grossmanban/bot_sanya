@@ -96,6 +96,10 @@ def public(tx: dict, names: dict[int, str] | None = None) -> dict:
         "decision_comment": tx["decision_comment"],
         "has_media": bool(tx["media_file_id"]),
         "media_url": media.photo_url(tx["id"], kind="tx") if tx["media_file_id"] else None,
+        # a deduction entered in pieces: shown in rubles with «N шт. × R ₽» (customer round B)
+        "pieces": tx.get("pieces"),
+        "rate": tx.get("rate"),
+        "linked_tx_id": tx.get("linked_tx_id"),
     }
 
 
@@ -162,14 +166,16 @@ def fines_total(conn: sqlite3.Connection, user_id: int, date_from: date, date_to
 
 def record(conn: sqlite3.Connection, *, user_id: int, type: str, amount: int | None, reason: str, actor_tg: int,
            status: str = "active", source: str = "manual", shift_id: int | None = None,
-           event_date: str | None = None, media: str | None = None) -> dict:
+           event_date: str | None = None, media: str | None = None, pieces: int | None = None,
+           rate: int | None = None, linked_tx_id: int | None = None) -> dict:
     cur = conn.execute(
         """INSERT INTO financial_transactions (user_id, type, amount, status, reason, media_file_id, source, shift_id,
-                                               event_date, created_by, created_at, decided_by, decided_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                               event_date, created_by, created_at, decided_by, decided_at, pieces, rate,
+                                               linked_tx_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (user_id, type, amount, status, reason[:MAX_REASON], media, source, shift_id,
          event_date or today_local().isoformat(), actor_tg, now_iso(),
-         actor_tg if status == "active" else None, now_iso() if status == "active" else None),
+         actor_tg if status == "active" else None, now_iso() if status == "active" else None, pieces, rate, linked_tx_id),
     )
     return get(conn, cur.lastrowid)
 
@@ -301,6 +307,53 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
     return TxResult(tx, True, event)
 
 
+def piece_deduction(conn: sqlite3.Connection, actor: dict, user_id: int, day: date, pieces: int, reason: str, key: str,
+                    media: str | None = None) -> list[dict]:
+    """Owner: a deduction in pieces for a day (customer round B). The employee loses pieces × their rate of
+    that day; the trainer of their network loses pieces × the ladder rate paid that day (not recalculated).
+    Both see rubles. Returns [employee's deduction, trainer's deduction?]."""
+    from .rates import Book
+
+    if isinstance(pieces, bool) or not isinstance(pieces, int) or not 0 < pieces <= 100_000:
+        raise ServiceError("Количество — целое число штук больше нуля", 422, "bad_pieces")
+    reason = _reason(reason)
+    if day > today_local():
+        raise ServiceError("Дата не может быть в будущем", 422, "bad_date")
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM financial_transactions WHERE user_id = ? AND pieces IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (user_id,))]
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "money"):
+            raise ServiceError("Вычеты добавляет только владелец", 403, "owner_only")
+        target = _target(conn, user_id)
+        book = Book.load(conn)
+        fact = conn.execute(
+            f"""SELECT fact_volume FROM shifts WHERE user_id = ? AND shift_date = ? AND status IN {svc.ACTIVE}
+                AND fact_volume IS NOT NULL""", (user_id, day.isoformat())).fetchone()
+        # the rate of that very day; with no result that day — the full (not lazy) rate
+        rate = book.day_rate(user_id, fact[0]) if fact else book.user_rates(user_id)["rate_base"]
+        dd = f"{day.day:02d}.{day.month:02d}"
+        own = record(conn, user_id=user_id, type="deduction", amount=pieces * rate,
+                     reason=f"{reason} ({pieces} шт. × {rate} ₽ за {dd})", actor_tg=actor["telegram_id"],
+                     event_date=day.isoformat(), media=media, pieces=pieces, rate=rate)
+        out = [own]
+        net = book.nets.get(target["network_id"])
+        if net and net["trainer_id"] and net["trainer_id"] != user_id and not net["owner_led"]:
+            t_rate = book.trainer_rate_on(conn, net["id"], day)
+            if t_rate > 0:
+                out.append(record(conn, user_id=net["trainer_id"], type="deduction", amount=pieces * t_rate,
+                                  reason=f"Вычет у {svc.full_name(target)}: {reason} ({pieces} шт. × {t_rate} ₽ за {dd})",
+                                  actor_tg=actor["telegram_id"], event_date=day.isoformat(), media=media,
+                                  pieces=pieces, rate=t_rate, linked_tx_id=own["id"]))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="DEDUCTION_PIECES", key=key,
+                  new={"tx": [t["id"] for t in out], "pieces": pieces, "rate": rate, "amounts": [t["amount"] for t in out]},
+                  description=reason)
+    return out
+
+
 def decide(conn: sqlite3.Connection, actor: dict, tx_id: int, approve: bool, comment: str | None, key: str) -> TxResult:
     """Owner approves or declines a trainer's fine (ТЗ 5.3)."""
     _check_key(key)
@@ -350,6 +403,10 @@ def cancel(conn: sqlite3.Connection, actor: dict, tx_id: int, reason: str, key: 
             raise ServiceError(f"Запись уже {STATUS_TITLES[tx['status']]}", 409, "not_cancellable")
         conn.execute("UPDATE financial_transactions SET status = 'cancelled', decided_by = ?, decided_at = ?, "
                      "decision_comment = ? WHERE id = ?", (actor["telegram_id"], now_iso(), reason, tx_id))
+        # a deduction in pieces takes the trainer's part with it
+        conn.execute("UPDATE financial_transactions SET status = 'cancelled', decided_by = ?, decided_at = ?, "
+                     "decision_comment = ? WHERE linked_tx_id = ? AND status = 'active'",
+                     (actor["telegram_id"], now_iso(), reason, tx_id))
         _sync_shift(conn, tx, f"Штраф аннулирован: {reason}")
         log_event(conn, user_id=tx["user_id"], actor_id=actor["telegram_id"], event_type="TX_CANCELLED", key=key,
                   shift_id=tx["shift_id"], old={"status": tx["status"]}, new={"tx": tx_id, "status": "cancelled"},

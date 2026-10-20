@@ -4,11 +4,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, events, finance, goals, networks, payouts, reports, violations
+from . import day_actual, events, finance, goals, networks, payouts, rates, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -144,11 +144,39 @@ class NetworkBody(BaseModel):
     idempotency_key: str
 
 
+class LadderStep(BaseModel):
+    model_config = {"populate_by_name": True}
+    from_: int = Field(alias="from")
+    rate: int
+
+
 class NetworkPatch(BaseModel):
     name: str | None = None
     trainer_id: int | None = None
     clear_trainer: bool = False
     archive: bool = False
+    # owner: rates of the network (customer round B); rate_base None with clear_rate = the common rate
+    rate_base: int | None = None
+    clear_rate: bool = False
+    ladder: list[LadderStep] | None = None
+    ladder_period: str | None = None
+    ladder_counts_trainer: bool | None = None
+    idempotency_key: str
+
+
+class UserRates(BaseModel):
+    personal_rate: int | None = None
+    clear_personal_rate: bool = False
+    lazy_exempt: bool | None = None
+    idempotency_key: str
+
+
+class PieceDeduction(BaseModel):
+    user_id: int
+    day: str
+    pieces: int
+    reason: str
+    media_file_id: str | None = None
     idempotency_key: str
 
 
@@ -295,6 +323,11 @@ def public_user(user: dict) -> dict:
     }
 
 
+def money_fields(user: dict) -> dict:
+    """A person's rates — shown to owners only (customer round B)."""
+    return {"personal_rate": user.get("personal_rate"), "lazy_exempt": bool(user.get("lazy_exempt"))}
+
+
 # All handlers and dependencies are `async def` on purpose: they then run on the event loop,
 # so the synchronous service calls never overlap (plain `def` would go to a thread pool).
 def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str | None = None) -> FastAPI:
@@ -397,7 +430,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "events": len(events.visible(conn, user)),
             "network": (networks.get(conn, user["network_id"]) or {}).get("name") if user["network_id"] else None,
             "capabilities": perms.capabilities(user),
-            "pricing": pricing.pricing_info(),
+            "pricing": pricing.pricing_info(rates.for_user(conn, user["id"])),
             "bot_username": app.state.bot_username,
         }
 
@@ -560,7 +593,9 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if not perms.can(admin, "registrations"):
             people = [u for u in people if u["status"] == "approved"]
         nets = networks.names(conn)
-        items = [{**public_user(u), "network": nets.get(u["network_id"])} for u in visible(admin, people)]
+        money = perms.can(admin, "money")
+        items = [{**public_user(u), "network": nets.get(u["network_id"]), **(money_fields(u) if money else {})}
+                 for u in visible(admin, people)]
         return {"items": items, "bot_username": app.state.bot_username}
 
     @api.post("/admin/team/{user_id}/role")
@@ -602,26 +637,32 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             changes["capacity"] = None
         return {"point": svc.update_point(conn, admin, point_id, changes)}
 
-    def settings_view() -> dict:
+    # money settings: only owners see and change them (customer round B)
+    OWNER_SETTINGS = set(pricing.DEFAULTS) | {"revenue_per_piece"}
+
+    def settings_view(viewer: dict) -> dict:
         archive = app_settings.get_raw(conn, "archive_chat_id")
+        values = app_settings.get_all(conn)
+        if not perms.can(viewer, "money"):
+            values = {k: v for k, v in values.items() if k not in OWNER_SETTINGS}
         return {
-            "settings": app_settings.get_all(conn),
+            "settings": values,
             "timezone": settings.timezone,
             "archive": {"connected": bool(archive), "title": app_settings.get_raw(conn, "archive_chat_title")},
         }
 
     @api.get("/admin/settings")
-    async def admin_settings_get(_: dict = Depends(staff("settings"))):
-        return settings_view()
+    async def admin_settings_get(admin: dict = Depends(staff("settings"))):
+        return settings_view(admin)
 
     @api.patch("/admin/settings")
     async def admin_settings_set(body: dict, admin: dict = Depends(staff("settings"))):
         # rates are money: only owners change them (admins keep the schedule settings)
-        if any(k in pricing.DEFAULTS and body[k] != app_settings.get_all(conn).get(k) for k in body) \
+        if any(k in OWNER_SETTINGS and body[k] != app_settings.get_all(conn).get(k) for k in body) \
                 and not perms.can(admin, "money"):
             raise svc.ServiceError("Ставки меняет только владелец", 403, "owner_only")
         app_settings.update(conn, body)
-        return settings_view()
+        return settings_view(admin)
 
     @api.get("/admin/broadcasts")
     async def admin_broadcasts(admin: dict = Depends(staff("broadcast_network"))):
@@ -937,9 +978,42 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                 notifier.spawn(notifier.network_changed(svc.get_user(conn, body.trainer_id), net["name"], owner, trainer=True))
             if previous:
                 notifier.spawn(notifier.role_changed(svc.get_user(conn, previous["id"]), owner, "trainer"))
+        money = {}
+        if body.rate_base is not None or body.clear_rate:
+            money["rate_base"] = None if body.clear_rate else body.rate_base
+        if body.ladder is not None:
+            money["ladder"] = [{"from": s.from_, "rate": s.rate} for s in body.ladder]
+        if body.ladder_period is not None:
+            money["ladder_period"] = body.ladder_period
+        if body.ladder_counts_trainer is not None:
+            money["ladder_counts_trainer"] = body.ladder_counts_trainer
+        if money:
+            if not perms.can(owner, "money"):
+                raise svc.ServiceError("Ставки меняет только владелец", 403, "owner_only")
+            net = networks.set_rates(conn, owner, network_id, money, body.idempotency_key + ":rates")
         if net is None:
             raise svc.ServiceError("Нет изменений", 422, "no_changes")
         return {"network": net}
+
+    @api.post("/admin/team/{user_id}/rates")
+    async def admin_user_rates(user_id: int, body: UserRates, owner: dict = Depends(staff("money"))):
+        changes = {}
+        if body.personal_rate is not None or body.clear_personal_rate:
+            changes["personal_rate"] = None if body.clear_personal_rate else body.personal_rate
+        if body.lazy_exempt is not None:
+            changes["lazy_exempt"] = body.lazy_exempt
+        user = rates.set_user_rates(conn, owner, user_id, changes, body.idempotency_key)
+        return {"user": {**public_user(user), **money_fields(user)}}
+
+    @api.post("/admin/finances/pieces")
+    async def admin_piece_deduction(body: PieceDeduction, owner: dict = Depends(staff("money"))):
+        if body.media_file_id and len(body.media_file_id) > 300:
+            raise svc.ServiceError("Некорректный файл", 422, "bad_media")
+        txs = finance.piece_deduction(conn, owner, body.user_id, svc.parse_date(body.day), body.pieces, body.reason,
+                                      body.idempotency_key, body.media_file_id or None)
+        for tx in txs:
+            notifier.spawn(notifier.tx_created(tx, owner))
+        return {"items": [finance.public(t) for t in txs]}
 
     @api.post("/admin/team/{user_id}/network")
     async def admin_member_network(user_id: int, body: MemberNetwork, owner: dict = Depends(staff("networks"))):
@@ -996,6 +1070,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         result = finance.cancel(conn, admin, tx_id, body.reason, body.idempotency_key)
         if result.changed:
             notifier.spawn(notifier.tx_cancelled(result.tx, admin, before["status"]))
+            # the trainer's part of a deduction in pieces is annulled together with it
+            for row in conn.execute("SELECT * FROM financial_transactions WHERE linked_tx_id = ? AND status = 'cancelled'",
+                                    (tx_id,)):
+                notifier.spawn(notifier.tx_cancelled(dict(row), admin, "active"))
         return {"tx": finance.public(result.tx), "changed": result.changed}
 
     @api.post("/admin/finances/{tx_id}/amount")
@@ -1041,8 +1119,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/payouts/preview")
     async def admin_payout_preview(body: PayoutPreview, _: dict = Depends(staff("money"))):
         rates = payouts.Rates.from_dict(body.rates.model_dump())
-        rows = payouts.calculate(conn, svc.parse_date(body.date_from), svc.parse_date(body.date_to), rates, body.network_id)
-        return {"rows": [{k: v for k, v in r.items() if k != "tx_ids"} for r in rows], "rates": rates.as_dict()}
+        d_from, d_to = svc.parse_date(body.date_from), svc.parse_date(body.date_to)
+        rows = payouts.calculate(conn, d_from, d_to, rates, body.network_id)
+        return {"rows": [{k: v for k, v in r.items() if k != "tx_ids"} for r in rows], "rates": rates.as_dict(),
+                "summary": payouts.summary(conn, rows, d_from, d_to, body.network_id)}
 
     @api.post("/admin/payouts")
     async def admin_payout_commit(body: PayoutCommit, owner: dict = Depends(staff("money"))):

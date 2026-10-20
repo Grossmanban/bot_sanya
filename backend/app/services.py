@@ -476,12 +476,19 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
         "shortfall_status": shift.get("shortfall_status"),
         "shortfall_penalty": shift.get("shortfall_penalty"),
     }
+    # the person's own rates (personal / network / common) when the database is at hand
+    own = None
+    if conn is not None:
+        from . import rates as rates_mod
+
+        own = rates_mod.for_user(conn, shift["user_id"])
     if volume:
         data.update(
-            rate=pricing.calculate_rate(volume), expected_pay=pricing.expected_pay(volume), lazy=pricing.is_lazy(volume)
+            rate=pricing.calculate_rate(volume, own), expected_pay=pricing.expected_pay(volume, own),
+            lazy=pricing.is_lazy(volume, own)
         )
     if shift.get("fact_volume") is not None:
-        data["fact_pay"] = pricing.expected_pay(shift["fact_volume"])
+        data["fact_pay"] = pricing.expected_pay(shift["fact_volume"], own)
     if conn is not None:
         from . import reports  # reports builds on this module
 
@@ -966,13 +973,16 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
         f"SELECT * FROM shifts WHERE user_id = ? AND shift_date BETWEEN ? AND ? AND {LIVE} ORDER BY shift_date",
         (user_id, date_from.isoformat(), date_to.isoformat()),
     ).fetchall()
+    from . import rates as rates_mod
+
+    own = rates_mod.for_user(conn, user_id)
     items, active_volume, cancelled_volume, penalties, pay = [], 0, 0, 0, 0
     fact_volume, fact_pay, fact_missing = 0, 0, 0
     short_shifts, short_volume, short_pending = 0, 0, 0
     for r in rows:
         s = dict(r)
         notes = []
-        if s["volume"] and pricing.is_lazy(s["volume"]):
+        if s["volume"] and pricing.is_lazy(s["volume"], own):
             notes.append("Налог на лень")
         if s["is_urgent"]:
             notes.append("Срочная")
@@ -980,10 +990,10 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
             notes.append(f"Штраф {s['penalty_amount']} ₽" if s["penalty_amount"] is not None else "Штраф не назначен")
         if s["status"] in ACTIVE:
             active_volume += s["volume"]
-            pay += pricing.expected_pay(s["volume"])
+            pay += pricing.expected_pay(s["volume"], own)
             if s["fact_volume"] is not None:
                 fact_volume += s["fact_volume"]
-                fact_pay += pricing.expected_pay(s["fact_volume"])
+                fact_pay += pricing.expected_pay(s["fact_volume"], own)
             elif s["shift_date"] < today_local().isoformat():
                 fact_missing += 1
         elif s["status"] in ("cancelled", "finally_cancelled") and s["volume"]:
@@ -1006,8 +1016,8 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
                 "end_time": s["end_time"],
                 "volume": s["volume"],
                 "location": s["location"],
-                "rate": pricing.calculate_rate(s["volume"]) if s["volume"] else None,
-                "expected_pay": pricing.expected_pay(s["volume"]) if s["volume"] and s["status"] in ACTIVE else None,
+                "rate": pricing.calculate_rate(s["volume"], own) if s["volume"] else None,
+                "expected_pay": pricing.expected_pay(s["volume"], own) if s["volume"] and s["status"] in ACTIVE else None,
                 "penalty_amount": s["penalty_amount"],
                 "fact_volume": s["fact_volume"],
                 "shortfall": short,

@@ -32,6 +32,8 @@ def members(conn: sqlite3.Connection, network_id: int) -> list[dict]:
 
 def listing(conn: sqlite3.Connection, viewer: dict, include_archived: bool = False) -> list[dict]:
     """The organisation tree: owners and admins see every network, a trainer only their own."""
+    from . import rates
+
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM networks" + ("" if include_archived else " WHERE status = 'active'") + " ORDER BY status, name")]
     if not perms.sees_everyone(viewer):
@@ -45,7 +47,10 @@ def listing(conn: sqlite3.Connection, viewer: dict, include_archived: bool = Fal
             "name": n["name"],
             "status": n["status"],
             "trainer": {"id": trainer["id"], "name": svc.full_name(trainer), "username": trainer["username"],
-                        "telegram_id": trainer["telegram_id"]} if trainer else None,
+                        "telegram_id": trainer["telegram_id"], "is_owner": perms.is_owner(trainer)} if trainer else None,
+            # rates are money: owners only (customer round B)
+            **({"rate_base": n["rate_base"], "ladder": rates.parse_ladder(n["ladder"]), "ladder_period": n["ladder_period"],
+                "ladder_counts_trainer": bool(n["ladder_counts_trainer"])} if perms.can(viewer, "money") else {}),
             "members": [{"id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
                          "role": perms.role_of(u), "work_status": u["work_status"], "account_state": u["account_state"]}
                         for u in people if not trainer or u["id"] != trainer["id"]],
@@ -144,8 +149,9 @@ def set_member(conn: sqlite3.Connection, actor: dict, user_id: int, network_id: 
 
 
 def set_trainer(conn: sqlite3.Connection, actor: dict, network_id: int, user_id: int | None, key: str) -> tuple[dict, dict | None]:
-    """Appoint the network's trainer (one per network, one network per trainer). The person joins the
-    network and gets the trainer role; the previous trainer stays in the network as an employee.
+    """Appoint the network's head (one per network). A trainer leads one network: they join it and get the
+    trainer role; the previous trainer stays in the network as an employee. An owner may lead several
+    networks (customer round B): their role and network don't change and no trainer share is paid there.
     Returns (network, previous trainer)."""
     _check_key(key)
     with transaction(conn):
@@ -162,14 +168,47 @@ def set_trainer(conn: sqlite3.Connection, actor: dict, network_id: int, user_id:
             user = svc.get_user(conn, user_id)
             if user is None or user["status"] != "approved" or user["account_state"] == "blocked":
                 raise ServiceError("Сотрудник не найден или заблокирован", 404, "not_found")
-            if perms.is_owner(user) or user["role"] == "admin":
-                raise ServiceError("Владелец и администраторы и так видят все сети", 409, "already_staff")
-            conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
-            conn.execute("UPDATE users SET role = 'trainer', network_id = ? WHERE id = ?", (network_id, user_id))
+            if not perms.is_owner(user):
+                if user["role"] == "admin":
+                    raise ServiceError("Администратор и так видит все сети", 409, "already_staff")
+                conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
+                conn.execute("UPDATE users SET role = 'trainer', network_id = ? WHERE id = ?", (network_id, user_id))
         conn.execute("UPDATE networks SET trainer_id = ? WHERE id = ?", (user_id, network_id))
         log_event(conn, user_id=user_id or actor["id"], actor_id=actor["telegram_id"], event_type="NETWORK_TRAINER_SET",
                   key=key, old={"trainer": previous["id"] if previous else None}, new={"network": network_id, "trainer": user_id})
     return get(conn, network_id), previous
+
+
+def set_rates(conn: sqlite3.Connection, actor: dict, network_id: int, changes: dict, key: str) -> dict:
+    """Owner: the network's base rate (None = the common one) and the trainer's ladder (customer round B)."""
+    from . import rates
+
+    fields = {}
+    if "rate_base" in changes:
+        v = changes["rate_base"]
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= rates.MAX_RATE):
+            raise ServiceError("Ставка — целое число рублей", 422, "bad_rate")
+        fields["rate_base"] = v
+    if "ladder" in changes:
+        fields["ladder"] = rates.validate_ladder(changes["ladder"])
+    if "ladder_period" in changes:
+        if changes["ladder_period"] not in ("day", "week"):
+            raise ServiceError("Период лестницы — день или неделя", 422, "bad_period")
+        fields["ladder_period"] = changes["ladder_period"]
+    if "ladder_counts_trainer" in changes:
+        fields["ladder_counts_trainer"] = int(bool(changes["ladder_counts_trainer"]))
+    if not fields:
+        raise ServiceError("Нет изменений", 422, "no_changes")
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return get(conn, network_id)
+        actor = _owner(conn, actor)
+        net = _active(conn, network_id)
+        conn.execute(f"UPDATE networks SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?", (*fields.values(), network_id))
+        log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="NETWORK_RATES_SET", key=key,
+                  old={k: net[k] for k in fields}, new={"network": network_id, **fields})
+    return get(conn, network_id)
 
 
 def trainer_of(conn: sqlite3.Connection, user: dict) -> dict | None:

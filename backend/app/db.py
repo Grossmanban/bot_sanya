@@ -636,6 +636,26 @@ ALTER TABLE users ADD COLUMN min_weekly_shifts INTEGER CHECK (min_weekly_shifts 
 """)
 
 
+# 16: flexible rates (customer round B): personal rate and «no lazy tax» per person, a base rate and the
+# trainer's ladder per network, deductions in pieces (with the trainer's part linked), the owner's
+# earnings kept with each payout. An owner may lead several networks: one-trainer-one-network moves to code.
+MIGRATIONS.append("""
+ALTER TABLE users ADD COLUMN personal_rate INTEGER CHECK (personal_rate IS NULL OR personal_rate >= 0);
+ALTER TABLE users ADD COLUMN lazy_exempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE networks ADD COLUMN rate_base INTEGER CHECK (rate_base IS NULL OR rate_base >= 0);
+ALTER TABLE networks ADD COLUMN ladder TEXT;
+ALTER TABLE networks ADD COLUMN ladder_period TEXT NOT NULL DEFAULT 'day' CHECK (ladder_period IN ('day','week'));
+ALTER TABLE networks ADD COLUMN ladder_counts_trainer INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE financial_transactions ADD COLUMN pieces INTEGER CHECK (pieces IS NULL OR pieces > 0);
+ALTER TABLE financial_transactions ADD COLUMN rate INTEGER;
+ALTER TABLE financial_transactions ADD COLUMN linked_tx_id INTEGER REFERENCES financial_transactions(id);
+ALTER TABLE payout_batches ADD COLUMN summary TEXT;
+ALTER TABLE payout_items ADD COLUMN pieces_pay INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE payout_items ADD COLUMN commission INTEGER NOT NULL DEFAULT 0;
+DROP INDEX IF EXISTS ux_networks_trainer;
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):
