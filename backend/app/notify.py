@@ -579,7 +579,9 @@ class Notifier:
         await self.archive(["доступ"], f"{verdict} — {who(user)}" + (f"\nРешил: {who(actor)}" if actor else ""), user)
         if user["status"] == "approved":
             if svc.claim_welcome(self.conn, user["id"]):
-                await self.send(user["telegram_id"], "Добро пожаловать в систему!", open_app)
+                from .bot import WELCOME  # bot imports notify; import lazily
+
+                await self.send(user["telegram_id"], WELCOME, open_app)
             else:
                 await self.send(user["telegram_id"], "Доступ снова открыт.", open_app)
         elif previous_status == "pending":

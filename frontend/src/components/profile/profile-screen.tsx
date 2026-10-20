@@ -14,6 +14,7 @@ import { DayTrack } from "../day-line";
 import { BalanceCard, TxRow } from "../finance/money";
 import { Avatar } from "../avatar";
 import { ThemeChoice } from "../theme-toggle";
+import { QuickAccess } from "./quick-access";
 
 type View = "main" | "history" | "penalties" | "requisites";
 
@@ -21,10 +22,12 @@ export function ProfileScreen({
   user,
   pricing,
   onUserChange,
+  botUsername,
 }: {
   user: User;
   pricing: Pricing;
   onUserChange: (u: User) => void;
+  botUsername?: string | null;
 }) {
   const [view, setView] = useState<View>("main");
   const { busy, run } = useAction();
@@ -101,6 +104,8 @@ export function ProfileScreen({
       </div>
 
       <div className="space-y-4">
+        <QuickAccess botUsername={botUsername} />
+
         <label className="flex cursor-pointer items-center gap-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">
           <span className="grid size-10 place-items-center rounded-xl bg-muted">
             <Bell className="size-5" strokeWidth={1.8} />
