@@ -49,7 +49,7 @@ export function ThemeChoice({ compact, className }: { compact?: boolean; classNa
             setPref(id);
           }}
           className={cn(
-            "press flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl text-[13px] font-semibold whitespace-nowrap transition-colors",
+            "press flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl px-1 text-[13px] font-semibold whitespace-nowrap transition-colors",
             pref === id ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
           )}
         >

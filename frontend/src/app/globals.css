@@ -138,16 +138,25 @@
     font-feature-settings: "ss01", "cv11";
     -webkit-font-smoothing: antialiased;
   }
-  /* 16px inputs keep iOS from zooming on focus */
-  input,
-  textarea,
-  select {
-    font-size: 16px;
-  }
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
+}
+
+/* iOS zooms the page into any field under 16px on focus and never zooms back out (the page then looks
+   cut off on both sides). Outside the layers and !important, so text-sm / text-[15px] on a field can't undo it. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  touch-action: manipulation; /* no double-tap zoom */
 }
 
 /* safe areas: device notch + Telegram fullscreen controls */
