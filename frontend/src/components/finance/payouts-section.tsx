@@ -5,12 +5,13 @@ import { AlertTriangle, Check, ChevronLeft, ChevronRight, Copy, FileSpreadsheet,
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, ROLE_TITLES, type PayoutBatch, type PayoutRates, type PayoutRow } from "@/lib/api";
+import { api, ROLE_TITLES, type PayoutBatch, type PayoutRates, type PayoutRow, type PayoutSummary } from "@/lib/api";
 import { compressImage } from "@/lib/image";
 import { addDays, dayMonth, plural, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { haptic, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
+import { TxForm } from "./money";
 
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 
@@ -86,6 +87,7 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
   const [network, setNetwork] = useState<number | null>(null);
   const [rates, setRates] = useState<PayoutRates>(defaults);
   const [rows, setRows] = useState<PayoutRow[]>([]);
+  const [summary, setSummary] = useState<PayoutSummary | null>(null);
   const [include, setInclude] = useState<Record<number, boolean>>({});
   const [override, setOverride] = useState<Record<number, string>>({});
   const [proof, setProof] = useState<string[]>([]);
@@ -97,11 +99,24 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
       const res = await run("calc", () => api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates }));
       if (!res) return;
       setRows(res.rows);
+      setSummary(res.summary);
       setInclude(Object.fromEntries(res.rows.map((r) => [r.user_id, r.total > 0 || r.base_calc > 0])));
       setOverride({});
       setStep(2);
     } catch {
       /* toast shown */
+    }
+  }
+
+  // a bonus, fine or deduction added right in the grid: recalculate, keep the ticks and overrides
+  async function refresh() {
+    try {
+      const res = await api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates });
+      setRows(res.rows);
+      setSummary(res.summary);
+      setInclude((cur) => ({ ...Object.fromEntries(res.rows.map((r) => [r.user_id, r.total > 0 || r.base_calc > 0])), ...cur }));
+    } catch {
+      /* the grid stays as it was */
     }
   }
 
@@ -172,7 +187,7 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
           </label>
           <div className="grid grid-cols-2 gap-3">
             {([
-              ["rate_base", "Ставка, ₽ за шт."],
+              ["rate_base", "Общая ставка, ₽ за шт."],
               ["rate_lazy", "Налог на лень, ₽ за шт."],
               ["lazy_threshold", "Налог, если меньше, шт."],
               ["trainer_commission", "Тренеру, ₽ за шт. сети"],
@@ -184,6 +199,9 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
               </label>
             ))}
           </div>
+          <p className="text-xs text-muted-foreground">
+            Личные ставки сотрудников, ставки и лестницы сетей применяются поверх общих — они настраиваются в «Команде» и «Сетях».
+          </p>
           <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy || !title.trim() || !from || !to} onClick={calc}>
             {busy && <LoaderCircle className="animate-spin" />} Рассчитать
           </Button>
@@ -204,10 +222,11 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
                 <PayoutRowCard key={r.user_id} row={r} on={!!include[r.user_id]} total={shown(r)}
                                override={override[r.user_id] ?? ""}
                                onToggle={() => setInclude({ ...include, [r.user_id]: !include[r.user_id] })}
-                               onOverride={(v) => setOverride({ ...override, [r.user_id]: v })} />
+                               onOverride={(v) => setOverride({ ...override, [r.user_id]: v })} onMoney={refresh} />
               ))}</ul>
             )}
           </section>
+          {summary && <OwnerSummary s={summary} picked={total} />}
           <section className="sticky bottom-28 flex items-center justify-between gap-3 rounded-3xl bg-hero p-4 pl-5 text-hero-foreground shadow-lift-strong lg:bottom-4">
             <div>
               <p className="text-xs text-hero-muted">{picked.length} {plural(picked.length, "человек", "человека", "человек")}</p>
@@ -244,9 +263,12 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
   );
 }
 
-function PayoutRowCard({ row, on, total, override, onToggle, onOverride }: {
+function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney }: {
   row: PayoutRow; on: boolean; total: number; override: string; onToggle: () => void; onOverride: (v: string) => void;
+  onMoney: () => void;
 }) {
+  const [adding, setAdding] = useState(false);
+  const steps = [...new Set((row.commission_days ?? []).map((d) => d.rate))];
   return (
     <li className={cn("px-5 py-4 md:px-6", !on && "opacity-50")}>
       <div className="flex items-start gap-3">
@@ -263,6 +285,17 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride }: {
           <p className={cn("text-xs", row.bank ? "text-muted-foreground" : "font-semibold text-wait")}>
             {row.bank ? `${row.bank}, ${row.phone}` : "Реквизиты не заполнены"}
           </p>
+          {(row.pieces_pay > 0 || row.commission > 0) && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {row.pieces_pay > 0 && <>За штуки {rub(row.pieces_pay)}{row.rates ? ` (ставка ${row.rates.rate_base} ₽)` : ""}</>}
+              {row.pieces_pay > 0 && row.commission > 0 && " · "}
+              {row.commission > 0 && (
+                <span className="font-semibold text-foreground">
+                  тренерские {rub(row.commission)} ({row.team_volume} шт. по {steps.join("/")} ₽)
+                </span>
+              )}
+            </p>
+          )}
         </div>
         <span className="font-display text-lg font-semibold tabular">{rub(total)}</span>
       </div>
@@ -280,7 +313,45 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride }: {
       {row.carried_debt > 0 && (
         <p className="mt-2 pl-9 text-xs text-wait">Не поместилось в выплату: {rub(row.carried_debt)} — останется долгом.</p>
       )}
+      <div className="mt-2 pl-9">
+        <Button variant="ghost" size="sm" className="press h-8 rounded-lg px-2 text-muted-foreground" onClick={() => setAdding((v) => !v)}>
+          {adding ? <X /> : <Plus />} {adding ? "Закрыть" : "Начислить или удержать"}
+        </Button>
+        {adding && (
+          <div className="row-in mt-2 rounded-2xl bg-muted/50 p-4">
+            <TxForm userId={row.user_id} onDone={() => { setAdding(false); onMoney(); }} />
+          </div>
+        )}
+      </div>
     </li>
+  );
+}
+
+/** The owner's side: revenue for every approved piece minus what people get (customer round B). */
+function OwnerSummary({ s, picked }: { s: PayoutSummary; picked: number }) {
+  if (!s.revenue_per_piece) {
+    return (
+      <p className="rounded-2xl bg-muted/60 px-4 py-3 text-sm text-muted-foreground">
+        Заработок владельца появится здесь, когда в «Настройках → Ставки» указан доход за штуку.
+      </p>
+    );
+  }
+  const owner = s.revenue - picked;
+  return (
+    <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <p className="text-sm text-muted-foreground">Заработок владельца</p>
+      <p className={cn("font-display text-2xl font-semibold tabular", owner < 0 && "text-cancel")}>{rub(owner)}</p>
+      <dl className="mt-3 space-y-1.5 text-sm tabular">
+        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Выручка</dt>
+          <dd className="font-medium">{s.pieces} шт. × {rub(s.revenue_per_piece)} = {rub(s.revenue)}</dd></div>
+        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">К выплате людям (отмеченным)</dt>
+          <dd className="font-medium">−{rub(picked)}</dd></div>
+      </dl>
+      <p className="mt-2 text-xs text-muted-foreground">
+        По всем строкам: за штуки {rub(s.pieces_pay)}, тренерские {rub(s.commission)}, бонусы {rub(s.bonuses)},
+        удержано штрафов и вычетов {rub(s.withheld)}.
+      </p>
+    </section>
   );
 }
 
@@ -368,6 +439,7 @@ function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
           </Button>
         </div>
       </section>
+      {b.summary && b.summary.revenue_per_piece > 0 && <OwnerSummary s={b.summary} picked={b.total} />}
       {byBank.map(([bank, items]) => (
         <section key={bank} className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <div className="flex items-center justify-between px-5 pt-5 pb-2 md:px-6">

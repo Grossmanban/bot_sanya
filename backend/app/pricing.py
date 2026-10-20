@@ -32,5 +32,7 @@ def expected_pay(volume: int, rates: dict | None = None) -> int:
     return volume * calculate_rate(volume, rates)
 
 
-def pricing_info() -> dict:
-    return {"base_rate": _rates["rate_base"], "lazy_rate": _rates["rate_lazy"], "lazy_threshold": _rates["lazy_threshold"]}
+def pricing_info(rates: dict | None = None) -> dict:
+    """For the Mini App hints; `rates` — the person's own (rates.for_user), else the common ones."""
+    r = rates or _rates
+    return {"base_rate": r["rate_base"], "lazy_rate": r["rate_lazy"], "lazy_threshold": r["lazy_threshold"]}

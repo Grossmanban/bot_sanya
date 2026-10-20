@@ -29,6 +29,9 @@ export interface User {
   notify_reminders?: boolean;
   /** personal norm of work days a week; null — the common norm, 0 — no norm */
   min_weekly_shifts?: number | null;
+  /** owners only: personal rate (null — the network's or the common) and «не применять налог на лень» */
+  personal_rate?: number | null;
+  lazy_exempt?: boolean;
 }
 
 export type Role = "owner" | "admin" | "trainer" | "employee";
@@ -144,8 +147,19 @@ export interface Network {
   id: number;
   name: string;
   status: "active" | "archived";
-  trainer: { id: number; name: string; username: string | null; telegram_id: number } | null;
+  trainer: { id: number; name: string; username: string | null; telegram_id: number; is_owner?: boolean } | null;
   members: NetworkMember[];
+  /** owners only (customer round B): null — the common rate / the common commission */
+  rate_base?: number | null;
+  ladder?: LadderStep[];
+  ladder_period?: "day" | "week";
+  ladder_counts_trainer?: boolean;
+}
+
+/** «From N pieces → R ₽ per piece»: the reached step pays every piece. */
+export interface LadderStep {
+  from: number;
+  rate: number;
 }
 
 export interface SettingsResponse {
@@ -315,6 +329,10 @@ export interface Tx {
   decision_comment: string | null;
   has_media: boolean;
   media_url?: string | null;
+  /** a deduction entered in pieces: pieces × rate = amount */
+  pieces?: number | null;
+  rate?: number | null;
+  linked_tx_id?: number | null;
   /** journal rows carry the person */
   name?: string;
   username?: string | null;
@@ -478,6 +496,8 @@ export interface ScheduleSettings {
   rate_lazy: number;
   lazy_threshold: number;
   trainer_commission: number;
+  /** owners only: what the business gets per piece (the owner's earnings in payouts) */
+  revenue_per_piece?: number;
 }
 
 export interface PaymentProfile {
@@ -511,9 +531,28 @@ export interface PayoutRow {
   total: number;
   carried_debt: number;
   has_deductions: boolean;
+  /** pieces × the person's rate of each day */
+  pieces_pay: number;
+  /** the trainer's ladder money for the network */
+  commission: number;
+  commission_days?: { date: string; volume: number; step_volume: number; rate: number; amount: number }[];
+  rates?: { rate_base: number; rate_lazy: number; lazy_threshold: number };
 }
 
-export interface PayoutItem extends Omit<PayoutRow, "has_deductions"> {
+/** The owner's side of a payout (customer round B). */
+export interface PayoutSummary {
+  pieces: number;
+  revenue_per_piece: number;
+  revenue: number;
+  pieces_pay: number;
+  commission: number;
+  bonuses: number;
+  withheld: number;
+  paid: number;
+  owner: number;
+}
+
+export interface PayoutItem extends Omit<PayoutRow, "has_deductions" | "commission_days" | "rates"> {
   id: number;
   base: number;
 }
@@ -529,6 +568,7 @@ export interface PayoutBatch {
   proof_media: string[];
   deduction_media: string[];
   items: PayoutItem[];
+  summary?: PayoutSummary | null;
 }
 
 export interface Broadcast {
@@ -739,7 +779,11 @@ export const api = {
     archiveGoal: (id: number, key: string) => post<{ goal: Goal }>(`/api/admin/goals/${id}/archive`, { idempotency_key: key }),
     networks: () => request<{ items: Network[] }>("/api/admin/networks"),
     createNetwork: (name: string, key: string) => post<{ network: Network }>("/api/admin/networks", { name, idempotency_key: key }),
-    updateNetwork: (id: number, body: { name?: string; trainer_id?: number; clear_trainer?: boolean; archive?: boolean }, key: string) =>
+    updateNetwork: (id: number, body: {
+      name?: string; trainer_id?: number; clear_trainer?: boolean; archive?: boolean;
+      rate_base?: number | null; clear_rate?: boolean; ladder?: LadderStep[]; ladder_period?: "day" | "week";
+      ladder_counts_trainer?: boolean;
+    }, key: string) =>
       patch<{ network: Network }>(`/api/admin/networks/${id}`, { ...body, idempotency_key: key }),
     setMemberNetwork: (userId: number, networkId: number | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/network`, { network_id: networkId, idempotency_key: key }),
@@ -750,7 +794,11 @@ export const api = {
     payout: (id: number) => request<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}`),
     payoutExcel: (id: number) => post<{ ok: boolean }>(`/api/admin/payouts/${id}/excel`, {}),
     previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates }) =>
-      post<{ rows: PayoutRow[]; rates: PayoutRates }>("/api/admin/payouts/preview", body),
+      post<{ rows: PayoutRow[]; rates: PayoutRates; summary: PayoutSummary }>("/api/admin/payouts/preview", body),
+    setUserRates: (userId: number, body: { personal_rate?: number | null; clear_personal_rate?: boolean; lazy_exempt?: boolean },
+                   key: string) => post<{ user: User }>(`/api/admin/team/${userId}/rates`, { ...body, idempotency_key: key }),
+    pieceDeduction: (body: { user_id: number; day: string; pieces: number; reason: string; media_file_id: string | null },
+                     key: string) => post<{ items: Tx[] }>("/api/admin/finances/pieces", { ...body, idempotency_key: key }),
     commitPayout: (
       body: {
         title: string;

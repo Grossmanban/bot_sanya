@@ -159,10 +159,12 @@ export function ProfileScreen({
               <dt className="text-muted-foreground">Обычная</dt>
               <dd className="font-display font-semibold">{pricing.base_rate} ₽ за шт.</dd>
             </div>
-            <div className="flex items-baseline justify-between gap-4">
-              <dt className="text-muted-foreground">Меньше {pricing.lazy_threshold} шт. за день</dt>
-              <dd className="font-display font-semibold">{pricing.lazy_rate} ₽ за шт.</dd>
-            </div>
+            {pricing.lazy_threshold > 0 && (
+              <div className="flex items-baseline justify-between gap-4">
+                <dt className="text-muted-foreground">Меньше {pricing.lazy_threshold} шт. за день</dt>
+                <dd className="font-display font-semibold">{pricing.lazy_rate} ₽ за шт.</dd>
+              </div>
+            )}
           </dl>
         </section>
       </div>

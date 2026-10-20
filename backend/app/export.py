@@ -62,6 +62,12 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
     ]
 
     wb = Workbook()
+    from .rates import Book
+
+    book = Book.load(conn)
+
+    def own(s: dict) -> dict:  # the person's rates: personal / network / common
+        return book.user_rates(s["user_id"])
 
     totals: dict[int, dict] = {}
     for s in shifts:
@@ -73,10 +79,10 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
         if s["status"] in ACTIVE:
             t["shifts"] += 1
             t["plan"] += s["volume"]
-            t["plan_pay"] += pricing.expected_pay(s["volume"])
+            t["plan_pay"] += pricing.expected_pay(s["volume"], own(s))
             if s["fact_volume"] is not None:
                 t["fact"] += s["fact_volume"]
-                t["fact_pay"] += pricing.expected_pay(s["fact_volume"])
+                t["fact_pay"] += pricing.expected_pay(s["fact_volume"], own(s))
             else:
                 t["no_fact"] += 1
         elif s["status"] in ("cancelled", "finally_cancelled"):
@@ -128,10 +134,10 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
             [
                 date.fromisoformat(s["shift_date"]).strftime("%d.%m.%Y"), full_name(s), STATUS_RU.get(s["status"], s["status"]),
                 s["start_time"] or "", s["end_time"] or "", s["location"] or "", s["volume"] or "",
-                pricing.calculate_rate(s["volume"]) if s["volume"] else "",
-                pricing.expected_pay(s["volume"]) if s["volume"] and s["status"] in ACTIVE else "",
+                pricing.calculate_rate(s["volume"], own(s)) if s["volume"] else "",
+                pricing.expected_pay(s["volume"], own(s)) if s["volume"] and s["status"] in ACTIVE else "",
                 s["fact_volume"] if s["fact_volume"] is not None else "",
-                pricing.expected_pay(s["fact_volume"]) if s["fact_volume"] is not None else "",
+                pricing.expected_pay(s["fact_volume"], own(s)) if s["fact_volume"] is not None else "",
                 shortfall(s) or "",
                 s["shortfall_penalty"] if s["shortfall_penalty"] is not None else ("без штрафа" if s["shortfall_status"] == "waived" else ""),
                 s["penalty_amount"] if s["penalty_amount"] is not None else "",

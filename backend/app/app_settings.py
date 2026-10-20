@@ -37,6 +37,8 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "rate_lazy": ("100", "rub"),
     "lazy_threshold": ("20", "count"),
     "trainer_commission": ("10", "rub"),
+    # customer round B: what the business gets per piece — the owner's earnings in the payout summary
+    "revenue_per_piece": ("0", "rub"),
     # ТЗ 12.4: every Monday the past week is checked against the norm of work days (0 — no norm)
     "weekly_attendance_quota": ("3", "days"),
     "attendance_check_enabled": ("1", "bool"),

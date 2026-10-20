@@ -1,8 +1,9 @@
 """SBP payment profile and the payout registry (ТЗ модули 9–10). Owners only, except one's own profile.
 
-Calculation for a period (ТЗ 11.1, decisions for stage 6):
-    base       = Σ over APPROVED reports by day: fact × rate (rate_lazy below lazy_threshold, else rate_base)
-    trainers  += team volume (approved facts of their network) × trainer_commission
+Calculation for a period (ТЗ 11.1, decisions for stage 6, flexible rates — see rates.py):
+    base       = Σ over APPROVED reports by day: fact × that person's rate of the day
+    trainers  += the network's ladder: team volume × the step rate, per day or per week
+    owners are not paid here: they earn revenue_per_piece × pieces − everything paid out (summary)
     bonuses    = active bonuses dated up to the period end
     fines      = active fines dated up to the period end
     deductions = active deductions
@@ -16,7 +17,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
-from . import finance, networks, pricing
+from . import app_settings, finance, networks, pricing
+from .rates import Book
 from . import permissions as perms
 from . import services as svc
 from .db import transaction
@@ -151,26 +153,28 @@ def _open_money(conn, user_id: int, date_to: date) -> list[dict]:
 
 def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: Rates,
               network_id: int | None = None) -> list[dict]:
-    """The auto-calculator grid (ТЗ 11.2, step 2). Nothing is saved."""
+    """The auto-calculator grid (ТЗ 11.2, step 2). Nothing is saved. `rates` are the common rates
+    (the wizard may change them for one payout); personal and network rates still apply over them."""
     if date_to < date_from or (date_to - date_from).days > 92:
         raise ServiceError("Период от 1 дня до 3 месяцев", 422, "bad_range")
-    people = [u for u in svc.list_users(conn) if u["account_state"] != "blocked"]
+    book = Book.load(conn, rates.as_dict())
+    people = [u for u in svc.list_users(conn) if u["account_state"] != "blocked" and not perms.is_owner(u)]
     if network_id is not None:
         people = [u for u in people if u["network_id"] == network_id]
     nets = networks.names(conn)
-    led = {r["trainer_id"]: r["id"] for r in conn.execute(
-        "SELECT id, trainer_id FROM networks WHERE status = 'active' AND trainer_id IS NOT NULL")}
+    led = {n["trainer_id"]: nid for nid, n in book.nets.items() if n["trainer_id"] and not n["owner_led"]}
     rows = []
     approved = _approved(conn, [u["id"] for u in svc.list_users(conn)], date_from, date_to)
     for u in people:
         mine = [a for a in approved if a["user_id"] == u["id"]]
         personal = sum(a["fact_volume"] for a in mine)
-        base = sum(pricing.expected_pay(a["fact_volume"], rates.as_dict()) for a in mine)
-        team = 0
+        pieces_pay = sum(book.pay(u["id"], a["fact_volume"]) for a in mine)
+        team, commission, share = 0, 0, []
         if u["id"] in led:
-            team_ids = {m["id"] for m in networks.members(conn, led[u["id"]]) if m["id"] != u["id"]}
-            team = sum(a["fact_volume"] for a in approved if a["user_id"] in team_ids)
-            base += team * rates.trainer_commission
+            share = book.trainer_share(conn, led[u["id"]], date_from, date_to)
+            team = sum(d["volume"] for d in share)
+            commission = sum(d["amount"] for d in share)
+        base = pieces_pay + commission
         money = _open_money(conn, u["id"], date_to)
         if not (personal or team or money):
             continue
@@ -185,10 +189,34 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             "recipient": profile["recipient"] if profile else None,
             "personal_volume": personal,
             "team_volume": team,
+            "pieces_pay": pieces_pay,
+            "commission": commission,
+            "commission_days": share,
+            "rates": book.user_rates(u["id"]),
             "base_calc": base,
             **settle(base, money),
         })
     return sorted(rows, key=lambda r: r["name"])
+
+
+def summary(conn: sqlite3.Connection, rows: list[dict], date_from: date, date_to: date,
+            network_id: int | None = None) -> dict:
+    """The owner's side (customer round B): revenue for every approved piece minus what people get."""
+    revenue_rate = app_settings.get_all(conn)["revenue_per_piece"]
+    scope = [u["id"] for u in svc.list_users(conn) if network_id is None or u["network_id"] == network_id]
+    pieces = sum(a["fact_volume"] for a in _approved(conn, scope, date_from, date_to))
+    paid = sum(r["total"] for r in rows)
+    return {
+        "pieces": pieces,
+        "revenue_per_piece": revenue_rate,
+        "revenue": pieces * revenue_rate,
+        "pieces_pay": sum(r.get("pieces_pay", 0) for r in rows),
+        "commission": sum(r.get("commission", 0) for r in rows),
+        "bonuses": sum(r["bonuses"] for r in rows),
+        "withheld": sum(r["fines"] + r["deductions"] for r in rows),
+        "paid": paid,
+        "owner": pieces * revenue_rate - paid,
+    }
 
 
 def settle(base: int, money: list[dict]) -> dict:
@@ -247,11 +275,11 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
             base = override if override is not None else r["base_calc"]
             conn.execute(
                 """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
-                       team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (batch_id, r["user_id"], r["role"], r["network"], r["phone"], r["bank"], r["recipient"], r["personal_volume"],
                  r["team_volume"], r["base_calc"], base, r["bonuses"], r["fines"], r["deductions"], r["total"],
-                 r["carried_debt"]),
+                 r["carried_debt"], r["pieces_pay"], r["commission"]),
             )
             if r["tx_ids"]:
                 conn.execute(
@@ -259,7 +287,9 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
                         WHERE id IN ({','.join('?' * len(r['tx_ids']))}) AND status = 'active'""",
                     (batch_id, actor["telegram_id"], now_iso(), *r["tx_ids"]))
             grand += r["total"]
-        conn.execute("UPDATE payout_batches SET total = ? WHERE id = ?", (grand, batch_id))
+        committed = [dict(i) for i in conn.execute("SELECT * FROM payout_items WHERE batch_id = ?", (batch_id,))]
+        conn.execute("UPDATE payout_batches SET total = ?, summary = ? WHERE id = ?",
+                     (grand, json.dumps(summary(conn, committed, date_from, date_to, network_id)), batch_id))
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="PAYOUT_COMMITTED", key=key,
                   new={"batch": batch_id, "total": grand, "people": len(rows)}, description=title)
     return batch(conn, batch_id)
@@ -273,6 +303,7 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> dict | None:
     b["rates"] = json.loads(b["rates"])
     b["proof_media"] = json.loads(b["proof_media"])
     b["deduction_media"] = json.loads(b["deduction_media"])
+    b["summary"] = json.loads(b["summary"]) if b.get("summary") else None
     b["items"] = [{**dict(r), "name": svc.full_name(svc.get_user(conn, r["user_id"]))}
                   for r in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? ORDER BY id", (batch_id,))]
     return b

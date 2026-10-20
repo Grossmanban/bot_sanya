@@ -908,6 +908,13 @@ class Notifier:
                 parts.append(f"<b>Вычет -{it['deductions']}</b>")
             debt = f" (долг остаётся {it['carried_debt']} ₽)" if it["carried_debt"] else ""
             lines.append(f"• {escape(it['name'])}: {' | '.join(parts)} | <b>Итого {it['total']} ₽</b>{debt}")
+        sm = batch.get("summary")
+        if sm and sm.get("revenue_per_piece"):
+            lines += ["", "<b>ВЛАДЕЛЕЦ:</b>",
+                      f"Выручка: {sm['pieces']} шт. × {sm['revenue_per_piece']} ₽ = {sm['revenue']} ₽",
+                      f"Выплачено людям: {sm['paid']} ₽ (за штуки {sm['pieces_pay']}, тренерские {sm['commission']}, "
+                      f"бонусы {sm['bonuses']}, удержано {sm['withheld']})",
+                      f"<b>Заработок владельца: {sm['owner']} ₽</b>"]
         await self.archive(["выплата"], "\n".join(lines)[:3900])
         chat = app_settings.get_raw(self.conn, "archive_chat_id")
         if chat:
