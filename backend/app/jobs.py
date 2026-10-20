@@ -90,7 +90,8 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
         ran.append("no_show")
     for event in events.finish_due(conn, now):
         ran.append("event_finished")
-        await notifier.event_finished(event)
+        if event["visibility"] != "hidden":  # a hidden event finishes quietly
+            await notifier.event_finished(event)
     done = goals.check_completions(conn, today)
     if done:
         ran.append("goals")

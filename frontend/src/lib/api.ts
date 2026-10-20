@@ -68,11 +68,24 @@ export interface Me {
   events?: number;
 }
 
-export interface LiveEvent {
+/** ТЗ №20, №22: what goals and events share once running. */
+export interface Lifecycle {
+  prize: string | null;
+  prize_type: string | null;
+  prize_photo_url: string | null;
+  /** optimistic locking: sent back with every edit */
+  version: number;
+  visibility: "auto" | "shown" | "hidden";
+  hidden_at: string | null;
+  /** admin lists only */
+  in_feed?: boolean;
+  can_manage?: boolean;
+}
+
+export interface LiveEvent extends Lifecycle {
   id: number;
   title: string;
   description: string | null;
-  prize: string | null;
   mode: "first_to_reach" | "accumulative";
   target: number | null;
   max_winners: number;
@@ -85,6 +98,10 @@ export interface LiveEvent {
   network: string | null;
   leaderboard: { user_id: number; name: string; score: number; confirmed: number; pending: number; place: number; winner: boolean; out: boolean }[];
   winners_count: number;
+  finished_at: string | null;
+  created_at: string;
+  /** admin list: confirmed results that can be taken back */
+  entries?: { id: number; user_id: number; value: number; status: string; annulled: boolean; reason: string | null }[];
   my: {
     score: number;
     confirmed: number;
@@ -92,8 +109,32 @@ export interface LiveEvent {
     attempts_left: number;
     pending: boolean;
     can_submit: boolean;
-    entries: { id: number; attempt: number; value: number; status: "pending_review" | "confirmed" | "rejected"; reason: string | null; submitted_at: string }[];
+    entries: { id: number; attempt: number; value: number; status: "pending_review" | "confirmed" | "rejected"; reason: string | null; annulled: boolean; submitted_at: string }[];
   };
+}
+
+export interface EventChanges {
+  title?: string;
+  description?: string | null;
+  starts_at?: string;
+  ends_at?: string;
+  target?: number;
+  max_winners?: number;
+  max_attempts?: number;
+  prize?: string | null;
+  prize_type?: string | null;
+  prize_photo?: string | null;
+}
+
+export interface GoalChanges {
+  title?: string;
+  description?: string | null;
+  target?: number;
+  date_from?: string;
+  date_to?: string;
+  prize?: string | null;
+  prize_type?: string | null;
+  prize_photo?: string | null;
 }
 
 export interface PendingEntry {
@@ -110,7 +151,7 @@ export interface PendingEntry {
   photo_url: string;
 }
 
-export interface Goal {
+export interface Goal extends Lifecycle {
   id: number;
   title: string;
   description: string | null;
@@ -124,7 +165,12 @@ export interface Goal {
   person?: string;
   progress: number;
   total: number;
-  participants: { user_id: number; name: string; volume: number; done: boolean }[];
+  participants: { user_id: number; name: string; volume: number; done: boolean; annulled: boolean; annul_reason: string | null }[];
+  completed_at: string | null;
+  /** ТЗ №20: how many have «выполнено» while below the (raised) target */
+  revocable: number;
+  /** the viewer's result here was annulled — the reason */
+  my_annulled: string | null;
   joined: boolean;
   done: boolean;
   my_volume: number;
@@ -468,6 +514,8 @@ export interface PenaltyRow {
 export interface ScheduleSettings {
   weekly_attendance_quota: number;
   show_colleague_names: boolean;
+  /** ТЗ №22: finished goals and events move to «Архив» after this many days */
+  feed_hide_after_days: number;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
   eve_reminder_enabled: boolean;
@@ -689,6 +737,7 @@ export const api = {
   submitEntry: (id: number, value: number, photo: Blob, key: string) =>
     upload<{ event: LiveEvent; changed: boolean }>(`/api/events/${id}/entries?value=${value}&idempotency_key=${key}`, photo),
   goals: () => request<{ items: Goal[] }>("/api/goals"),
+  archive: () => request<{ events: LiveEvent[]; goals: Goal[] }>("/api/archive"),
   joinGoal: (id: number) => post<{ goal: Goal }>(`/api/goals/${id}/join`, {}),
   myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
@@ -761,22 +810,39 @@ export const api = {
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/amount`, { amount, idempotency_key: key }),
     payAll: (user_id: number, key: string) =>
       post<{ paid: number; total: number }>("/api/admin/finances/pay-all", { user_id, idempotency_key: key }),
-    events: () => request<{ items: LiveEvent[]; pending: PendingEntry[] }>("/api/admin/events"),
+    events: () => request<{ items: LiveEvent[]; pending: PendingEntry[]; prize_types: string[]; hide_after_days: number }>("/api/admin/events"),
     createEvent: (
       body: { title: string; mode: LiveEvent["mode"]; starts_at: string; ends_at: string; description?: string; prize?: string;
-        target?: number | null; max_winners: number; max_attempts: number; network_id?: number | null },
+        target?: number | null; max_winners: number; max_attempts: number; network_id?: number | null; prize_type?: string | null;
+        prize_photo?: string | null },
       key: string,
     ) => post<{ event: LiveEvent }>("/api/admin/events", { ...body, idempotency_key: key }),
+    updateEvent: (id: number, body: EventChanges & { version: number; notify: boolean }, key: string) =>
+      patch<{ event: LiveEvent; changed: string[]; critical: string[]; finished: boolean; restarted: boolean }>(
+        `/api/admin/events/${id}`, { ...body, idempotency_key: key }),
+    eventVisibility: (id: number, hidden: boolean, key: string) =>
+      post<{ event: LiveEvent }>(`/api/admin/events/${id}/visibility`, { hidden, idempotency_key: key }),
+    deleteEvent: (id: number, key: string) => post<{ deleted: boolean }>(`/api/admin/events/${id}/delete`, { idempotency_key: key }),
+    annulEntry: (id: number, reason: string, key: string) =>
+      post<{ event: LiveEvent; changed: boolean; reopened: boolean }>(`/api/admin/event-entries/${id}/annul`, { reason, idempotency_key: key }),
     cancelEvent: (id: number, key: string) => post<{ event: LiveEvent }>(`/api/admin/events/${id}/cancel`, { idempotency_key: key }),
     reviewEntry: (id: number, approve: boolean, reason: string | null, key: string) =>
       post<{ event: LiveEvent; changed: boolean }>(`/api/admin/event-entries/${id}/review`, { approve, reason, idempotency_key: key }),
-    goals: () => request<{ items: Goal[] }>("/api/admin/goals"),
+    goals: () => request<{ items: Goal[]; prize_types: string[]; hide_after_days: number }>("/api/admin/goals"),
     createGoal: (
       body: { title: string; kind: Goal["kind"]; mode: Goal["mode"]; target: number; date_from: string; date_to: string;
-        description?: string; user_id?: number | null; network_id?: number | null },
+        description?: string; user_id?: number | null; network_id?: number | null; prize?: string | null; prize_type?: string | null;
+        prize_photo?: string | null },
       key: string,
     ) => post<{ goal: Goal }>("/api/admin/goals", { ...body, idempotency_key: key }),
-    archiveGoal: (id: number, key: string) => post<{ goal: Goal }>(`/api/admin/goals/${id}/archive`, { idempotency_key: key }),
+    updateGoal: (id: number, body: GoalChanges & { version: number; notify: boolean }, key: string) =>
+      patch<{ goal: Goal; changed: string[]; critical: string[] }>(`/api/admin/goals/${id}`, { ...body, idempotency_key: key }),
+    goalVisibility: (id: number, hidden: boolean, key: string) =>
+      post<{ goal: Goal }>(`/api/admin/goals/${id}/visibility`, { hidden, idempotency_key: key }),
+    deleteGoal: (id: number, key: string) => post<{ deleted: boolean }>(`/api/admin/goals/${id}/delete`, { idempotency_key: key }),
+    revokeGoal: (id: number, key: string) => post<{ goal: Goal; revoked: number }>(`/api/admin/goals/${id}/revoke`, { idempotency_key: key }),
+    annulGoal: (id: number, user_id: number, reason: string, key: string) =>
+      post<{ goal: Goal; changed: boolean }>(`/api/admin/goals/${id}/annul`, { user_id, reason, idempotency_key: key }),
     networks: () => request<{ items: Network[] }>("/api/admin/networks"),
     createNetwork: (name: string, key: string) => post<{ network: Network }>("/api/admin/networks", { name, idempotency_key: key }),
     updateNetwork: (id: number, body: {
@@ -837,6 +903,7 @@ export const api = {
     setState: (userId: number, state: User["account_state"], reason: string | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/state`, { state, reason, idempotency_key: key }),
     raspred: (when: "today" | "tomorrow" = "tomorrow") => request<Raspred>(`/api/admin/raspred/${when}`),
+    raspredOn: (date: string) => request<Raspred>(`/api/admin/raspred?date=${date}`),
     setNorm: (userId: number, norm: number | null, key: string) =>
       post<{ user: User }>(`/api/admin/team/${userId}/norm`, { norm, idempotency_key: key }),
     day: (day: string) =>

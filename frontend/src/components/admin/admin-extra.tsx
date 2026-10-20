@@ -316,6 +316,23 @@ export function SettingsSection() {
           <Switch checked={cfg.show_colleague_names} onCheckedChange={(v) => set({ show_colleague_names: v })} />
         </label>
       </section>
+      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <div className="flex items-start gap-4">
+          <span className="flex-1">
+            <span className="block font-medium">Архив целей и событий</span>
+            <span className="block text-sm text-muted-foreground">
+              {cfg.feed_hide_after_days
+                ? `Завершённые уходят из ленты в «Архив» через ${cfg.feed_hide_after_days} ${plural(cfg.feed_hide_after_days, "день", "дня", "дней")} после окончания.`
+                : "Завершённые уходят в «Архив» сразу после окончания."}
+              {" "}Скрыть или вернуть вручную — глазом в «Целях» и «Событиях».
+            </span>
+          </span>
+          <select aria-label="Через сколько дней в архив" className="h-10 rounded-xl border-0 bg-muted px-3 outline-none"
+                  value={cfg.feed_hide_after_days} onChange={(e) => set({ feed_hide_after_days: Number(e.target.value) })}>
+            {[0, 1, 2, 3, 5, 7, 14, 30].map((d) => <option key={d} value={d}>{d === 0 ? "сразу" : `${d} дн.`}</option>)}
+          </select>
+        </div>
+      </section>
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!dirty || !!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} {dirty ? "Сохранить настройки" : "Всё сохранено"}
       </Button>

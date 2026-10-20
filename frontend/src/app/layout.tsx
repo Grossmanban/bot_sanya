@@ -25,6 +25,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         {/* Telegram Mini App SDK: provides window.Telegram.WebApp (initData, theme, haptics, fullscreen) */}
         {/* eslint-disable-next-line @next/next/no-sync-scripts */}
         <script src="https://telegram.org/js/telegram-web-app.js?59" />
+        <link rel="preload" as="image" href="/hello.webp" />
       </head>
       <body>{children}</body>
     </html>

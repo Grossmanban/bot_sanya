@@ -45,6 +45,8 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "attendance_check_time": ("10:30", "time"),
     # ТЗ №9: employees see who else works that day (off — only how many)
     "show_colleague_names": ("1", "bool"),
+    # ТЗ №22: finished goals and events leave the feed for «Архив» after this many days (0 — at once)
+    "feed_hide_after_days": ("7", "count"),
     "weekly_report_enabled": ("1", "bool"),
     "weekly_report_time": ("10:00", "time"),
     "backup_enabled": ("1", "bool"),

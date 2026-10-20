@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 import pytest
 from openpyxl import load_workbook
 
-from app import app_settings, day_actual, export, jobs, reports
+from app import app_settings, day_actual, export, jobs, lifecycle, reports
 from app import services as svc
 from app.config import settings
 from app.db import connect
@@ -954,7 +954,7 @@ def test_goals_progress_and_completion(conn, make_user):
     sb2 = shift(conn, b, THU + timedelta(days=1))
     report(conn, b, sb2, 25, now=at(THU + timedelta(days=1), "19:30"))  # outside the period → doesn't count
     assert goals.check_completions(conn, THU) == []
-    goals.archive(conn, trainer, shared["id"], svc.new_key())
+    lifecycle.set_visibility(conn, trainer, "goal", shared["id"], True, svc.new_key())
     assert all(g["title"] != "Северу 50" for g in goals.for_user(conn, a, TODAY))
 
 
