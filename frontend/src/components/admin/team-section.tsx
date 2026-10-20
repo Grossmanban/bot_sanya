@@ -375,7 +375,8 @@ function MemberSheet({
               {approved && !isSelf && !user.is_owner && (user.role === "employee" || user.role === "trainer") && caps.includes("review") && (
                 <NormPicker user={user} onUpdated={onUpdated} />
               )}
-              {approved && !user.is_owner && caps.includes("money") && user.role !== "admin" && (
+              {/* anyone who works shifts may get a personal rate — owners too, including themselves */}
+              {approved && caps.includes("money") && (
                 <PersonalRates key={user.id} user={user} onUpdated={onUpdated} />
               )}
 

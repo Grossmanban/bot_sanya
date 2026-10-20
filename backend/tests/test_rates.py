@@ -148,14 +148,14 @@ def test_owner_led_networks_and_owner_earnings(conn, team, make_user):
     networks.set_member(conn, owner, team["masha"]["id"], south["id"], svc.new_key())
     did(conn, team["masha"], WEEK[0], 30)
     did(conn, team["ivan"], WEEK[0], 40)
-    did(conn, owner, WEEK[0], 10)                                 # the owner's own pieces: revenue, not pay
+    did(conn, owner, WEEK[0], 10)                                 # the owner works shifts too: paid for them
     app_settings.update(conn, {"revenue_per_piece": 200})
     by, rows = calc(conn)
-    assert "Саня" not in by                                       # owners are not in the payout
+    assert by["Саня"]["pieces_pay"] == 10 * 100 and by["Саня"]["commission"] == 0  # own pieces only (10 < 20: lazy)
     assert by["Маша"]["commission"] == 0 and by["Вера"]["commission"] == 40 * 10
     s = payouts.summary(conn, rows, WEEK[0], WEEK[-1])
     assert s["pieces"] == 80 and s["revenue"] == 16_000
-    paid = 30 * 120 + 40 * 120 + 40 * 10
+    paid = 30 * 120 + 40 * 120 + 40 * 10 + 10 * 100
     assert (s["paid"], s["owner"]) == (paid, 16_000 - paid)
     # a trainer still leads only one network
     networks.set_trainer(conn, owner, south["id"], team["vera"]["id"], svc.new_key())
@@ -233,3 +233,18 @@ def test_migration_to_16_keeps_networks(tmp_path):
     # the one-network-per-trainer index is gone: an owner may lead several networks
     old.execute("INSERT INTO networks (name, trainer_id, created_by, created_at) VALUES ('Юг', 1, 1, 't')")
     assert old.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_owner_sets_own_personal_rate(conn, team):
+    """Hotfix: an owner who works shifts gives themself a personal rate; their cards use it."""
+    client = TestClient(create_app(conn, Notifier(None, conn)))
+    oh = headers(999, "Саня", "Владелец", "boss")
+    owner = svc.get_user_by_tg(conn, 999)
+    r = client.post(f"/api/admin/team/{owner['id']}/rates", json={"personal_rate": 200, "idempotency_key": key()}, headers=oh)
+    assert r.status_code == 200 and r.json()["user"]["personal_rate"] == 200
+    assert client.get("/api/me", headers=oh).json()["pricing"]["base_rate"] == 200
+    assert rates.Book.load(conn).day_rate(owner["id"], 25) == 200
+    # and their own pieces are in the payout at that rate (hotfix: owners were left out)
+    did(conn, owner, WEEK[0], 25)
+    by, _ = calc(conn)
+    assert by["Саня"]["personal_volume"] == 25 and by["Саня"]["pieces_pay"] == 25 * 200

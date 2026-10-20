@@ -3,7 +3,8 @@
 Calculation for a period (ТЗ 11.1, decisions for stage 6, flexible rates — see rates.py):
     base       = Σ over APPROVED reports by day: fact × that person's rate of the day
     trainers  += the network's ladder: team volume × the step rate, per day or per week
-    owners are not paid here: they earn revenue_per_piece × pieces − everything paid out (summary)
+    owners who work shifts are paid for their own pieces like anyone (their personal rate); a network
+    they lead pays no trainer share. The owners' earnings: revenue_per_piece × pieces − everything paid out
     bonuses    = active bonuses dated up to the period end
     fines      = active fines dated up to the period end
     deductions = active deductions
@@ -158,7 +159,7 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
     if date_to < date_from or (date_to - date_from).days > 92:
         raise ServiceError("Период от 1 дня до 3 месяцев", 422, "bad_range")
     book = Book.load(conn, rates.as_dict())
-    people = [u for u in svc.list_users(conn) if u["account_state"] != "blocked" and not perms.is_owner(u)]
+    people = [u for u in svc.list_users(conn) if u["account_state"] != "blocked"]
     if network_id is not None:
         people = [u for u in people if u["network_id"] == network_id]
     nets = networks.names(conn)
