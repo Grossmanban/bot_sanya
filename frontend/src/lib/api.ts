@@ -643,6 +643,8 @@ export interface BroadcastPerson {
   admin: boolean;
   network_id: number | null;
   network: string | null;
+  /** has a shift or a day off tomorrow */
+  marked_tomorrow: boolean;
 }
 
 export interface Receipt {
@@ -664,6 +666,8 @@ export interface BroadcastDraft {
   user_ids: number[] | null;
   require_ack: boolean;
   media_file_id: string | null;
+  /** only those of the chosen who haven't marked tomorrow (no shift, no day off) */
+  only_unmarked_tomorrow?: boolean;
 }
 
 export type AdminAction = "force_cancel" | "force_restore" | "approve_urgent" | "reject_urgent";
