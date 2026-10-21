@@ -23,6 +23,10 @@ const EXCUSES = ["Больничный лист предоставлен", "Со
 
 const days = (n: number) => `${n} ${plural(n, "день", "дня", "дней")}`;
 const dayChip = (iso: string) => `${WEEKDAYS_SHORT[parseDay(iso).weekday]} ${ddmm(iso)}`;
+/** the violation in a few words: the week's norm, or the one day nobody marked */
+const what = (v: Violation) => v.kind === "unmarked"
+  ? `не отметил график на ${dayChip(v.week_start)}`
+  : `вышел ${v.actual_days} из ${v.required_days}, ${weekRange(v.week_start, v.week_end)}`;
 
 function initials(name: string) {
   const [first = "", last = ""] = name.split(" ");
@@ -112,7 +116,8 @@ function Head({ v }: { v: Violation }) {
       <div className="min-w-0 flex-1">
         <p className="truncate font-semibold">{v.name}</p>
         <p className="text-sm text-muted-foreground">
-          {v.network ? `${v.network} · ` : ""}Неделя {v.week_number}, {weekRange(v.week_start, v.week_end)}
+          {v.network ? `${v.network} · ` : ""}
+          {v.kind === "unmarked" ? `Не отметил график на ${dayChip(v.week_start)}` : `Неделя ${v.week_number}, ${weekRange(v.week_start, v.week_end)}`}
         </p>
       </div>
     </div>
@@ -124,6 +129,12 @@ function PendingCard({ v, onPick }: { v: Violation; onPick: (mode: "fine" | "wai
   return (
     <section className="row-in space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <Head v={v} />
+      {v.kind === "unmarked" ? (
+        <p className="rounded-2xl bg-cancel-soft px-4 py-3 text-sm text-cancel">
+          На {dayChip(v.week_start)} к сроку не было ни смены, ни выходного, хотя статус «Работаю».
+        </p>
+      ) : (
+      <>
       <div className="grid grid-cols-3 gap-2 text-center">
         {[["Требование", days(v.required_days), ""], ["Факт", days(v.actual_days), "text-cancel"],
           ["Пропущено", days(missed), "text-cancel"]].map(([label, value, tone]) => (
@@ -141,13 +152,15 @@ function PendingCard({ v, onPick }: { v: Violation; onPick: (mode: "fine" | "wai
           ))}
         </div>
       </div>
+      </>
+      )}
       <div className="grid gap-2 sm:grid-cols-2">
         <Button className="press h-12 rounded-2xl bg-cancel text-[15px] font-semibold text-white hover:bg-cancel/90" onClick={() => onPick("fine")}>
           <Wallet /> Назначить штраф
         </Button>
         <Button variant="secondary" className="press h-12 rounded-2xl bg-go-soft text-[15px] font-semibold text-go hover:bg-go-soft/80"
                 onClick={() => onPick("waive")}>
-          <ShieldCheck /> Снять нарушение
+          <ShieldCheck /> {v.kind === "unmarked" ? "Простить" : "Снять нарушение"}
         </Button>
       </div>
     </section>
@@ -167,7 +180,7 @@ function ResolvedCard({ v }: { v: Violation }) {
         </span>
       </div>
       <p className="text-sm">
-        <span className="text-muted-foreground">Вышел {v.actual_days} из {v.required_days}. </span>
+        <span className="text-muted-foreground">{what(v).replace(/^./, (c) => c.toUpperCase())}. </span>
         {v.resolution_comment}
       </p>
       {v.media.length > 0 && (
@@ -199,7 +212,7 @@ function DecisionDrawer({ open, onClose, onDone }: {
                   {open.mode === "fine" ? "Штраф за пропуск графика" : "Снять нарушение"}
                 </DrawerTitle>
                 <DrawerDescription>
-                  {open.v.name} · вышел {open.v.actual_days} из {open.v.required_days}, {weekRange(open.v.week_start, open.v.week_end)}
+                  {open.v.name} · {what(open.v)}
                 </DrawerDescription>
               </div>
               {wide && (

@@ -713,6 +713,50 @@ CREATE TABLE broadcast_templates (
 """)
 
 
+def _unmarked_days(conn: sqlite3.Connection) -> None:
+    """The customer's module 1: «не отметил график на завтра» is a violation too. The table gets a kind
+    (weekly — the norm of work days, unmarked — one day nobody marked); a rebuild, since SQLite can't change
+    a UNIQUE in place. Ids and the counter stay."""
+    seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'attendance_violations'").fetchone()
+    _run_script(conn, """
+    CREATE TABLE attendance_violations_new (
+        id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id                     INTEGER NOT NULL REFERENCES users(id),
+        kind                        TEXT NOT NULL DEFAULT 'weekly' CHECK (kind IN ('weekly','unmarked')),
+        week_start_date             TEXT NOT NULL,
+        week_end_date               TEXT NOT NULL,
+        required_days               INTEGER NOT NULL CHECK (required_days > 0),
+        actual_days                 INTEGER NOT NULL CHECK (actual_days >= 0),
+        absent_dates                TEXT NOT NULL DEFAULT '[]',
+        status                      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','penalized','waived')),
+        resolution_admin_id         INTEGER REFERENCES users(id),
+        resolution_comment          TEXT,
+        resolution_media_ids        TEXT,
+        linked_fine_transaction_id  INTEGER REFERENCES financial_transactions(id),
+        resolved_at                 TEXT,
+        created_at                  TEXT NOT NULL,
+        UNIQUE (user_id, kind, week_start_date),
+        CHECK (status = 'pending' OR (resolution_admin_id IS NOT NULL AND resolution_comment IS NOT NULL
+                                      AND resolved_at IS NOT NULL)),
+        CHECK ((status = 'penalized') = (linked_fine_transaction_id IS NOT NULL))
+    );
+    INSERT INTO attendance_violations_new (id, user_id, week_start_date, week_end_date, required_days, actual_days,
+        absent_dates, status, resolution_admin_id, resolution_comment, resolution_media_ids, linked_fine_transaction_id,
+        resolved_at, created_at)
+    SELECT id, user_id, week_start_date, week_end_date, required_days, actual_days, absent_dates, status,
+           resolution_admin_id, resolution_comment, resolution_media_ids, linked_fine_transaction_id, resolved_at, created_at
+      FROM attendance_violations;
+    DROP TABLE attendance_violations;
+    ALTER TABLE attendance_violations_new RENAME TO attendance_violations;
+    CREATE INDEX ix_violations_status ON attendance_violations (status, week_start_date);
+    """)
+    if seq:
+        conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'attendance_violations'", (seq[0],))
+
+
+MIGRATIONS.append(_unmarked_days)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

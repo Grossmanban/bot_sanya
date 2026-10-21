@@ -337,6 +337,8 @@ export type ReportCounts = {
 /** ТЗ 12.4: a week below the norm of work days, waiting for «штраф» or «оправдание». */
 export interface Violation {
   id: number;
+  /** weekly — below the norm of work days; unmarked — nothing marked for one day by the deadline */
+  kind: "weekly" | "unmarked";
   user_id: number;
   name: string;
   username: string | null;
@@ -522,6 +524,9 @@ export interface ScheduleSettings {
   feed_hide_after_days: number;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
+  daily_mark_enabled: boolean;
+  daily_mark_reminder_time: string;
+  daily_mark_deadline: string;
   eve_reminder_enabled: boolean;
   eve_reminder_time: string;
   auto_raspred_enabled: boolean;
