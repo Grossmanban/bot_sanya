@@ -8,13 +8,13 @@ from pydantic import BaseModel, Field
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import day_actual, events, finance, goals, lifecycle, networks, payouts, rates, reports, violations
+from . import broadcasts, day_actual, events, finance, goals, lifecycle, networks, payouts, rates, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
 from .notify import Notifier
 from .bot import open_app_keyboard
-from .notify import ack_keyboard as notify_ack
+from .notify import broadcast_keyboard as notify_keyboard
 from .timeutil import now_local, today_local
 
 
@@ -329,6 +329,8 @@ class BroadcastBody(BaseModel):
     media_file_id: str | None = None
     # ТЗ: «отправить только тем, кто не отметил график на завтра»
     only_unmarked_tomorrow: bool = False
+    media_kind: str = "photo"
+    allow_reply: bool = False
 
 
 class BroadcastTest(BaseModel):
@@ -336,6 +338,13 @@ class BroadcastTest(BaseModel):
     signed: bool = True
     require_ack: bool = False
     media_file_id: str | None = None
+    media_kind: str = "photo"
+    allow_reply: bool = False
+
+
+class TemplateBody(BaseModel):
+    title: str
+    html: str
 
 
 class RemindBody(BaseModel):
@@ -760,9 +769,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Тренер пишет только своей сети", 403, "forbidden")
         row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed, body.network_id,
                                                body.user_ids, body.require_ack, body.media_file_id,
-                                               today_local() + timedelta(days=1) if body.only_unmarked_tomorrow else None)
+                                               today_local() + timedelta(days=1) if body.only_unmarked_tomorrow else None,
+                                               body.media_kind, body.allow_reply)
         notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], bool(row["signed"]), row["media_file_id"],
-                                          bool(row["require_ack"])))
+                                          bool(row["require_ack"]), row["media_kind"], bool(row["allow_reply"])))
         return {"broadcast": row}
 
     @api.get("/admin/broadcasts/{broadcast_id}")
@@ -770,9 +780,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         row = conn.execute("SELECT * FROM broadcasts WHERE id = ?", (broadcast_id,)).fetchone()
         if row is None or (not perms.can(admin, "broadcast_all") and row["author_id"] != admin["telegram_id"]):
             raise svc.ServiceError("Рассылка не найдена", 404, "not_found")
+        replies = broadcasts.replies_by_user(conn, broadcast_id)
         items = [{"user_id": d["user_id"], "name": d["name"], "username": d["username"], "telegram_id": d["telegram_id"],
                   "delivered": bool(d["delivered"]), "read_at": d["read_at"], "reminders": d["reminders"],
-                  "reminded_at": d["reminded_at"]} for d in svc.broadcast_deliveries(conn, broadcast_id)]
+                  "reminded_at": d["reminded_at"], "replies": replies.get(d["user_id"], [])}
+                 for d in svc.broadcast_deliveries(conn, broadcast_id)]
         return {"broadcast": dict(row), "items": items}
 
     @api.post("/admin/broadcasts/{broadcast_id}/remind")
@@ -792,9 +804,9 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if notifier.bot is None:
             raise svc.ServiceError("Бот не запущен: проверка недоступна", 503, "no_bot")
         html, _ = svc.prepare_message(body.html)
-        markup = notify_ack(0) if body.require_ack else None
+        markup = notify_keyboard(0, body.require_ack, body.allow_reply)
         if await notifier._deliver(admin["telegram_id"], notifier.broadcast_body(html, body.signed), body.media_file_id,
-                                   markup) is None:
+                                   markup, body.media_kind) is None:
             raise svc.ServiceError("Telegram не принял сообщение. Проверьте ссылки и форматирование", 502, "send_failed")
         return {"ok": True}
 
@@ -1277,6 +1289,40 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_save_payment_profile(user_id: int, body: ProfileBody, owner: dict = Depends(staff("money"))):
         profile = payouts.save_profile(conn, owner, user_id, body.phone, body.bank, body.recipient, body.idempotency_key)
         return {"profile": payouts.public_profile(profile, True)}
+
+    @api.post("/admin/media/video")
+    async def admin_upload_video(request: Request, admin: dict = Depends(staff("broadcast_network"))):
+        """A video for a broadcast (MP4/MOV up to 50 MB — Telegram's limit for bots)."""
+        data = await request.body()
+        if not data:
+            raise svc.ServiceError("Выберите видео", 422, "video_required")
+        if len(data) > media.MAX_VIDEO:
+            raise svc.ServiceError("Видео больше 50 МБ — Telegram не примет его от бота", 413, "too_large")
+        ext = media.sniff_video(data)
+        if ext is None:
+            raise svc.ServiceError("Нужно видео MP4 или MOV", 415, "bad_video")
+        file_id = await notifier.store_video(admin["telegram_id"], data, ext, "🎬 Видео для рассылки загружено")
+        return {"file_id": file_id}
+
+    # ------------------------------------------------------------ broadcast templates
+
+    @api.get("/admin/broadcast-templates")
+    async def admin_templates(admin: dict = Depends(staff("broadcast_network"))):
+        return {"items": [{**t, "can_edit": perms.sees_everyone(admin) or t["created_by"] == admin["telegram_id"],
+                           "author": svc.full_name(t) if t["first_name"] else None} for t in broadcasts.templates(conn)]}
+
+    @api.post("/admin/broadcast-templates")
+    async def admin_template_create(body: TemplateBody, admin: dict = Depends(staff("broadcast_network"))):
+        return {"template": broadcasts.save_template(conn, admin, body.title, body.html)}
+
+    @api.patch("/admin/broadcast-templates/{template_id}")
+    async def admin_template_update(template_id: int, body: TemplateBody, admin: dict = Depends(staff("broadcast_network"))):
+        return {"template": broadcasts.save_template(conn, admin, body.title, body.html, template_id)}
+
+    @api.post("/admin/broadcast-templates/{template_id}/delete")
+    async def admin_template_delete(template_id: int, admin: dict = Depends(staff("broadcast_network"))):
+        broadcasts.delete_template(conn, admin, template_id)
+        return {"deleted": True}
 
     @api.post("/admin/media")
     async def admin_upload_media(request: Request, admin: dict = Depends(admin_user)):

@@ -32,9 +32,10 @@ class FakeNotifier(Notifier):
         self.docs.append((chat_id, filename))
         return True
 
-    async def _deliver(self, chat_id, body, media, markup):
+    async def _deliver(self, chat_id, body, media, markup, kind="photo"):
         self.sent.append((chat_id, body))
         self.markups.append((chat_id, markup))
+        self.kinds = [*getattr(self, "kinds", []), kind]
         return 1000 + len(self.sent)
 
     async def send_photo(self, chat_id, photo, caption, markup=None):
@@ -1099,3 +1100,67 @@ def test_event_network_scope(conn, make_user):
     with pytest.raises(svc.ServiceError) as e:
         events.submit(conn, other, ev["id"], 40, "p", svc.new_key(), now=at(THU, "12:00"))
     assert e.value.status == 404
+
+
+# ---------------------------------------------------------------- broadcasts: video, templates, «Ответить»
+
+
+def test_broadcast_video_reply_button_and_replies(conn, make_user):
+    from app import broadcasts, media
+    from app.notify import reply_text
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a, b = make_user(first="Аня"), make_user(first="Боря")
+    row, rec = svc.create_broadcast(conn, owner, [], "Смотрите видео", user_ids=[a["id"], b["id"]], require_ack=True,
+                                    media="video-file", media_kind="video", allow_reply=True)
+    n = FakeNotifier(conn)
+    assert run(n.broadcast(row["id"], rec, row["html"], True, "video-file", True, "video", True)) == 2
+    buttons = [btn.callback_data for btn in n.markups[0][1].inline_keyboard[0]]
+    assert buttons == [f"ack:{row['id']}", f"brr:{row['id']}"] and n.kinds == ["video", "video"]
+
+    with pytest.raises(svc.ServiceError) as e:  # nothing to send
+        broadcasts.add_reply(conn, row["id"], a, "  ", [])
+    assert e.value.code == "empty"
+    outsider = make_user(first="Чужой")
+    with pytest.raises(svc.ServiceError):  # it wasn't sent to them
+        broadcasts.add_reply(conn, row["id"], outsider, "Привет", [])
+    b_row, reply = broadcasts.add_reply(conn, row["id"], a, "Посмотрела, всё понятно",
+                                        [{"kind": "photo", "file_id": "p1"}, {"kind": "video", "file_id": "v1"}])
+    assert reply["media"][1]["kind"] == "video"
+    text = reply_text(b_row, svc.get_user(conn, a["id"]), reply["text"], "Север")
+    assert f'tg://user?id={a["telegram_id"]}' in text and "Аня" in text and "сеть «Север»" in text and "всё понятно" in text
+    # a reply counts as read; the history shows who replied
+    got = {r["user_id"]: r for r in svc.broadcast_deliveries(conn, row["id"])}
+    assert got[a["id"]]["read_at"] and not got[b["id"]]["read_at"]
+    assert svc.list_broadcasts(conn)[0]["replied"] == 1
+    assert broadcasts.replies_by_user(conn, row["id"])[a["id"]][0] | {"created_at": None} == {
+        "text": "Посмотрела, всё понятно", "photos": 1, "videos": 1, "created_at": None}
+    # replies off: no button, no reply
+    quiet, rec2 = svc.create_broadcast(conn, owner, [], "Без ответа", user_ids=[a["id"]])
+    with pytest.raises(svc.ServiceError) as e:
+        broadcasts.add_reply(conn, quiet["id"], a, "А можно?", [])
+    assert e.value.code == "no_reply"
+    assert media.sniff_video(b"\x00\x00\x00\x20ftypisom") == "mp4" and media.sniff_video(b"\x00\x00\x00\x14ftypqt  ") == "mov"
+    assert media.sniff_video(b"GIF89a....") is None
+
+
+def test_broadcast_templates(conn, make_user):
+    from app import broadcasts, networks
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = make_user(first="Тренер")
+    net = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
+    trainer = svc.get_user(conn, trainer["id"])
+    t = broadcasts.save_template(conn, owner, "  Сбор  ", "<b>Завтра</b> сбор в 9:00<script>x</script>")
+    assert t["title"] == "Сбор" and "<b>Завтра</b>" in t["html"] and "script" not in t["html"]
+    mine = broadcasts.save_template(conn, trainer, "Мой", "Привет, Север")
+    assert [x["title"] for x in broadcasts.templates(conn)] == ["Мой", "Сбор"]  # everyone may use every template
+    with pytest.raises(svc.ServiceError) as e:  # but changes only their own (owners and admins — any)
+        broadcasts.save_template(conn, trainer, "Сбор", "чужой", t["id"])
+    assert e.value.status == 403
+    assert broadcasts.save_template(conn, owner, "Мой", "Привет, Север!", mine["id"])["html"] == "Привет, Север!"
+    with pytest.raises(svc.ServiceError):
+        broadcasts.save_template(conn, owner, "", "текст")
+    broadcasts.delete_template(conn, trainer, mine["id"])
+    assert [x["title"] for x in broadcasts.templates(conn)] == ["Сбор"]

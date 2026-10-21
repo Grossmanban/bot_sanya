@@ -25,6 +25,8 @@ import { cn } from "@/lib/utils";
 export interface RichEditorHandle {
   getHtml: () => { html: string; length: number };
   clear: () => void;
+  /** put Telegram HTML (a saved template) into the editor */
+  setHtml: (html: string) => void;
 }
 
 type Mark = "bold" | "italic" | "underline" | "strike" | "spoiler" | "code" | "quote" | "link";
@@ -128,6 +130,15 @@ export const RichEditor = forwardRef<RichEditorHandle, { placeholder?: string; o
       getHtml: () => (root.current ? toTelegramHtml(root.current) : { html: "", length: 0 }),
       clear: () => {
         if (root.current) root.current.innerHTML = "";
+        emit();
+      },
+      setHtml: (html: string) => {
+        // the server sanitized it to Telegram's tags; spoilers are spans here, line breaks are <br>
+        if (root.current) {
+          root.current.innerHTML = html
+            .replace(/<tg-spoiler>/g, '<span class="tg-spoiler">').replace(/<\/tg-spoiler>/g, "</span>")
+            .replace(/<\/blockquote>\n/g, "</blockquote>").replace(/\n/g, "<br>");
+        }
         emit();
       },
     }));

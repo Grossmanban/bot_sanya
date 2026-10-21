@@ -688,6 +688,30 @@ UPDATE users SET notify_reminders = 0 WHERE work_status = 'not_working';
 UPDATE users SET work_status_at = COALESCE(decided_at, created_at) WHERE work_status_at IS NULL;
 """)
 
+# broadcasts: a video instead of a photo, «Ответить» (replies go to the author), saved templates
+MIGRATIONS.append("""
+ALTER TABLE broadcasts ADD COLUMN media_kind TEXT NOT NULL DEFAULT 'photo' CHECK (media_kind IN ('photo','video'));
+ALTER TABLE broadcasts ADD COLUMN allow_reply INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE broadcast_replies (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    broadcast_id  INTEGER NOT NULL REFERENCES broadcasts(id),
+    user_id       INTEGER NOT NULL REFERENCES users(id),
+    text          TEXT,
+    media         TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX ix_broadcast_replies ON broadcast_replies (broadcast_id, user_id);
+CREATE TABLE broadcast_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    html        TEXT NOT NULL,
+    created_by  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT,
+    deleted_at  TEXT
+);
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

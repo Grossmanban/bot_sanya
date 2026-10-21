@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sqlite3
 from datetime import timedelta
@@ -19,7 +20,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import day_actual, finance, reports
+from . import broadcasts, day_actual, finance, reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -46,6 +47,10 @@ class ReportInput(StatesGroup):
 
 class EventReject(StatesGroup):
     reason = State()
+
+
+class BroadcastReply(StatesGroup):
+    collecting = State()
 
 
 class DecisionInput(StatesGroup):
@@ -591,14 +596,98 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             return
         svc.acknowledge(conn, broadcast_id, call.from_user.id)
         mark = "\n\n✅ <i>Прочитано</i>"
+        b = broadcasts.get(conn, broadcast_id)
+        keep = notify.broadcast_keyboard(broadcast_id, False, bool(b and b["allow_reply"]))  # «Ответить» stays
         try:
-            if call.message.photo:
-                await call.message.edit_caption(caption=(call.message.html_text or "") + mark, parse_mode="HTML")
+            if call.message.photo or call.message.video:
+                await call.message.edit_caption(caption=(call.message.html_text or "") + mark, parse_mode="HTML",
+                                                reply_markup=keep)
             else:
-                await call.message.edit_text(call.message.html_text + mark, parse_mode="HTML", disable_web_page_preview=True)
+                await call.message.edit_text(call.message.html_text + mark, parse_mode="HTML", disable_web_page_preview=True,
+                                             reply_markup=keep)
         except Exception:
             log.debug("could not mark the broadcast as read", exc_info=True)
         await call.answer("Учтено")
+
+    # ------------------------------------------------------------ «Ответить» on a broadcast
+
+    REPLY_DONE = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📨 Отправить", callback_data="brs:send"),
+        InlineKeyboardButton(text="Отмена", callback_data="brs:cancel")]])
+
+    @router.callback_query(F.data.startswith("brr:"))
+    async def reply_begin(call: CallbackQuery, state: FSMContext):
+        broadcast_id = int(call.data.split(":")[1])
+        if broadcast_id == 0:
+            await call.answer("Это проверочное сообщение — у сотрудников кнопка откроет ответ.", show_alert=True)
+            return
+        try:
+            broadcasts.can_reply(conn, broadcast_id, svc.get_user_by_tg(conn, call.from_user.id))
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        await state.clear()
+        await state.set_state(BroadcastReply.collecting)
+        await state.update_data(broadcast_id=broadcast_id, text=[], media=[], groups=[])
+        await call.message.answer("✍️ Напишите ответ. Можно приложить фото и видео (до 10).\n"
+                                  "Когда всё готово — нажмите «📨 Отправить».", reply_markup=REPLY_DONE)
+        await call.answer()
+
+    # an album comes as several updates handled at once: one lock per person keeps every photo
+    reply_locks: dict[int, asyncio.Lock] = {}
+
+    @router.message(StateFilter(BroadcastReply.collecting))
+    async def reply_collect(message: Message, state: FSMContext):
+        async with reply_locks.setdefault(message.from_user.id, asyncio.Lock()):
+            await collect_reply_part(message, state)
+
+    async def collect_reply_part(message: Message, state: FSMContext):
+        data = await state.get_data()
+        text, media, groups = data["text"], data["media"], data["groups"]
+        part = message.text or message.caption
+        if part:
+            text.append(part)
+        if message.photo:
+            media.append({"kind": "photo", "file_id": message.photo[-1].file_id})
+        elif message.video:
+            media.append({"kind": "video", "file_id": message.video.file_id})
+        elif not part:
+            await message.answer("Можно текст, фото или видео.", reply_markup=REPLY_DONE)
+            return
+        if len(media) > broadcasts.MAX_REPLY_MEDIA:
+            media = media[: broadcasts.MAX_REPLY_MEDIA]
+            await message.answer(f"Не больше {broadcasts.MAX_REPLY_MEDIA} фото и видео — лишние не отправятся.")
+        await state.update_data(text=text, media=media, groups=groups + ([message.media_group_id] if message.media_group_id else []))
+        # an album arrives as several messages: one confirmation for it, not one per photo
+        if message.media_group_id and message.media_group_id in groups:
+            return
+        added = f"{len(media)} влож." if media else ""
+        await message.answer(f"Добавлено{f' ({added})' if added else ''}. Можно дописать ещё или нажать «📨 Отправить».",
+                             reply_markup=REPLY_DONE)
+
+    @router.callback_query(F.data.startswith("brs:"))
+    async def reply_finish(call: CallbackQuery, state: FSMContext):
+        if await state.get_state() != BroadcastReply.collecting.state:
+            await call.answer("Ответ уже отправлен или отменён", show_alert=True)
+            return
+        if call.data == "brs:cancel":
+            await state.clear()
+            await call.message.edit_text("Ответ отменён.")
+            await call.answer()
+            return
+        async with reply_locks.setdefault(call.from_user.id, asyncio.Lock()):  # the album's last photos are in
+            data = await state.get_data()
+        user = svc.get_user_by_tg(conn, call.from_user.id)
+        try:
+            b, reply = broadcasts.add_reply(conn, data["broadcast_id"], user, "\n\n".join(data["text"]), data["media"])
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        await state.clear()
+        delivered = await notifier.broadcast_reply(b, user, reply)
+        await call.message.edit_text("✅ Ответ отправлен." if delivered or notifier.bot is None
+                                     else "Ответ сохранён, но автору не удалось его доставить — администраторы увидят его в приложении.")
+        await call.answer()
 
     # ------------------------------------------------------------ the day's global actual (owners)
 

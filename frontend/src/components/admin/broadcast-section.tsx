@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BellRing, Check, CheckCheck, ChevronDown, FlaskConical, LoaderCircle, Search, Send } from "lucide-react";
+import { BellRing, Check, CheckCheck, ChevronDown, Film, FlaskConical, LoaderCircle, MessageSquareReply, Pencil, Plus, Search, Send, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { api, type Broadcast, type BroadcastPerson, type User } from "@/lib/api";
+import { api, type Broadcast, type BroadcastPerson, type BroadcastTemplate, type User } from "@/lib/api";
 import { ddmm, plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
@@ -32,9 +32,12 @@ export function BroadcastSection({ me }: { me: User }) {
   // exactly these people get the message (a checklist); groups and networks only tick boxes
   const [picked, setPicked] = useState<number[]>([]);
   const [unmarked, setUnmarked] = useState(false);
+  // one attachment: a photo or a video
   const [photo, setPhoto] = useState<Blob | null>(null);
+  const [video, setVideo] = useState<File | null>(null);
   const [mediaId, setMediaId] = useState<{ blob: Blob; id: string } | null>(null);
   const [ack, setAck] = useState(false);
+  const [reply, setReply] = useState(false);
   const [signed, setSigned] = useState(true);
   const [length, setLength] = useState(0);
   const [confirm, setConfirm] = useState(false);
@@ -55,11 +58,13 @@ export function BroadcastSection({ me }: { me: User }) {
     [people, picked, unmarked],
   );
 
+  const kind: "photo" | "video" = video ? "video" : "photo";
   async function media(): Promise<string | null> {
-    if (!photo) return null;
-    if (mediaId?.blob === photo) return mediaId.id;
-    const { file_id } = await api.admin.uploadMedia(photo);
-    setMediaId({ blob: photo, id: file_id });
+    const file = video ?? photo;
+    if (!file) return null;
+    if (mediaId?.blob === file) return mediaId.id;
+    const { file_id } = video ? await api.admin.uploadVideo(video) : await api.admin.uploadMedia(file);
+    setMediaId({ blob: file, id: file_id });
     return file_id;
   }
 
@@ -80,7 +85,8 @@ export function BroadcastSection({ me }: { me: User }) {
     const html = message();
     if (!html) return;
     try {
-      await run("test", async () => api.admin.broadcastTest(html, signed, ack, await media()), "Отправлено вам в бот: проверьте, как выглядит");
+      await run("test", async () => api.admin.broadcastTest({ html, signed, require_ack: ack, media_file_id: await media(),
+        media_kind: kind, allow_reply: reply }), "Отправлено вам в бот: проверьте, как выглядит");
     } catch {
       /* toast shown */
     }
@@ -92,10 +98,11 @@ export function BroadcastSection({ me }: { me: User }) {
     try {
       await run("send", async () => api.admin.broadcast({
         audiences: [], html, signed, network_id: null, user_ids: picked, require_ack: ack, media_file_id: await media(),
-        only_unmarked_tomorrow: unmarked,
+        only_unmarked_tomorrow: unmarked, media_kind: kind, allow_reply: reply,
       }), "Рассылка запущена");
       editor.current?.clear();
       setPhoto(null);
+      setVideo(null);
       setPicked([]);
       await reload();
     } catch {
@@ -114,11 +121,13 @@ export function BroadcastSection({ me }: { me: User }) {
             Выделите текст и нажмите кнопку форматирования. Бот отправит сообщение с тем же оформлением.
           </p>
         </div>
+        <Templates editor={editor} />
         <RichEditor ref={editor} placeholder="Например: завтра на Европе новая выкладка, приходите на 10 минут раньше." onChange={setLength} />
         <p className={cn("-mt-2 text-right text-xs tabular", length > LIMIT ? "text-cancel" : "text-muted-foreground")}>
           {length} / {LIMIT}
         </p>
-        <PhotoPicker value={photo} onChange={setPhoto} label="Добавить фото" optional />
+        {!video && <PhotoPicker value={photo} onChange={setPhoto} label="Добавить фото" optional />}
+        {!photo && <VideoPicker value={video} onChange={setVideo} />}
       </section>
 
       <Recipients people={people} networks={scopeAll ? data.networks : []} trainerNetwork={scopeAll ? null : data.networks[0]?.name ?? null}
@@ -133,6 +142,17 @@ export function BroadcastSection({ me }: { me: User }) {
                 <span className="block text-sm text-muted-foreground">Кнопка «✅ Я ознакомился» и список, кто не прочитал</span>
               </span>
               <Switch checked={ack} onCheckedChange={setAck} />
+            </label>
+          </li>
+          <li>
+            <label className="flex cursor-pointer items-center gap-4 px-5 py-3.5 md:px-6">
+              <span className="flex-1">
+                <span className="block font-medium">Возможность ответить</span>
+                <span className="block text-sm text-muted-foreground">
+                  Кнопка «✍️ Ответить»: текст, фото и видео придут вам в бот, а здесь видно, кто ответил
+                </span>
+              </span>
+              <Switch checked={reply} onCheckedChange={setReply} />
             </label>
           </li>
           <li>
@@ -304,24 +324,33 @@ function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Reco
         <p className="line-clamp-4 text-[15px] whitespace-pre-wrap">{b.text}</p>
       )}
       <p className="mt-1.5 text-xs text-muted-foreground">
-        {b.media_file_id ? "📷 " : ""}{who}, доставлено {b.delivered} из {b.recipients}
+        {b.media_file_id ? (b.media_kind === "video" ? "🎬 " : "📷 ") : ""}{who}, доставлено {b.delivered} из {b.recipients}
         {b.first_name ? `, ${b.first_name}` : ""}, {ddmm(b.created_at.slice(0, 10))} в {b.created_at.slice(11, 16)}
       </p>
-      {!!b.require_ack && (
-        <button onClick={() => setOpen((v) => !v)}
-                className={cn("press mt-2 inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-xs font-semibold",
-                  b.read >= b.delivered && b.delivered > 0 ? "bg-go-soft text-go" : "bg-wait-soft text-wait")}>
-          <CheckCheck className="size-3.5" /> прочитали {b.read} из {b.delivered}
-          <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+      {(!!b.require_ack || !!b.allow_reply) && (
+        <button onClick={() => setOpen((v) => !v)} className="press mt-2 inline-flex flex-wrap items-center gap-1.5 text-xs font-semibold">
+          {!!b.require_ack && (
+            <span className={cn("inline-flex h-8 items-center gap-1.5 rounded-full px-3",
+              b.read >= b.delivered && b.delivered > 0 ? "bg-go-soft text-go" : "bg-wait-soft text-wait")}>
+              <CheckCheck className="size-3.5" /> прочитали {b.read} из {b.delivered}
+            </span>
+          )}
+          {!!b.allow_reply && (
+            <span className={cn("inline-flex h-8 items-center gap-1.5 rounded-full px-3",
+              (b.replied ?? 0) > 0 ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>
+              <MessageSquareReply className="size-3.5" /> ответили {b.replied ?? 0} из {b.delivered}
+            </span>
+          )}
+          <ChevronDown className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-180")} />
         </button>
       )}
-      {open && <Receipts id={b.id} />}
+      {open && <Receipts id={b.id} ack={!!b.require_ack} replies={!!b.allow_reply} />}
     </li>
   );
 }
 
 /** Who hasn't confirmed, with «Напомнить» per person and for everyone (ТЗ 7.3). */
-function Receipts({ id }: { id: number }) {
+function Receipts({ id, ack, replies }: { id: number; ack: boolean; replies: boolean }) {
   const { data, reload } = useLoad(() => api.admin.receipts(id), [id]);
   const { busy, run } = useAction();
   if (!data) return <Skeleton className="mt-3 h-20 rounded-2xl" />;
@@ -336,9 +365,35 @@ function Receipts({ id }: { id: number }) {
       /* toast shown */
     }
   };
+  const answered = data.items.filter((r) => r.replies.length > 0);
+  const silent = data.items.filter((r) => r.replies.length === 0);
   return (
     <div className="row-in mt-3 space-y-3 rounded-2xl bg-muted/50 p-3">
-      {unread.length > 0 ? (
+      {replies && (
+        <div className="space-y-2">
+          <p className="text-sm font-semibold">Ответили: {answered.length}</p>
+          {answered.map((r) => (
+            <div key={r.user_id} className="rounded-xl bg-card p-3 text-sm">
+              <p className="font-medium">
+                <a href={r.username ? `https://t.me/${r.username}` : `tg://user?id=${r.telegram_id}`} className="underline-offset-2 hover:underline">
+                  {r.name}
+                </a>
+                {r.username && <span className="font-normal text-muted-foreground"> @{r.username}</span>}
+              </p>
+              {r.replies.map((x, i) => (
+                <p key={i} className="mt-1 whitespace-pre-wrap">
+                  {x.text ?? <span className="text-muted-foreground">без текста</span>}
+                  {(x.photos > 0 || x.videos > 0) && (
+                    <span className="text-muted-foreground"> · {[x.photos ? `📷 ${x.photos}` : "", x.videos ? `🎬 ${x.videos}` : ""].filter(Boolean).join(" ")} — в боте</span>
+                  )}
+                </p>
+              ))}
+            </div>
+          ))}
+          {silent.length > 0 && <p className="text-xs text-muted-foreground">Не ответили: {silent.map((r) => r.name).join(", ")}</p>}
+        </div>
+      )}
+      {!ack ? null : unread.length > 0 ? (
         <>
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-semibold">Не прочитали: {unread.length}</p>
@@ -364,8 +419,138 @@ function Receipts({ id }: { id: number }) {
       ) : (
         <p className="text-sm font-semibold text-go">Все прочитали</p>
       )}
-      {read.length > 0 && (
+      {ack && read.length > 0 && (
         <p className="text-xs text-muted-foreground">Прочитали: {read.map((r) => r.name).join(", ")}</p>
+      )}
+    </div>
+  );
+}
+
+/** Video for a broadcast: MP4 / MOV up to 50 MB (what Telegram takes from a bot). */
+function VideoPicker({ value, onChange }: { value: File | null; onChange: (f: File | null) => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!value) {
+      setUrl(null);
+      return;
+    }
+    const u = URL.createObjectURL(value);
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [value]);
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      toast.error("Видео больше 50 МБ — Telegram не примет его от бота. Сожмите или обрежьте");
+      return;
+    }
+    onChange(file);
+  };
+  return (
+    <div>
+      <input ref={input} type="file" accept="video/mp4,video/quicktime,video/*" className="hidden"
+             onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} />
+      {value && url ? (
+        <div className="relative overflow-hidden rounded-2xl bg-black">
+          <video src={url} controls playsInline className="max-h-64 w-full" />
+          <button aria-label="Убрать видео" onClick={() => onChange(null)}
+                  className="absolute top-2 right-2 grid size-9 place-items-center rounded-full bg-black/60 text-white">
+            <X className="size-4" />
+          </button>
+          <p className="bg-card px-3 py-2 text-xs text-muted-foreground">{value.name} · {(value.size / 1024 / 1024).toFixed(1)} МБ</p>
+        </div>
+      ) : (
+        <button type="button" onClick={() => input.current?.click()}
+                className="press flex h-14 w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed text-[15px] font-semibold text-muted-foreground">
+          <Film className="size-5" /> Добавить видео <span className="font-normal">(до 50 МБ)</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Saved texts: pick one to fill the editor; save the current text as a new one or over the picked one. */
+function Templates({ editor }: { editor: React.RefObject<RichEditorHandle | null> }) {
+  const { data, reload } = useLoad(() => api.admin.templates(), []);
+  const [current, setCurrent] = useState<BroadcastTemplate | null>(null);
+  const [naming, setNaming] = useState(false);
+  const [title, setTitle] = useState("");
+  const [manage, setManage] = useState(false);
+  const { busy, run } = useAction();
+  const items = data?.items ?? [];
+
+  const save = async (over: BroadcastTemplate | null) => {
+    const html = editor.current?.getHtml().html ?? "";
+    if (!html.replace(/<[^>]+>/g, "").trim()) {
+      toast.error("Сначала напишите текст шаблона");
+      return;
+    }
+    try {
+      const res = await run("save", () => api.admin.saveTemplate(over ? over.title : title.trim(), html, over?.id),
+        over ? "Шаблон обновлён" : "Шаблон сохранён");
+      if (res) {
+        setCurrent(res.template.id ? { ...res.template, author: null, can_edit: true } : null);
+        setNaming(false);
+        setTitle("");
+        await reload();
+      }
+    } catch {
+      /* toast shown */
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-sm text-muted-foreground">Шаблоны:</span>
+        {items.length === 0 && <span className="text-sm text-muted-foreground">пока нет</span>}
+        {items.map((t) => (
+          <span key={t.id} className={cn("inline-flex h-8 items-center rounded-full text-sm font-medium",
+            current?.id === t.id ? "bg-primary text-primary-foreground" : "bg-muted")}>
+            <button type="button" className="press h-full px-3" onClick={() => { editor.current?.setHtml(t.html); setCurrent(t); }}>
+              {t.title}
+            </button>
+            {manage && t.can_edit && (
+              <button type="button" aria-label={`Удалить шаблон «${t.title}»`} className="grid h-full place-items-center pr-2.5 opacity-70 hover:opacity-100"
+                      onClick={async () => {
+                        try {
+                          await run(`del${t.id}`, () => api.admin.deleteTemplate(t.id), "Шаблон удалён");
+                          if (current?.id === t.id) setCurrent(null);
+                          await reload();
+                        } catch { /* toast */ }
+                      }}>
+                <Trash2 className="size-3.5" />
+              </button>
+            )}
+          </span>
+        ))}
+        <button type="button" className="press inline-flex h-8 items-center gap-1 rounded-full px-3 text-sm font-medium text-muted-foreground hover:bg-muted"
+                onClick={() => setNaming((v) => !v)}>
+          <Plus className="size-3.5" /> Сохранить текст
+        </button>
+        {items.some((t) => t.can_edit) && (
+          <button type="button" className="press inline-flex h-8 items-center gap-1 rounded-full px-3 text-sm font-medium text-muted-foreground hover:bg-muted"
+                  onClick={() => setManage((v) => !v)}>
+            <Pencil className="size-3.5" /> {manage ? "Готово" : "Изменить"}
+          </button>
+        )}
+      </div>
+      {current?.can_edit && (
+        <button type="button" className="press text-sm font-medium text-primary underline-offset-2 hover:underline" disabled={!!busy}
+                onClick={() => save(current)}>
+          {busy === "save" ? "Сохраняю…" : `Записать текст редактора в шаблон «${current.title}»`}
+        </button>
+      )}
+      {naming && (
+        <div className="row-in flex gap-2">
+          <input autoFocus className="h-10 min-w-0 flex-1 rounded-xl border-0 bg-muted px-3 outline-none focus:ring-2 focus:ring-ring/25"
+                 placeholder="Название, например «Сбор утром»" value={title} onChange={(e) => setTitle(e.target.value.slice(0, 60))}
+                 onKeyDown={(e) => e.key === "Enter" && title.trim() && save(null)} />
+          <Button className="press h-10 rounded-xl" disabled={!!busy || !title.trim()} onClick={() => save(null)}>
+            {busy === "save" && <LoaderCircle className="animate-spin" />} Сохранить
+          </Button>
+        </div>
       )}
     </div>
   );
