@@ -17,7 +17,7 @@ import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } fr
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
-import { dayMonth } from "@/lib/format";
+import { dayMonth, offFor } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { haptic, openChat, webApp } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
@@ -215,7 +215,7 @@ function Group({
                 ) : u.status === "approved" && u.account_state === "active" && (
                   <span className={cn("flex items-center gap-1.5 text-xs", u.work_status === "working" ? "text-go" : "text-muted-foreground")}>
                     <span className={cn("size-1.5 rounded-full", u.work_status === "working" ? "bg-go" : "bg-idle")} />
-                    {u.work_status === "working" ? "работает" : "не работает"}
+                    {u.work_status === "working" ? "работает" : `не работает${offFor(u.status_days) ? ` · ${offFor(u.status_days)}` : ""}`}
                   </span>
                 )}
                 <ChevronRight className="size-4 text-muted-foreground" />

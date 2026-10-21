@@ -6,7 +6,7 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Pricing, type User } from "@/lib/api";
-import { STATUS_META, WEEKDAYS_SHORT, parseDay, rub, timeRange, weekRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS_SHORT, offFor, parseDay, rub, timeRange, weekRange } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { bindBackButton } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
@@ -107,7 +107,9 @@ export function ProfileScreen({
             ))}
           </div>
           <p className="mt-3 text-sm text-muted-foreground">
-            {working ? "Можно записываться на выходы." : "Запись в график закрыта, пока не включишь «Работаю»."}
+            {working
+              ? "Можно записываться на выходы."
+              : `Запись в график закрыта, пока не включишь «Работаю».${offFor(user.status_days) ? ` Не работаешь: ${offFor(user.status_days)}.` : ""}`}
           </p>
         </section>
       </div>
@@ -123,22 +125,12 @@ export function ProfileScreen({
             <span className="block font-medium">Напоминания в боте</span>
             <span className="block text-sm text-muted-foreground">
               {user.work_status === "working"
-                ? "Пока статус «Работаю», напоминания о сменах и отчётах всегда включены"
-                : "Накануне смены и про график на следующую неделю"}
+                ? "Пока статус «Работаю», напоминания о сменах и отчётах включены"
+                : "Статус «Не работаю» — бот не присылает напоминания. Включатся сами вместе с «Работаю»"}
             </span>
           </span>
-          <Switch
-            checked={user.work_status === "working" || user.notify_reminders !== false}
-            disabled={busy === "notify" || user.work_status === "working"}
-            onCheckedChange={async (on) => {
-              try {
-                const res = await run("notify", () => api.setNotify(on), on ? "Напоминания включены" : "Напоминания выключены");
-                if (res) onUserChange(res.user);
-              } catch {
-                /* toast shown */
-              }
-            }}
-          />
+          {/* follows the status: on with «Работаю», off with «Не работаю» */}
+          <Switch checked={user.work_status === "working"} disabled aria-label="Напоминания в боте" />
         </label>
 
         <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">

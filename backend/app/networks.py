@@ -52,7 +52,8 @@ def listing(conn: sqlite3.Connection, viewer: dict, include_archived: bool = Fal
             **({"rate_base": n["rate_base"], "ladder": rates.parse_ladder(n["ladder"]), "ladder_period": n["ladder_period"],
                 "ladder_counts_trainer": bool(n["ladder_counts_trainer"])} if perms.can(viewer, "money") else {}),
             "members": [{"id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
-                         "role": perms.role_of(u), "work_status": u["work_status"], "account_state": u["account_state"]}
+                         "role": perms.role_of(u), "work_status": u["work_status"], "account_state": u["account_state"],
+                         "status_days": svc.status_days(u)}
                         for u in people if not trainer or u["id"] != trainer["id"]],
         })
     return out

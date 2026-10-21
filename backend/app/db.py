@@ -682,6 +682,12 @@ UPDATE goals SET visibility = 'hidden', hidden_at = COALESCE(completed_at, creat
  WHERE status = 'archived';
 """)
 
+# the customer: «Не работаю» = no reminders; how long a person has had their status is shown everywhere
+MIGRATIONS.append("""
+UPDATE users SET notify_reminders = 0 WHERE work_status = 'not_working';
+UPDATE users SET work_status_at = COALESCE(decided_at, created_at) WHERE work_status_at IS NULL;
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

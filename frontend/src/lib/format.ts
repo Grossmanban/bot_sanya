@@ -103,3 +103,10 @@ export const timeRange = (s: { start_time: string | null; end_time: string | nul
   s.start_time && s.end_time ? `${s.start_time}–${s.end_time}` : "—";
 
 export const isGoing = (s: Shift | null) => !!s && (s.status === "active" || s.status === "restored");
+
+/** «не работает 12 дн.» — how long a person has been off (null — just today or unknown). */
+export function offFor(days: number | null | undefined): string | null {
+  if (days == null) return null;
+  if (days === 0) return "с сегодня";
+  return `${days} ${plural(days, "день", "дня", "дней")}`;
+}

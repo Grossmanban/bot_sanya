@@ -223,7 +223,8 @@ def decide_registration(conn, user_id: int, approve: bool, admin_tg: int) -> tup
         if user["status"] != "pending":
             return user, False
         conn.execute(
-            "UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working' WHERE id = ?",
+            """UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working',
+                                work_status_at = decided_at, notify_reminders = 0 WHERE id = ?""",
             ("approved" if approve else "rejected", now_iso(), admin_tg, user_id),
         )
         log_event(
@@ -254,11 +255,10 @@ def set_work_status(conn, user: dict, work_status: str, key: str) -> dict:
         if work_status == "working" and current["account_state"] == "paused":
             raise ServiceError("Аккаунт на паузе: статус «Работаю» включит администратор, сняв паузу", 403, "paused")
         if current["work_status"] != work_status:
+            # the customer: «Не работаю» switches the bot's reminders off, «Работаю» — on
             conn.execute(
-                """UPDATE users SET work_status = ?, work_status_at = ?,
-                                    notify_reminders = CASE WHEN ? = 'working' THEN 1 ELSE notify_reminders END
-                   WHERE id = ?""",
-                (work_status, now_iso(), work_status, user["id"]),
+                "UPDATE users SET work_status = ?, work_status_at = ?, notify_reminders = ? WHERE id = ?",
+                (work_status, now_iso(), int(work_status == "working"), user["id"]),
             )
             log_event(
                 conn,
@@ -270,6 +270,14 @@ def set_work_status(conn, user: dict, work_status: str, key: str) -> dict:
                 new={"work_status": work_status},
             )
     return get_user(conn, user["id"])
+
+
+def status_days(user: dict, today: date | None = None) -> int | None:
+    """How many days the person has had their current work status (since work_status_at)."""
+    since = user.get("work_status_at") or user.get("decided_at") or user.get("created_at")
+    if not since:
+        return None
+    return max(0, ((today or today_local()) - date.fromisoformat(since[:10])).days)
 
 
 def is_owner(user: dict) -> bool:
@@ -330,7 +338,8 @@ def set_access(conn, actor: dict, user_id: int, allow: bool, key: str) -> tuple[
         if user["status"] == target:
             return user, False
         conn.execute(
-            "UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working' WHERE id = ?",
+            """UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working',
+                                work_status_at = decided_at, notify_reminders = 0 WHERE id = ?""",
             (target, now_iso(), actor["telegram_id"], user_id),
         )
         event = {
@@ -382,9 +391,13 @@ def set_account_state(conn, actor: dict, user_id: int, state: str, reason: str |
         conn.execute(
             """UPDATE users SET account_state = ?, state_reason = ?, state_changed_at = ?, state_changed_by = ?,
                                 work_status = CASE WHEN ? = 'active' THEN work_status ELSE 'not_working' END,
+                                work_status_at = CASE WHEN ? != 'active' AND work_status = 'working' THEN ?
+                                                      ELSE work_status_at END,
+                                notify_reminders = CASE WHEN ? = 'active' THEN notify_reminders ELSE 0 END,
                                 role = CASE WHEN ? = 'blocked' THEN 'employee' ELSE role END
                WHERE id = ?""",
-            (state, reason if state != "active" else None, now_iso(), actor["telegram_id"], state, state, user_id),
+            (state, reason if state != "active" else None, now_iso(), actor["telegram_id"], state, state, now_iso(), state,
+             state, user_id),
         )
         if state == "blocked":
             conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
@@ -1167,11 +1180,13 @@ def check_point(conn, day: date, location: str, exclude: int | None = None) -> s
 
 
 def set_notify(conn, user: dict, enabled: bool) -> dict:
-    """ТЗ 2.1: while «Работаю» the reminders can't be switched off."""
+    """The reminders follow the status: on with «Работаю» (ТЗ 2.1), off with «Не работаю» (the customer)."""
     with transaction(conn):
         current = get_user(conn, user["id"])
         if not enabled and current["work_status"] == "working":
             raise ServiceError('Переведите статус "Не работаю", чтобы выключить напоминания', 409, "reminders_locked")
+        if enabled and current["work_status"] != "working":
+            raise ServiceError('Напоминания приходят, пока статус «Работаю»', 409, "reminders_off")
         conn.execute("UPDATE users SET notify_reminders = ? WHERE id = ?", (int(enabled), user["id"]))
     return get_user(conn, user["id"])
 
