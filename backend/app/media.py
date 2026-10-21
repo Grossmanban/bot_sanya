@@ -30,6 +30,17 @@ def sniff(data: bytes) -> str | None:
     return None
 
 
+# broadcasts: a bot may upload up to 50 MB; MP4 and iPhone's MOV share the ISO «ftyp» box
+MAX_VIDEO = 50 * 1024 * 1024
+
+
+def sniff_video(data: bytes) -> str | None:
+    """mp4 / mov by the «ftyp» box, None for anything else."""
+    if data[4:8] != b"ftyp":
+        return None
+    return "mov" if data[8:10] == b"qt" else "mp4"
+
+
 def save_local(data: bytes, ext: str) -> str:
     folder = Path(settings.media_dir)
     folder.mkdir(parents=True, exist_ok=True)

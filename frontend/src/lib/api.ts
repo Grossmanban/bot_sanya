@@ -636,8 +636,27 @@ export interface Broadcast {
   last_name: string | null;
   require_ack: number;
   media_file_id: string | null;
+  media_kind?: "photo" | "video";
   network_id: number | null;
   read: number;
+  /** «Возможность ответить»: how many people replied */
+  allow_reply?: number;
+  replied?: number;
+}
+
+export interface BroadcastTemplate {
+  id: number;
+  title: string;
+  html: string;
+  author: string | null;
+  can_edit: boolean;
+}
+
+export interface BroadcastReply {
+  text: string | null;
+  created_at: string;
+  photos: number;
+  videos: number;
 }
 
 export interface BroadcastPerson {
@@ -660,6 +679,7 @@ export interface Receipt {
   read_at: string | null;
   reminders: number;
   reminded_at: string | null;
+  replies: BroadcastReply[];
 }
 
 export interface BroadcastDraft {
@@ -672,6 +692,8 @@ export interface BroadcastDraft {
   media_file_id: string | null;
   /** only those of the chosen who haven't marked tomorrow (no shift, no day off) */
   only_unmarked_tomorrow?: boolean;
+  media_kind?: "photo" | "video";
+  allow_reply?: boolean;
 }
 
 export type AdminAction = "force_cancel" | "force_restore" | "approve_urgent" | "reject_urgent";
@@ -784,8 +806,14 @@ export const api = {
         scope: "all" | "network";
       }>("/api/admin/broadcasts"),
     broadcast: (draft: BroadcastDraft) => post<{ broadcast: Broadcast }>("/api/admin/broadcasts", draft),
-    broadcastTest: (html: string, signed: boolean, require_ack: boolean, media_file_id: string | null) =>
-      post<{ ok: boolean }>("/api/admin/broadcasts/test", { html, signed, require_ack, media_file_id }),
+    broadcastTest: (body: { html: string; signed: boolean; require_ack: boolean; media_file_id: string | null;
+      media_kind: "photo" | "video"; allow_reply: boolean }) => post<{ ok: boolean }>("/api/admin/broadcasts/test", body),
+    uploadVideo: (file: Blob) => upload<{ file_id: string }>("/api/admin/media/video", file),
+    templates: () => request<{ items: BroadcastTemplate[] }>("/api/admin/broadcast-templates"),
+    saveTemplate: (title: string, html: string, id?: number) =>
+      id ? patch<{ template: BroadcastTemplate }>(`/api/admin/broadcast-templates/${id}`, { title, html })
+        : post<{ template: BroadcastTemplate }>("/api/admin/broadcast-templates", { title, html }),
+    deleteTemplate: (id: number) => post<{ deleted: boolean }>(`/api/admin/broadcast-templates/${id}/delete`, {}),
     receipts: (id: number) => request<{ broadcast: Broadcast; items: Receipt[] }>(`/api/admin/broadcasts/${id}`),
     remind: (id: number, userIds: number[] | null) =>
       post<{ sent: number }>(`/api/admin/broadcasts/${id}/remind`, { user_ids: userIds }),

@@ -14,6 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
+    InputMediaVideo,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -306,6 +307,28 @@ def ack_keyboard(broadcast_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Я ознакомился", callback_data=f"ack:{broadcast_id}")]])
 
 
+def broadcast_keyboard(broadcast_id: int, ack: bool, reply: bool) -> InlineKeyboardMarkup | None:
+    """«✅ Я ознакомился» and/or «✍️ Ответить» under a broadcast (none — no buttons)."""
+    row = []
+    if ack:
+        row.append(InlineKeyboardButton(text="✅ Я ознакомился", callback_data=f"ack:{broadcast_id}"))
+    if reply:
+        row.append(InlineKeyboardButton(text="✍️ Ответить", callback_data=f"brr:{broadcast_id}"))
+    return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
+
+
+def reply_text(broadcast: dict, user: dict, text: str | None, network: str | None) -> str:
+    """What the author gets: whose reply, to which broadcast, a link to the person's Telegram."""
+    quote = (broadcast.get("text") or "").replace("\n", " ").strip()
+    quote = quote[:80] + ("…" if len(quote) > 80 else "")
+    sent = broadcast["created_at"]
+    contact = ", ".join(x for x in (f"@{user['username']}" if user.get("username") else None,
+                                    f"ID {user['telegram_id']}", f"сеть «{network}»" if network else None) if x)
+    head = (f"💬 <b>Ответ на рассылку</b> от {sent[8:10]}.{sent[5:7]} {sent[11:16]}\n<i>«{escape(quote)}»</i>\n\n"
+            f"👤 <a href=\"tg://user?id={user['telegram_id']}\">{escape(svc.full_name(user))}</a> ({escape(contact)})")
+    return head + (f"\n\n{escape(text)}" if text else "")
+
+
 def fine_decision_keyboard(tx_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Одобрить", callback_data=f"fx:a:{tx_id}"),
@@ -405,18 +428,19 @@ class Notifier:
     def broadcast_body(html: str, signed: bool) -> str:
         return f"📣 <b>Сообщение от администратора</b>\n\n{html}" if signed else html
 
-    async def _deliver(self, chat_id: int, body: str, media: str | None, markup) -> int | None:
-        """Send one broadcast message; returns the message id of the part carrying the buttons."""
+    async def _deliver(self, chat_id: int, body: str, media: str | None, markup, kind: str = "photo") -> int | None:
+        """Send one broadcast message (with a photo or a video); returns the message id of the part carrying
+        the buttons."""
         if self.bot is None:
             log.info("[broadcast → %s] %s", chat_id, body[:80])
             return None
         try:
             if media and not media.startswith("local:"):
+                send = self.bot.send_video if kind == "video" else self.bot.send_photo
                 if len(body) <= 1000:
-                    msg = await self._retry(lambda: self.bot.send_photo(chat_id, media, caption=body, parse_mode="HTML",
-                                                                        reply_markup=markup))
+                    msg = await self._retry(lambda: send(chat_id, media, caption=body, parse_mode="HTML", reply_markup=markup))
                     return msg.message_id
-                await self._retry(lambda: self.bot.send_photo(chat_id, media))
+                await self._retry(lambda: send(chat_id, media))
             msg = await self._retry(lambda: self.bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=markup,
                                                                   disable_web_page_preview=True))
             return msg.message_id
@@ -425,13 +449,14 @@ class Notifier:
             return None
 
     async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signed: bool = True,
-                        media: str | None = None, require_ack: bool = False) -> int:
+                        media: str | None = None, require_ack: bool = False, media_kind: str = "photo",
+                        allow_reply: bool = False) -> int:
         """html must already be sanitized (richtext.sanitize). Every delivery is recorded for read receipts."""
         body = self.broadcast_body(html, signed)
-        markup = ack_keyboard(broadcast_id) if require_ack else None
+        markup = broadcast_keyboard(broadcast_id, require_ack, allow_reply)
         delivered = 0
         for i, user in enumerate(recipients):
-            message_id = await self._deliver(user["telegram_id"], body, media, markup)
+            message_id = await self._deliver(user["telegram_id"], body, media, markup, media_kind)
             ok = message_id is not None
             delivered += ok
             self.conn.execute(
@@ -454,7 +479,8 @@ class Notifier:
         body = "⏰ <b>Напоминание:</b> подтвердите, что ознакомились с сообщением.\n\n" + self.broadcast_body(b["html"] or escape(b["text"]), bool(b["signed"]))
         sent = 0
         for r in rows:
-            message_id = await self._deliver(r["telegram_id"], body, b["media_file_id"], ack_keyboard(broadcast_id))
+            message_id = await self._deliver(r["telegram_id"], body, b["media_file_id"],
+                                             broadcast_keyboard(broadcast_id, True, bool(b["allow_reply"])), b["media_kind"])
             sent += message_id is not None
             self.conn.execute("UPDATE broadcast_deliveries SET reminded_at = ?, reminders = reminders + 1 WHERE id = ?",
                               (svc.now_iso(), r["id"]))
@@ -486,6 +512,52 @@ class Notifier:
             raise svc.ServiceError("Не удалось загрузить скриншот. Напишите боту /start и попробуйте снова",
                                    502, "upload_failed") from exc
         return msg.photo[-1].file_id
+
+    async def store_video(self, chat_id: int, data: bytes, ext: str, caption: str) -> str:
+        """A video for a broadcast: uploaded once to the author's own chat, then sent to everyone by file_id."""
+        if self.bot is None:
+            return media.save_local(data, ext)
+        try:
+            msg = await self._retry(lambda: self.bot.send_video(
+                chat_id, BufferedInputFile(data, f"video.{ext}"), caption=caption[:1024], parse_mode="HTML",
+                supports_streaming=True))
+        except Exception as exc:
+            log.warning("video upload for %s failed: %s", chat_id, exc)
+            raise svc.ServiceError("Не удалось загрузить видео. Напишите боту /start и попробуйте снова",
+                                   502, "upload_failed") from exc
+        if msg.video is None:
+            raise svc.ServiceError("Telegram не принял файл как видео — нужен MP4 или MOV", 415, "bad_video")
+        return msg.video.file_id
+
+    async def broadcast_reply(self, broadcast: dict, user: dict, reply: dict) -> bool:
+        """Hand a reply to the broadcast's author: the text with who sent it, then their photos and videos."""
+        from . import networks
+
+        network = (networks.get(self.conn, user["network_id"]) or {}).get("name") if user.get("network_id") else None
+        text = reply_text(broadcast, user, reply["text"], network)
+        author = broadcast["author_id"]
+        items = reply["media"]
+        if self.bot is None:
+            log.info("[reply → %s] %s (+%d media)", author, text[:80], len(items))
+            return False
+        try:
+            if not items:
+                await self._retry(lambda: self.bot.send_message(author, text, parse_mode="HTML", disable_web_page_preview=True))
+            elif len(items) == 1 and len(text) <= 1000:
+                send = self.bot.send_video if items[0]["kind"] == "video" else self.bot.send_photo
+                await self._retry(lambda: send(author, items[0]["file_id"], caption=text, parse_mode="HTML"))
+            else:
+                caption = text if len(text) <= 1000 else None
+                album = [(InputMediaVideo if m["kind"] == "video" else InputMediaPhoto)(
+                    media=m["file_id"], caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 and caption else None)
+                    for i, m in enumerate(items)]
+                if caption is None:
+                    await self._retry(lambda: self.bot.send_message(author, text, parse_mode="HTML", disable_web_page_preview=True))
+                await self._retry(lambda: self.bot.send_media_group(author, album))
+            return True
+        except Exception as exc:
+            log.warning("reply to the broadcast author %s failed: %s", author, exc)
+            return False
 
     async def fetch_photo(self, file_id: str) -> tuple[bytes, str] | None:
         """Bytes for the signed preview link; a small in-memory cache saves repeated downloads."""

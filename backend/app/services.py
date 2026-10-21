@@ -1258,7 +1258,10 @@ def prepare_message(html: str) -> tuple[str, str]:
 
 def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True,
                      network_id: int | None = None, user_ids: list[int] | None = None, require_ack: bool = False,
-                     media: str | None = None, only_unmarked: date | None = None) -> tuple[dict, list[dict]]:
+                     media: str | None = None, only_unmarked: date | None = None, media_kind: str = "photo",
+                     allow_reply: bool = False) -> tuple[dict, list[dict]]:
+    if media_kind not in ("photo", "video"):
+        raise ServiceError("Вложение — фото или видео", 422, "bad_media")
     clean, text = prepare_message(html)
     if media and len(clean) > 4000:
         raise ServiceError("Слишком длинный текст", 422, "too_long")
@@ -1272,10 +1275,11 @@ def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, s
     with transaction(conn):
         cur = conn.execute(
             """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at, media_file_id,
-                                       require_ack, network_id, people)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       require_ack, network_id, people, media_kind, allow_reply)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (admin["telegram_id"], audience, text, clean, int(signed), len(recipients), now_iso(), media,
-             int(require_ack), network_id, json.dumps(user_ids) if user_ids else None),
+             int(require_ack), network_id, json.dumps(user_ids) if user_ids else None, media_kind if media else "photo",
+             int(allow_reply)),
         )
     return dict(conn.execute("SELECT * FROM broadcasts WHERE id = ?", (cur.lastrowid,)).fetchone()), recipients
 
@@ -1284,7 +1288,8 @@ def list_broadcasts(conn, limit: int = 20, author_tg: int | None = None) -> list
     """author_tg: only this person's broadcasts (trainers see their own)."""
     rows = conn.execute(
         """SELECT b.*, u.first_name, u.last_name,
-                  (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id = b.id AND d.read_at IS NOT NULL) AS read
+                  (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id = b.id AND d.read_at IS NOT NULL) AS read,
+                  (SELECT COUNT(DISTINCT r.user_id) FROM broadcast_replies r WHERE r.broadcast_id = b.id) AS replied
            FROM broadcasts b LEFT JOIN users u ON u.telegram_id = b.author_id
            WHERE (? IS NULL OR b.author_id = ?) ORDER BY b.id DESC LIMIT ?""",
         (author_tg, author_tg, limit),
