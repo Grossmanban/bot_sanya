@@ -43,6 +43,10 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "weekly_attendance_quota": ("3", "days"),
     "attendance_check_enabled": ("1", "bool"),
     "attendance_check_time": ("10:30", "time"),
+    # the customer's module 1: mark tomorrow by the deadline; a reminder before it, a violation after it
+    "daily_mark_enabled": ("1", "bool"),
+    "daily_mark_reminder_time": ("20:00", "time"),
+    "daily_mark_deadline": ("22:00", "time"),
     # ТЗ №9: employees see who else works that day (off — only how many)
     "show_colleague_names": ("1", "bool"),
     # ТЗ №22: finished goals and events leave the feed for «Архив» after this many days (0 — at once)

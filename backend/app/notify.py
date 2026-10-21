@@ -233,6 +233,14 @@ def _open_admin() -> InlineKeyboardMarkup | None:
     ]])
 
 
+def _open_schedule() -> InlineKeyboardMarkup | None:
+    if not settings.webapp_url.startswith("https://"):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🗓 Отметить график", web_app=WebAppInfo(url=settings.webapp_url))
+    ]])
+
+
 def name_handle(user: dict) -> str:
     """Иван Петров (@ivan_p) — for the archive templates of ТЗ 12.4."""
     name = escape(svc.full_name(user))
@@ -255,14 +263,16 @@ def violation_text(v: dict, user: dict, tx: dict | None) -> str:
 
     files = violations.media_ids(v)
     req, act = v["required_days"], v["actual_days"]
-    stats = (f"📊 <b>Статистика:</b>\n• Требование: {req} {violations.days_word(req)}\n"
+    unmarked = v.get("kind") == "unmarked"
+    stats = (f"📊 <b>Причина:</b> {escape(violations.what(v))}" if unmarked else
+             f"📊 <b>Статистика:</b>\n• Требование: {req} {violations.days_word(req)}\n"
              f"• Факт: {act} {violations.days_word(act)}")
     head = (f"👤 Сотрудник: {escape(svc.full_name(user))}\n📅 Период: {violations.period(v)}\n\n")
     comment = f"📝 Комментарий администратора: «{escape(v['resolution_comment'] or '')}»"
     if v["status"] == "penalized":
         missed = max(0, req - act)
         return ("⚠️ <b>НАРУШЕНИЕ ГРАФИКА | ШТРАФ НАЗНАЧЕН</b>\n\n" + head + stats +
-                f"\n• Пропущено: {missed} {violations.days_word(missed)}\n\n"
+                ("\n\n" if unmarked else f"\n• Пропущено: {missed} {violations.days_word(missed)}\n\n") +
                 f"💰 Сумма штрафа: <b>-{tx['amount']} ₽</b>\n{comment}\n"
                 f"📎 Доказательства: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
                 "ℹ️ Ваш текущий баланс обновлён. Пожалуйста, ознакомьтесь с правилами выхода на работу.")
@@ -278,16 +288,16 @@ def violation_archive_text(v: dict, user: dict, resolver: dict, tx: dict | None,
 
     files = violations.media_ids(v)
     role = perms.ROLE_TITLES[perms.role_of(resolver)]
-    norm = f"{v['actual_days']}/{v['required_days']}, {violations.period(v)}"
+    reason = violations.what(v)
     media_line = f"📎 Медиа: {files_word(len(files)) + ' — ниже' if files else 'нет'}"
     if v["status"] == "penalized":
         approved = f"\n✅ Одобрил: {name_handle(approver)}" if approver else ""
         return (f"❌ <b>ШТРАФ ЗА ПРОПУСК ГРАФИКА</b>\n👤 Кто: {name_handle(user)}\n"
                 f"👮‍♂️ Назначил: {role} {name_handle(resolver)}{approved}\n💰 Сумма: -{tx['amount']} ₽\n"
-                f"📝 Причина: невыполнение нормы выходов ({norm}). {escape(v['resolution_comment'] or '')}\n"
+                f"📝 Причина: {escape(reason)}. {escape(v['resolution_comment'] or '')}\n"
                 f"{media_line}\n⏱ Время: {stamp()}")
     return (f"☑️ <b>НАРУШЕНИЕ ПОГАШЕНО (БЕЗ ШТРАФА)</b>\n👤 Кто: {name_handle(user)}\n"
-            f"👮‍♂️ Решил: {role} {name_handle(resolver)}\n📊 Норма выходов: {norm}\n"
+            f"👮‍♂️ Решил: {role} {name_handle(resolver)}\n📊 Нарушение: {escape(reason)}\n"
             f"💬 Основание: {escape(v['resolution_comment'] or '')}\n{media_line}\n⏱ Время: {stamp()}")
 
 
@@ -932,6 +942,16 @@ class Notifier:
             log.warning("album to %s failed: %s", chat_id, exc)
             return 0
 
+    async def mark_reminders(self, people: list[dict], day: date, deadline: str) -> int:
+        """«Отметь график на завтра» to those with «Работаю» who have neither a shift nor a day off."""
+        text = (f"🗓 <b>Отметь график на завтра</b> ({ddmm_wd(day)}) до {deadline}: выход или выходной.\n"
+                "Если не отметить, будет нарушение графика.")
+        sent = 0
+        for u in people:
+            sent += await self.send(u["telegram_id"], text, _open_schedule())
+            await asyncio.sleep(0.05)
+        return sent
+
     async def violations_found(self, created: list[dict]) -> None:
         """Monday check: managers learn who fell below the norm; each decides in «Дисциплина»."""
         from . import networks, violations
@@ -941,10 +961,15 @@ class Notifier:
         v0 = created[0]
         users = {v["id"]: svc.get_user(self.conn, v["user_id"]) for v in created}
 
+        unmarked = v0.get("kind") == "unmarked"
+
         def body(items: list[dict]) -> str:
             lines = [f"📋 <b>Нарушения графика</b> — {violations.period(v0)}",
-                     f"Не выполнили норму выходов: {len(items)}. Нужно решение по каждому: штраф или оправдание.", ""]
-            lines += [f"• {escape(svc.full_name(users[v['id']]))}: {v['actual_days']} из {v['required_days']}" for v in items]
+                     (f"Не отметили график на этот день: {len(items)}. Нужно решение по каждому: штраф или простить."
+                      if unmarked else
+                      f"Не выполнили норму выходов: {len(items)}. Нужно решение по каждому: штраф или оправдание."), ""]
+            lines += [f"• {escape(svc.full_name(users[v['id']]))}" + ("" if unmarked else f": {v['actual_days']} из {v['required_days']}")
+                      for v in items]
             lines += ["", "Раздел «Дисциплина» в приложении."]
             return "\n".join(lines)[:3900]
 

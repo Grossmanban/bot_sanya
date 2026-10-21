@@ -74,6 +74,11 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
     common = cfg["weekly_attendance_quota"] if cfg["attendance_check_enabled"] else 0
     await daily("attendance_check", common > 0 or violations.has_personal_norms(conn),
                 cfg["attendance_check_time"], lambda: attendance_check(conn, notifier, today, common), weekday=0)
+    await daily("daily_mark_reminder", cfg["daily_mark_enabled"], cfg["daily_mark_reminder_time"],
+                lambda: notifier.mark_reminders(violations.unmarked(conn, today + timedelta(days=1)), today + timedelta(days=1),
+                                                cfg["daily_mark_deadline"]))
+    await daily("daily_mark_check", cfg["daily_mark_enabled"], cfg["daily_mark_deadline"],
+                lambda: unmarked_check(conn, notifier, today + timedelta(days=1)))
     await daily("backup", cfg["backup_enabled"], cfg["backup_time"], lambda: backup(conn, notifier))
     await daily("global_actual_evening", cfg["global_actual_evening_enabled"], cfg["global_actual_evening_time"],
                 lambda: notifier.global_actual_reminder(today, morning=False))
@@ -311,6 +316,14 @@ async def weekly_report(conn, notifier: Notifier, today: date) -> None:
 async def attendance_check(conn, notifier: Notifier, today: date, common: int) -> int:
     """ТЗ 12.4: Monday — people below their weekly norm of work days get a violation to decide on."""
     created = violations.scan(conn, common, today)
+    if created:
+        await notifier.violations_found(created)
+    return len(created)
+
+
+async def unmarked_check(conn, notifier: Notifier, day: date) -> int:
+    """At the deadline: «Работаю» without a shift or a day off tomorrow → a violation to decide on."""
+    created = violations.scan_unmarked(conn, day)
     if created:
         await notifier.violations_found(created)
     return len(created)

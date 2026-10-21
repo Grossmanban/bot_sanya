@@ -14,6 +14,11 @@ A trainer's fine waits for an owner like any trainer's fine (ТЗ 5.3). If the o
 the violation goes back to pending so somebody decides again.
 
 A work day is a day with a live shift (active/restored) that didn't end as a no-show.
+
+The customer's module 1 adds a second kind, `unmarked`: every evening (`daily_mark_*` settings) people with
+«Работаю» who haven't marked tomorrow — no shift and no day off — get a reminder, and at the deadline
+(22:00 by default) those still silent get a violation for that day. «Не работаю» isn't checked. Decided the
+same way: a fine or «простить».
 """
 
 import json
@@ -27,6 +32,8 @@ from . import services as svc
 from .db import transaction
 from .services import ServiceError, _check_key, _fresh_actor, _seen, log_event
 from .timeutil import ddmm, now_iso, today_local, week_start
+
+WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 STATUSES = ("pending", "penalized", "waived")
 MAX_MEDIA = 5
@@ -50,10 +57,21 @@ def days_word(n: int) -> str:
 
 def period(v: dict) -> str:
     start, end = date.fromisoformat(v["week_start_date"]), date.fromisoformat(v["week_end_date"])
+    if v.get("kind") == "unmarked":
+        return f"{ddmm(start)} ({WEEKDAYS[start.weekday()]})"
     return f"Неделя {start.isocalendar()[1]} ({ddmm(start)} – {ddmm(end)})"
 
 
+def what(v: dict) -> str:
+    """The reason in one line, for messages and the archive."""
+    if v.get("kind") == "unmarked":
+        return f"не отмечен график на {ddmm(date.fromisoformat(v['week_start_date']))} — ни смены, ни выходного"
+    return f"невыполнение нормы выходов ({v['actual_days']}/{v['required_days']}, {period(v)})"
+
+
 def default_comment(v: dict) -> str:
+    if v.get("kind") == "unmarked":
+        return f"Не отмечен график на {ddmm(date.fromisoformat(v['week_start_date']))}: ни смены, ни выходного к сроку."
     start, end = date.fromisoformat(v["week_start_date"]), date.fromisoformat(v["week_end_date"])
     return (f"Невыполнение плана выходов за период {ddmm(start)}–{ddmm(end)}. "
             f"Вышли {v['actual_days']} из {v['required_days']} {'дня' if v['required_days'] % 10 == 1 and v['required_days'] % 100 != 11 else 'дней'}.")
@@ -83,6 +101,7 @@ def public(conn: sqlite3.Connection, v: dict, nets: dict[int, str] | None = None
     nets = nets if nets is not None else {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM networks")}
     return {
         "id": v["id"],
+        "kind": v["kind"],
         "user_id": v["user_id"],
         "name": svc.full_name(user),
         "username": user["username"],
@@ -178,6 +197,31 @@ def scan(conn: sqlite3.Connection, common: int, today: date | None = None) -> li
                 log_event(conn, user_id=u["id"], actor_id=0, event_type="ATTENDANCE_VIOLATION", key=svc.new_key(),
                           new={"violation": cur.lastrowid, "required": quota, "actual": len(worked)},
                           description=f"{start.isoformat()}…{end.isoformat()}")
+    return created
+
+
+def unmarked(conn: sqlite3.Connection, day: date) -> list[dict]:
+    """People with «Работаю» who have neither a shift nor a day off on `day` (paused/blocked — skipped)."""
+    marked = svc.marked_on(conn, day)
+    return [dict(u) for u in conn.execute(
+        """SELECT * FROM users WHERE status = 'approved' AND account_state = 'active' AND work_status = 'working'
+           ORDER BY first_name, last_name""")
+        if u["id"] not in marked and perms.role_of(dict(u)) in (perms.EMPLOYEE, perms.TRAINER)]
+
+
+def scan_unmarked(conn: sqlite3.Connection, day: date) -> list[dict]:
+    """At the deadline: one violation per person who still hasn't marked `day`. Safe to run again."""
+    created = []
+    with transaction(conn):
+        for u in unmarked(conn, day):
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO attendance_violations (user_id, kind, week_start_date, week_end_date, required_days,
+                       actual_days, absent_dates, status, created_at) VALUES (?, 'unmarked', ?, ?, 1, 0, ?, 'pending', ?)""",
+                (u["id"], day.isoformat(), day.isoformat(), json.dumps([day.isoformat()]), now_iso()))
+            if cur.rowcount:
+                created.append(get(conn, cur.lastrowid))
+                log_event(conn, user_id=u["id"], actor_id=0, event_type="UNMARKED_DAY_VIOLATION", key=svc.new_key(),
+                          new={"violation": cur.lastrowid, "day": day.isoformat()})
     return created
 
 

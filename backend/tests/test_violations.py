@@ -272,3 +272,37 @@ def test_http_endpoints(conn, make_user):
     assert r.json()["violation"]["status"] == "waived" and r.json()["violation"]["fine"] is None
     done = client.get("/api/admin/violations?status=resolved", headers=owner_h).json()
     assert done["pending"] == 0 and {i["status"] for i in done["items"]} == {"penalized", "waived"}
+
+
+def test_unmarked_tomorrow_reminder_then_violation(conn, make_user):
+    """The customer's module 1: mark tomorrow by 22:00 — a reminder at 20:00, a violation for the silent at 22:00."""
+    from app.timeutil import now_local
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    going, off, silent, resting = (person(conn, make_user, n) for n in ("Аня", "Боря", "Вика", "Гоша"))
+    resting = svc.set_work_status(conn, resting, "not_working", svc.new_key())  # «Не работаю» isn't checked
+    today = now_local().date()
+    tomorrow = today + timedelta(days=1)
+    conn.execute("""INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, created_at, updated_at)
+                    VALUES (?, ?, '10:00', '16:00', 20, 'Европа', 'active', 't', 't')""", (going["id"], tomorrow.isoformat()))
+    svc.pre_declare_off(conn, off, tomorrow, svc.new_key(), today=today)
+    assert [u["first_name"] for u in violations.unmarked(conn, tomorrow)] == ["Вика"]
+
+    n = FakeNotifier(conn)
+    ran = run(jobs.tick(conn, n, at(today, "20:00")))
+    assert "daily_mark_reminder" in ran
+    asks = [chat for chat, t in n.sent if "Отметь график на завтра" in t]
+    assert asks == [silent["telegram_id"]]
+    run(jobs.tick(conn, n, at(today, "22:00")))
+    pending = violations.listing(conn, owner)
+    assert [(v["name"].split()[0], v["kind"]) for v in pending] == [("Вика", "unmarked")]
+    assert any("Не отметили график" in t for chat, t in n.sent if chat == 999)
+    run(jobs.tick(conn, n, at(today, "22:01")))  # once a day
+    assert len(violations.listing(conn, owner)) == 1
+    # decided like any violation: «простить»
+    res = violations.waive(conn, owner, pending[0]["id"], "Предупредила тренера заранее", [], svc.new_key())
+    assert res.changed and res.violation["status"] == "waived"
+    assert "не отмечен график" in violations.what(res.violation)
+    from app.notify import violation_text
+    text = violation_text(res.violation, svc.get_user(conn, silent["id"]), None)
+    assert "не отмечен график" in text and "Требование" not in text

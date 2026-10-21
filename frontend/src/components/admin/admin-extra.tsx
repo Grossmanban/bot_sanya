@@ -174,6 +174,8 @@ type Row = {
   audience?: keyof ScheduleSettings;
   /** work days a week (ТЗ 12.4) */
   days?: keyof ScheduleSettings;
+  /** a second time: the deadline after the reminder */
+  deadline?: keyof ScheduleSettings;
   fixedDay?: string;
 };
 
@@ -194,6 +196,7 @@ const ROWS: Row[] = [
   { title: "Общий факт: утром", text: "Владельцам, если общий факт за вчера так и не введён.", enabled: "global_actual_morning_enabled", time: "global_actual_morning_time" },
   { title: "Итоги недели", text: "Админам: план и факт по каждому и файл Excel за прошлую неделю.", enabled: "weekly_report_enabled", time: "weekly_report_time", fixedDay: "по понедельникам" },
   { title: "Общая норма выходов", text: "Кто за прошлую неделю вышел меньше нормы — заявка в «Дисциплину». Личная норма задаётся в карточке сотрудника («Команда») и проверяется, даже если общая выключена.", enabled: "attendance_check_enabled", time: "attendance_check_time", fixedDay: "по понедельникам", days: "weekly_attendance_quota" },
+  { title: "Отметка графика на завтра", text: "Тем, у кого «Работаю», а на завтра нет ни смены, ни выходного: напоминание. Кто не отметит к сроку — нарушение в «Дисциплину» (штраф или простить). «Не работаю» не проверяется.", enabled: "daily_mark_enabled", time: "daily_mark_reminder_time", deadline: "daily_mark_deadline" },
   { title: "Резервная копия базы", text: "Владельцам: файл базы данных каждый день.", enabled: "backup_enabled", time: "backup_time" },
 ];
 
@@ -263,9 +266,18 @@ export function SettingsSection() {
                       </label>
                     )}
                     {r.fixedDay && <span className="text-muted-foreground">{r.fixedDay}</span>}
+                    {r.time && r.deadline && <span className="text-muted-foreground">напомнить в</span>}
                     {r.time && (
                       <input type="time" className="h-10 rounded-xl border-0 bg-muted px-3 tabular outline-none" value={cfg[r.time] as string}
                              onChange={(e) => e.target.value && set({ [r.time!]: e.target.value } as Partial<ScheduleSettings>)} />
+                    )}
+                    {r.deadline && (
+                      <label className="flex items-center gap-2 text-muted-foreground">
+                        срок до
+                        <input type="time" className="h-10 rounded-xl border-0 bg-muted px-3 text-foreground tabular outline-none"
+                               value={cfg[r.deadline] as string}
+                               onChange={(e) => e.target.value && set({ [r.deadline!]: e.target.value } as Partial<ScheduleSettings>)} />
+                      </label>
                     )}
                     {r.delay && (
                       <label className="flex items-center gap-2 text-muted-foreground">
