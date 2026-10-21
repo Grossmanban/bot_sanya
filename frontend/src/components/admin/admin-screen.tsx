@@ -36,11 +36,13 @@ import { EventsAdmin } from "../events/events-admin";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 import { ViolationsSection } from "./violations-section";
+import { OnboardingSection } from "./onboarding-section";
 
-type Section = "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
+  { id: "onboarding", label: "Онбординг", need: "registrations" },
   { id: "reports", label: "Отчёты", need: "review" },
   { id: "discipline", label: "Дисциплина", need: "review" },
   { id: "actual", label: "Факт дня", need: "global_actual" },
@@ -128,6 +130,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
 
       <div key={section} className="screen-in">
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
+        {section === "onboarding" && <OnboardingSection me={me} />}
         {section === "reports" && <ReportsSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "discipline" && <ViolationsSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "actual" && <DayActualSection onChanged={() => setVersion((v) => v + 1)} />}
@@ -259,6 +262,7 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
                     <span className="block truncate font-medium">
                       {r.name}
                       {r.username && <span className="font-normal text-muted-foreground"> @{r.username}</span>}
+                      {r.trainee && <span className="ml-1.5 rounded-md bg-wait-soft px-1.5 py-0.5 text-xs font-semibold text-wait">стажёр</span>}
                     </span>
                     <span className="text-sm text-muted-foreground">{r.location}</span>
                   </span>

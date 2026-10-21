@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Archive, Bell, ChevronLeft, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
+import { Archive, Bell, Gift, ChevronLeft, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,8 +16,9 @@ import { Avatar } from "../avatar";
 import { ThemeChoice } from "../theme-toggle";
 import { QuickAccess } from "./quick-access";
 import { ArchiveList } from "../archive";
+import { Referrals } from "./referrals";
 
-type View = "main" | "history" | "penalties" | "requisites" | "archive";
+type View = "main" | "history" | "penalties" | "requisites" | "archive" | "referrals";
 
 export function ProfileScreen({
   user,
@@ -40,6 +41,14 @@ export function ProfileScreen({
   if (view === "history") return <HistoryView onBack={() => setView("main")} />;
   if (view === "penalties") return <PenaltiesView onBack={() => setView("main")} />;
   if (view === "requisites") return <RequisitesView onBack={() => setView("main")} />;
+  if (view === "referrals") {
+    return (
+      <div className="mx-auto max-w-2xl">
+        <SubHeader title="Мои рефералы" onBack={() => setView("main")} />
+        <Referrals />
+      </div>
+    );
+  }
   if (view === "archive") {
     return (
       <div className="mx-auto max-w-2xl">
@@ -155,6 +164,7 @@ export function ProfileScreen({
             onClick={() => setView("penalties")}
           />
           <MenuRow icon={Archive} label="Архив целей и событий" onClick={() => setView("archive")} />
+          <MenuRow icon={Gift} label="Мои рефералы" onClick={() => setView("referrals")} />
           <MenuRow icon={CreditCard} label="Реквизиты для выплат" value={profile.data ? (profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
                    onClick={() => setView("requisites")} />
         </section>

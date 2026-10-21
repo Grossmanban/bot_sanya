@@ -58,6 +58,8 @@ export interface Pricing {
   base_rate: number;
   lazy_rate: number;
   lazy_threshold: number;
+  /** a trainee: shifts are training ones, not paid */
+  training?: boolean;
 }
 
 export interface Me {
@@ -69,6 +71,78 @@ export interface Me {
   capabilities?: Capability[];
   network?: string | null;
   events?: number;
+  /** a candidate (status pending): their questionnaire — none yet / returned to the reserve, or where it stands */
+  application?: { status: ApplicationStatus; training: { training_date: string | null; training_time: string | null;
+    training_location: string | null } } | null;
+  /** a trainee: the internship's progress */
+  internship?: StageProgress | null;
+}
+
+export type ApplicationStatus = "new" | "scheduled" | "internship" | "done" | "rejected" | "returned";
+
+export interface StageProgress {
+  stage: 1 | 2;
+  units: number;
+  pending: number;
+  target: number;
+  review: boolean;
+  finished?: boolean;
+}
+
+export interface ApplicationForm {
+  full_name: string;
+  age: number;
+  metro: string;
+  min_days: number;
+  training_days: number[];
+  communication: number;
+  truthful: boolean;
+  consent: boolean;
+}
+
+/** The onboarding card (the customer's module 3). */
+export interface Application {
+  id: number;
+  status: ApplicationStatus;
+  full_name: string;
+  age: number;
+  metro: string;
+  min_days: number;
+  communication: number;
+  training_days: number[];
+  created_at: string;
+  reject_reason: string | null;
+  decided_at: string | null;
+  training_date: string | null;
+  training_time: string | null;
+  training_location: string | null;
+  training_confirmed_at: string | null;
+  contact_manager: string | null;
+  contacted_at: string | null;
+  contact_answer: "wrote" | "cant_write" | null;
+  contact_answer_at: string | null;
+  stage1_counted: number | null;
+  stage1_at: string | null;
+  stage2_counted: number | null;
+  stage2_at: string | null;
+  user_id: number;
+  telegram_id: number;
+  username: string | null;
+  referrer: string | null;
+  trainer: { id: number; name: string; username: string | null } | null;
+  earlier: number;
+  progress: StageProgress | null;
+  avatar_url: string;
+}
+
+export interface Referral {
+  id: number;
+  name: string;
+  status: ApplicationStatus;
+  created_at: string;
+  progress: StageProgress | null;
+  stage1_counted: number | null;
+  stage2_counted: number | null;
 }
 
 /** ТЗ №20, №22: what goals and events share once running. */
@@ -249,6 +323,8 @@ export interface Shift {
   rate?: number;
   expected_pay?: number;
   lazy?: boolean;
+  /** a trainee's training shift: not paid */
+  training?: boolean;
   fact_volume: number | null;
   fact_pay?: number;
   report_state: ReportState | null;
@@ -469,7 +545,8 @@ export interface AdminShift extends Shift {
 
 export interface Raspred {
   date: string;
-  rows: { shift_id: number; name: string; username: string | null; start_time: string; end_time: string; volume: number; location: string }[];
+  rows: { shift_id: number; name: string; username: string | null; start_time: string; end_time: string; volume: number; location: string;
+    /** a trainee's training shift */ trainee?: boolean }[];
   total_count: number;
   total_volume: number;
   text: string;
@@ -785,6 +862,9 @@ export const api = {
   goals: () => request<{ items: Goal[] }>("/api/goals"),
   archive: () => request<{ events: LiveEvent[]; goals: Goal[] }>("/api/archive"),
   joinGoal: (id: number) => post<{ goal: Goal }>(`/api/goals/${id}/join`, {}),
+  register: (form: ApplicationForm) => post<{ application: { status: ApplicationStatus } }>("/api/register", form),
+  referrals: () => request<{ code: string; link: string | null; items: Referral[];
+    targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
   myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -825,6 +905,22 @@ export const api = {
     broadcastTest: (body: { html: string; signed: boolean; require_ack: boolean; media_file_id: string | null;
       media_kind: "photo" | "video"; allow_reply: boolean }) => post<{ ok: boolean }>("/api/admin/broadcasts/test", body),
     uploadVideo: (file: Blob) => upload<{ file_id: string }>("/api/admin/media/video", file),
+    onboarding: (tab: "new" | "scheduled" | "internship" | "rejected") =>
+      request<{ items: Application[]; counts: Record<"new" | "scheduled" | "internship" | "rejected", number>;
+        trainers: { id: number; name: string; username: string | null }[]; points: string[];
+        targets: { internship_units: number; second_stage_units: number } }>(`/api/admin/onboarding?tab=${tab}`),
+    assignTraining: (id: number, body: { date: string; time: string; location: string; trainer_id: number }, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/training`, { ...body, idempotency_key: key }),
+    rejectApplication: (id: number, reason: string | null, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/reject`, { reason, idempotency_key: key }),
+    returnApplication: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/return`, { idempotency_key: key }),
+    contactApplication: (id: number, manager: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/contact`, { manager }),
+    startInternship: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/internship`, { idempotency_key: key }),
+    confirmStage: (id: number, stage: 1 | 2, counted: number, bonus: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/stage`, { stage, counted, bonus, idempotency_key: key }),
     templates: () => request<{ items: BroadcastTemplate[] }>("/api/admin/broadcast-templates"),
     saveTemplate: (title: string, html: string, id?: number) =>
       id ? patch<{ template: BroadcastTemplate }>(`/api/admin/broadcast-templates/${id}`, { title, html })

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Camera, ChevronLeft, ChevronRight, Pause, RotateCcw, Trophy, X } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { api, type Day, type Pricing, type User, type Week } from "@/lib/api";
+import { api, type Day, type Pricing, type StageProgress, type User, type Week } from "@/lib/api";
 import { STATUS_META, WEEKDAYS_SHORT, dayMonth, dayState, isGoing, parseDay, plural, rub, timeRange, weekRange } from "@/lib/format";
 import { moscowTime, readLocal, useAction, useLoad, writeLocal } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
@@ -22,11 +22,14 @@ export function ScheduleScreen({
   pricing,
   onOpenProfile,
   onUserChange,
+  internship,
 }: {
   user: User;
   pricing: Pricing;
   onOpenProfile: () => void;
   onUserChange: (u: User) => void;
+  /** a trainee: the internship's progress (the customer's module 3) */
+  internship?: StageProgress | null;
 }) {
   const wide = useWide();
   const [offset, setOffset] = useState(0);
@@ -102,6 +105,8 @@ export function ScheduleScreen({
         ) : (
           user.work_status !== "working" && <WorkToggle onUserChange={onUserChange} />
         )}
+
+        {internship && <Internship p={internship} />}
 
         <ReportDue week={week} onOpen={open} />
 
@@ -185,7 +190,7 @@ function WeekHero({
   const summary = !week
     ? " "
     : going.length
-      ? `Выходишь ${going.length} ${plural(going.length, "день", "дня", "дней")}, план ${volume} шт., около ${rub(pay)}`
+      ? `Выходишь ${going.length} ${plural(going.length, "день", "дня", "дней")}, план ${volume} шт.${pay ? `, около ${rub(pay)}` : ""}`
       : offset === 0
         ? "На этой неделе выходов пока нет"
         : "На следующей неделе выходов пока нет";
@@ -427,5 +432,28 @@ function ReportDue({ week, onOpen }: { week: Week | null | undefined; onOpen: (d
         );
       })}
     </>
+  );
+}
+
+/** «Стажировка: 7 из 20» — training units are not paid; at the target it waits for the curators' check. */
+function Internship({ p }: { p: StageProgress }) {
+  const pct = Math.min(100, Math.round((p.units / Math.max(p.target, 1)) * 100));
+  return (
+    <section className="row-in space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="font-semibold">🎓 Стажировка</h2>
+        <span className={cn("text-sm font-semibold", p.review ? "text-wait" : "text-muted-foreground")}>
+          {p.review ? "на проверке" : `${p.units} из ${p.target}`}
+        </span>
+      </div>
+      <div className="relative h-2.5 overflow-hidden rounded-full bg-muted">
+        <span className={cn("bar-draw absolute inset-y-0 left-0 rounded-full", p.review ? "bg-go" : "bg-primary")} style={{ width: `${pct}%` }} />
+      </div>
+      <p className="text-sm text-muted-foreground">
+        {p.review
+          ? "Цель стажировки набрана — кураторы проверят результат и сообщат в боте."
+          : `Эти ${p.target} единиц учебные и не оплачиваются. Считаются принятые отчёты${p.pending ? `, ещё ${p.pending} шт. на проверке` : ""}.`}
+      </p>
+    </section>
   );
 }

@@ -497,12 +497,17 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
         from . import rates as rates_mod
 
         own = rates_mod.for_user(conn, shift["user_id"])
-    if volume:
+    if shift.get("training"):
+        # a trainee's training shift is not paid
+        data.update(training=True, rate=0, expected_pay=0, lazy=False)
+        if shift.get("fact_volume") is not None:
+            data["fact_pay"] = 0
+    elif volume:
         data.update(
             rate=pricing.calculate_rate(volume, own), expected_pay=pricing.expected_pay(volume, own),
             lazy=pricing.is_lazy(volume, own)
         )
-    if shift.get("fact_volume") is not None:
+    if shift.get("fact_volume") is not None and not shift.get("training"):
         data["fact_pay"] = pricing.expected_pay(shift["fact_volume"], own)
     if conn is not None:
         from . import reports  # reports builds on this module
@@ -1018,7 +1023,9 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
     for r in rows:
         s = dict(r)
         notes = []
-        if s["volume"] and pricing.is_lazy(s["volume"], own):
+        if s["training"]:
+            notes.append("Учебная")
+        elif s["volume"] and pricing.is_lazy(s["volume"], own):
             notes.append("Налог на лень")
         if s["is_urgent"]:
             notes.append("Срочная")
@@ -1026,10 +1033,12 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
             notes.append(f"Штраф {s['penalty_amount']} ₽" if s["penalty_amount"] is not None else "Штраф не назначен")
         if s["status"] in ACTIVE:
             active_volume += s["volume"]
-            pay += pricing.expected_pay(s["volume"], own)
+            if not s["training"]:
+                pay += pricing.expected_pay(s["volume"], own)
             if s["fact_volume"] is not None:
                 fact_volume += s["fact_volume"]
-                fact_pay += pricing.expected_pay(s["fact_volume"], own)
+                if not s["training"]:
+                    fact_pay += pricing.expected_pay(s["fact_volume"], own)
             elif s["shift_date"] < today_local().isoformat():
                 fact_missing += 1
         elif s["status"] in ("cancelled", "finally_cancelled") and s["volume"]:

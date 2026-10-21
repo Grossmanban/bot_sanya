@@ -165,8 +165,10 @@ export function ShiftForm({
             <Plus className="size-5" />
           </button>
         </div>
-        <p className={cn("pt-1 text-sm", lazy ? "text-wait" : "text-muted-foreground")}>
-          {!hasVolume
+        <p className={cn("pt-1 text-sm", lazy && !pricing.training ? "text-wait" : "text-muted-foreground")}>
+          {pricing.training
+            ? "Учебная смена: не оплачивается, штуки идут в стажировку."
+            : !hasVolume
             ? `${pricing.base_rate} ₽ за штуку.` +
               (pricing.lazy_threshold > 0 ? ` Меньше ${pricing.lazy_threshold} шт. за день — ${pricing.lazy_rate} ₽.` : "")
             : lazy

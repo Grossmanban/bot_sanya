@@ -330,11 +330,17 @@ function ShiftView({ shift }: { shift: Shift }) {
             </span>
           </Fact>
           <Fact label="Объём">{shift.volume} шт.</Fact>
-          <Fact label="Ставка">
-            {shift.rate} ₽ за шт.
-            {shift.lazy && <span className="block text-xs text-wait">налог на лень</span>}
-          </Fact>
-          {!struck && shift.expected_pay != null && <Fact label="План заработка">{rub(shift.expected_pay)}</Fact>}
+          {shift.training ? (
+            <Fact label="Оплата">Учебная смена — не оплачивается</Fact>
+          ) : (
+            <>
+              <Fact label="Ставка">
+                {shift.rate} ₽ за шт.
+                {shift.lazy && <span className="block text-xs text-wait">налог на лень</span>}
+              </Fact>
+              {!struck && shift.expected_pay != null && <Fact label="План заработка">{rub(shift.expected_pay)}</Fact>}
+            </>
+          )}
         </dl>
       </div>
       {status === "awaiting_approval" && (
