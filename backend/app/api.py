@@ -142,6 +142,9 @@ class EventPatch(BaseModel):
 class GoalPatch(BaseModel):
     version: int
     notify: bool = False
+    reset_time: str | None = None
+    location: str | None = None
+    forever: bool | None = None
     title: str | None = None
     description: str | None = None
     target: int | None = None
@@ -188,6 +191,10 @@ class GoalBody(BaseModel):
     prize: str | None = None
     prize_type: str | None = None
     prize_photo: str | None = None
+    user_ids: list[int] | None = None   # a group goal: the people ticked
+    location: str | None = None         # a point goal
+    reset_time: str | None = None
+    forever: bool = False               # a point goal «каждый день, бессрочно»
     idempotency_key: str
 
 
@@ -1080,8 +1087,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/goals")
     async def admin_goal_create(body: GoalBody, admin: dict = Depends(admin_user)):
+        date_to = date.fromisoformat(goals.FOREVER) if body.forever else svc.parse_date(body.date_to)
         goal = goals.create(conn, admin, title=body.title, kind=body.kind, target=body.target,
-                            date_from=svc.parse_date(body.date_from), date_to=svc.parse_date(body.date_to),
+                            date_from=svc.parse_date(body.date_from), date_to=date_to, user_ids=body.user_ids,
+                            location=body.location, reset_time=body.reset_time,
                             key=body.idempotency_key, description=body.description, user_id=body.user_id,
                             network_id=body.network_id, mode=body.mode, prize=body.prize, prize_type=body.prize_type,
                             prize_photo=body.prize_photo)
@@ -1090,11 +1099,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.patch("/admin/goals/{goal_id}")
     async def admin_goal_update(goal_id: int, body: GoalPatch, admin: dict = Depends(admin_user)):
-        sent = body.model_fields_set - {"version", "notify", "idempotency_key"}
+        sent = body.model_fields_set - {"version", "notify", "idempotency_key", "forever"}
         changes = {k: getattr(body, k) for k in sent}
         for k in ("date_from", "date_to"):
             if changes.get(k) is not None:
                 changes[k] = svc.parse_date(changes[k])
+        if body.forever:
+            changes["date_to"] = date.fromisoformat(goals.FOREVER)
         result = goals.update(conn, admin, goal_id, body.version, changes, body.idempotency_key)
         if result.critical and body.notify:
             notifier.spawn(notifier.goal_updated(result))

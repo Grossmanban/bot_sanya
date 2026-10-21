@@ -45,6 +45,9 @@ def can_manage(conn: sqlite3.Connection, actor: dict | None, kind: str, item: di
         return False
     if kind == "goal" and item["kind"] == "personal":
         return perms.manages(actor, svc.get_user(conn, item["user_id"]))
+    if kind == "goal" and item["kind"] == "group":  # their own group of their own people
+        ids = [r[0] for r in conn.execute("SELECT user_id FROM goal_participants WHERE goal_id = ?", (item["id"],))]
+        return bool(ids) and all(perms.manages(actor, svc.get_user(conn, i)) for i in ids)
     return item["network_id"] == actor["network_id"]
 
 
