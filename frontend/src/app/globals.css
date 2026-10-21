@@ -157,6 +157,7 @@ html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   touch-action: manipulation; /* no double-tap zoom */
+  overflow-anchor: none; /* the remembered scroll position is held by lib/scroll, not shifted by the browser */
 }
 
 /* safe areas: device notch + Telegram fullscreen controls */
