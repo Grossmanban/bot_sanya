@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import date, datetime, timedelta
+from urllib.parse import parse_qs
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
@@ -8,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import broadcasts, day_actual, events, finance, goals, lifecycle, networks, payouts, rates, reports, violations
+from . import broadcasts, day_actual, events, finance, goals, lifecycle, networks, payouts, rates, recruiting, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -349,6 +350,42 @@ class BroadcastTest(BaseModel):
     allow_reply: bool = False
 
 
+class ApplicationBody(BaseModel):
+    """The questionnaire (the customer's module 3)."""
+    full_name: str
+    age: int
+    metro: str
+    min_days: int
+    training_days: list[int]
+    communication: int
+    truthful: bool = False
+    consent: bool = False
+
+
+class TrainingBody(BaseModel):
+    date: str
+    time: str
+    location: str
+    trainer_id: int
+    idempotency_key: str
+
+
+class RejectBody(BaseModel):
+    reason: str | None = None
+    idempotency_key: str
+
+
+class ContactBody(BaseModel):
+    manager: str | None = None
+
+
+class StageBody(BaseModel):
+    stage: int
+    counted: int
+    bonus: int = 0
+    idempotency_key: str
+
+
 class TemplateBody(BaseModel):
     title: str
     html: str
@@ -496,8 +533,18 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         user = svc.ensure_admin(conn, tg["id"], tg.get("first_name", ""), tg.get("last_name", ""), tg.get("username"))
         if user is None:
             return {"registered": False, "bot_username": app.state.bot_username}
+        application = recruiting.current(conn, user["id"])
+        if user["status"] != "approved":
+            # a candidate: the questionnaire (none yet / returned to the reserve) or where it stands
+            return {"registered": True, "user": public_user(user), "bot_username": app.state.bot_username,
+                    "application": {"status": application["status"], "training": {
+                        k: application[k] for k in ("training_date", "training_time", "training_location")}}
+                    if application else None}
         return {
             "registered": True,
+            # the customer's module 3: a trainee sees the internship's progress
+            "internship": recruiting.progress(conn, application, user)
+            if application and recruiting.is_trainee(user) else None,
             "user": public_user(user),
             "role_title": perms.ROLE_TITLES[perms.role_of(user)],
             "events": len(events.visible(conn, user)),
@@ -506,6 +553,23 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "pricing": pricing.pricing_info(rates.for_user(conn, user["id"])),
             "bot_username": app.state.bot_username,
         }
+
+    @api.post("/register")
+    async def register(body: ApplicationBody, request: Request, tg: dict = Depends(tg_user)):
+        """The questionnaire from the Mini App. A referral comes as start_param=ref_<code> in the signed initData."""
+        params = parse_qs(request.headers.get("x-telegram-init-data", ""))
+        start_param = (params.get("start_param") or [None])[0]
+        user, application = recruiting.submit(conn, tg, body.model_dump(), start_param)
+        notifier.spawn(notifier.application_submitted(application))
+        return {"application": {"status": application["status"]}}
+
+    @api.get("/me/referrals")
+    async def my_referrals(user: dict = Depends(current_user)):
+        code = recruiting.ref_code(conn, user)
+        bot = app.state.bot_username
+        return {"code": code, "link": f"https://t.me/{bot}?startapp=ref_{code}" if bot else None,
+                "items": recruiting.referrals(conn, user),
+                "targets": {k: app_settings.get_all(conn)[k] for k in ("internship_units", "second_stage_units")}}
 
     @api.patch("/me/work-status")
     async def work_status(body: WorkStatus, user: dict = Depends(current_user)):
@@ -1316,6 +1380,74 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"file_id": file_id}
 
     # ------------------------------------------------------------ broadcast templates
+
+    # ------------------------------------------------------------ onboarding (the customer's module 3)
+
+    def application_out(a: dict) -> dict:
+        return {**recruiting.view(conn, a), "avatar_url": media.photo_url(a["user_id"], kind="avatar")}
+
+    @api.get("/admin/onboarding")
+    async def admin_onboarding(tab: str = "new", _: dict = Depends(staff("registrations"))):
+        people = [{"id": u["id"], "name": svc.full_name(u), "username": u["username"]}
+                  for u in svc.list_users(conn) if u["account_state"] == "active"]
+        cfg = app_settings.get_all(conn)
+        return {"items": [application_out(a) for a in recruiting.listing(conn, tab)], "counts": recruiting.counts(conn),
+                "trainers": people, "points": [p["name"] for p in svc.list_points(conn)],
+                "targets": {k: cfg[k] for k in ("internship_units", "second_stage_units")}}
+
+    @api.post("/admin/onboarding/{app_id}/training")
+    async def admin_training(app_id: int, body: TrainingBody, admin: dict = Depends(staff("registrations"))):
+        a, changed = recruiting.assign_training(conn, admin, app_id, svc.parse_date(body.date), body.time, body.location,
+                                                body.trainer_id, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.training_assigned(a))
+        return {"application": application_out(a)}
+
+    @api.post("/admin/onboarding/{app_id}/reject")
+    async def admin_application_reject(app_id: int, body: RejectBody, admin: dict = Depends(staff("registrations"))):
+        a, changed = recruiting.reject(conn, admin, app_id, body.reason, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.application_rejected(a))
+        return {"application": application_out(a)}
+
+    @api.post("/admin/onboarding/{app_id}/return")
+    async def admin_application_return(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        a, changed = recruiting.return_to_reserve(conn, admin, app_id, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.application_returned(a))
+        return {"application": application_out(a)}
+
+    @api.post("/admin/onboarding/{app_id}/contact")
+    async def admin_application_contact(app_id: int, body: ContactBody, admin: dict = Depends(staff("registrations"))):
+        a = recruiting.contact(conn, admin, app_id, body.manager)
+        notifier.spawn(notifier.application_contact(a))
+        return {"application": application_out(a)}
+
+    @api.post("/admin/onboarding/{app_id}/internship")
+    async def admin_internship(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        a, changed = recruiting.start_internship(conn, admin, app_id, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.internship_started(a))
+        return {"application": application_out(a)}
+
+    @api.post("/admin/onboarding/{app_id}/stage")
+    async def admin_stage(app_id: int, body: StageBody, admin: dict = Depends(staff("registrations"))):
+        a, tx, changed = recruiting.confirm_stage(conn, admin, app_id, body.stage, body.counted, body.bonus,
+                                                  body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.stage_confirmed(a, body.stage, tx))
+        return {"application": application_out(a)}
+
+    @api.get("/media/avatar/{user_id}")
+    async def avatar(user_id: int, exp: int, sig: str):
+        """The candidate's Telegram profile photo for the onboarding card."""
+        if not media.verify(user_id, exp, sig, kind="avatar"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        user = svc.get_user(conn, user_id)
+        found = await notifier.fetch_avatar(user["telegram_id"]) if user else None
+        if found is None:
+            raise svc.ServiceError("Фото нет", 404, "not_found")
+        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
     @api.get("/admin/broadcast-templates")
     async def admin_templates(admin: dict = Depends(staff("broadcast_network"))):

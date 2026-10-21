@@ -118,7 +118,7 @@ class Book:
         if team:
             for r in conn.execute(
                 f"""SELECT shift_date, SUM(fact_volume) AS v FROM shifts WHERE status IN {ACTIVE}
-                    AND report_state = 'approved' AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ?
+                    AND report_state = 'approved' AND fact_volume IS NOT NULL AND training = 0 AND shift_date BETWEEN ? AND ?
                     AND user_id IN ({','.join('?' * len(team))}) GROUP BY shift_date""",
                 (start.isoformat(), end.isoformat(), *team)):
                 by_day[r["shift_date"]] = r["v"]

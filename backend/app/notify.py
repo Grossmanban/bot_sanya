@@ -593,6 +593,140 @@ class Notifier:
         self._photo_cache[file_id] = item
         return item
 
+    async def fetch_avatar(self, telegram_id: int) -> tuple[bytes, str] | None:
+        """A person's current Telegram profile photo (the onboarding card), None if hidden or absent."""
+        if self.bot is None:
+            return None
+        try:
+            photos = await self._retry(lambda: self.bot.get_user_profile_photos(telegram_id, limit=1))
+        except Exception as exc:
+            log.warning("profile photo of %s: %s", telegram_id, exc)
+            return None
+        if not photos.photos:
+            return None
+        return await self.fetch_photo(photos.photos[0][-1].file_id)
+
+    # ------------------------------------------------------------ recruiting (the customer's module 3)
+
+    def _application_who(self, app: dict) -> str:
+        from . import recruiting
+
+        user = svc.get_user(self.conn, app["user_id"])
+        ref = svc.get_user(self.conn, app["referrer_id"]) if app["referrer_id"] else None
+        return (f"👤 <a href=\"tg://user?id={user['telegram_id']}\">{escape(app['full_name'])}</a>"
+                f"{' @' + escape(user['username']) if user['username'] else ''}, {app['age']} лет, м. {escape(app['metro'])}\n"
+                f"Дней в неделю: от {app['min_days']}, обучение: {recruiting.days_text(app)}, общение: {app['communication']}/10"
+                + (f"\nПригласил(а): {escape(svc.full_name(ref))}" if ref else ""))
+
+    async def application_submitted(self, app: dict) -> None:
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🧑‍🎓 Открыть «Онбординг»", web_app=WebAppInfo(url=settings.webapp_url))]]) \
+            if settings.webapp_url.startswith("https://") else None
+        await self.to_admins(f"📝 <b>Новая анкета кандидата</b>\n{self._application_who(app)}", markup)
+
+    def _training_text(self, app: dict) -> str:
+        from datetime import date as _date
+
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+        handle = f"@{trainer['username']} ({escape(svc.full_name(trainer))})" if trainer["username"] else escape(svc.full_name(trainer))
+        day = _date.fromisoformat(app["training_date"])
+        return (f"📅 <b>Ваше обучение запланировано!</b>\n🗓 Дата: {ddmm_wd(day)}\n⏰ Время: {app['training_time']}\n"
+                f"📍 Место: {escape(app['training_location'])}\n👨‍🏫 Ваш тренер: {handle}\n\n"
+                "‼️ <b>ВАЖНО:</b> в случае неявки без предупреждения тренера дальнейшее сотрудничество может быть прекращено.\n"
+                "✅ Пожалуйста, нажмите кнопку ниже, чтобы подтвердить запись.")
+
+    async def training_assigned(self, app: dict) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")]])
+        await self.send(user["telegram_id"], self._training_text(app), markup)
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+        await self.send(trainer["telegram_id"], f"🧑‍🎓 <b>Вам назначен кандидат на обучение</b>\n"
+                                                f"{app['training_date'][8:10]}.{app['training_date'][5:7]} в {app['training_time']}, "
+                                                f"{escape(app['training_location'])}\n{self._application_who(app)}\n"
+                                                "Сообщу, когда кандидат подтвердит запись.")
+
+    async def training_confirmed(self, app: dict) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        await self.send(user["telegram_id"], "✅ Вы успешно записаны. Ждём вас!")
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+        text = (f"✅ Кандидат {escape(app['full_name'])} подтвердил запись на обучение "
+                f"{app['training_date'][8:10]}.{app['training_date'][5:7]} в {app['training_time']}, {escape(app['training_location'])}.")
+        await self.send(trainer["telegram_id"], text)
+
+    async def training_reminder(self, app: dict, kind: str) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        head = "⏰ <b>Напоминание: завтра обучение</b>" if kind == "eve" else "⏰ <b>Сегодня ваше обучение</b>"
+        markup = None if app["training_confirmed_at"] else InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")]])
+        await self.send(user["telegram_id"], head + "\n\n" + self._training_text(app).split("\n\n")[0].split("\n", 1)[1], markup)
+
+    async def application_rejected(self, app: dict) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        text = "К сожалению, мы вынуждены отказать вам в сотрудничестве."
+        if app["reject_reason"]:
+            text += f"\nПричина: {escape(app['reject_reason'])}"
+        await self.send(user["telegram_id"], text)
+
+    async def application_returned(self, app: dict) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="📝 Заполнить анкету", web_app=WebAppInfo(url=settings.webapp_url))]]) \
+            if settings.webapp_url.startswith("https://") else None
+        await self.send(user["telegram_id"], "Ваш отказ был пересмотрен. Пожалуйста, заполните анкету заново.", markup)
+
+    async def application_contact(self, app: dict) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Я написал менеджеру", callback_data=f"ctw:{app['id']}")],
+            [InlineKeyboardButton(text="🙈 Не могу написать первым", callback_data=f"ctc:{app['id']}")]])
+        await self.send(user["telegram_id"], "🎉 <b>Хорошие новости!</b> Мы готовы вас рассмотреть. Давайте обсудим детали "
+                                             f"обучения. Свяжитесь с нашим представителем: @{escape(app['contact_manager'])}",
+                        markup)
+
+    async def contact_answered(self, app: dict) -> None:
+        name = escape(app["full_name"])
+        user = svc.get_user(self.conn, app["user_id"])
+        link = f"<a href=\"tg://user?id={user['telegram_id']}\">{name}</a>" + (f" @{escape(user['username'])}" if user["username"] else "")
+        text = (f"✍️ Кандидат {link} сообщил, что связался с вами (@{escape(app['contact_manager'])})."
+                if app["contact_answer"] == "wrote" else
+                f"⚠️ Кандидат {link} просит написать ему сам. Причина: ограничения аккаунта или стеснение. "
+                f"Менеджер: @{escape(app['contact_manager'])}")
+        manager = self.conn.execute("SELECT telegram_id FROM users WHERE lower(username) = lower(?)",
+                                    (app["contact_manager"],)).fetchone()
+        if manager:
+            await self.send(manager[0], text)
+        await self.to_admins(text, exclude=manager[0] if manager else None)
+
+    async def internship_started(self, app: dict) -> None:
+        from . import recruiting
+
+        user = svc.get_user(self.conn, app["user_id"])
+        units = recruiting.progress(self.conn, app, user)["target"]
+        await self.send(user["telegram_id"],
+                        f"🎓 <b>Добро пожаловать на стажировку!</b>\nЦель стажировки: {units} единиц. "
+                        "Эти единицы учебные и не оплачиваются.\nЗаписывайтесь в график и сдавайте отчёты в приложении, "
+                        "как все сотрудники — прогресс виден на главном экране.", _open_schedule())
+
+    async def stage_reached(self, app: dict) -> None:
+        what = "набрал(а) стажировку" if app["stage"] == 1 else "отработал(а) второй этап"
+        await self.to_admins(f"🎯 <b>{escape(app['full_name'])}</b> {what}: {app['units']} из {app['target']} шт. "
+                             "Проверьте и подтвердите в «Онбординг».", _open_admin())
+
+    async def stage_confirmed(self, app: dict, stage: int, tx: dict | None) -> None:
+        user = svc.get_user(self.conn, app["user_id"])
+        counted = app[f"stage{stage}_counted"]
+        if stage == 1:
+            await self.send(user["telegram_id"], f"✅ Стажировка засчитана: {counted} шт. Теперь вы в команде — "
+                                                 "дальше смены оплачиваются как обычно.")
+        if app["referrer_id"]:
+            ref = svc.get_user(self.conn, app["referrer_id"])
+            step = "прошёл стажировку" if stage == 1 else "отработал второй этап"
+            text = f"🤝 Ваш приглашённый {escape(app['full_name'])} {step}: засчитано {counted} шт."
+            if tx:
+                text += f"\n💰 Бонус {tx['amount']} ₽ начислен."
+            await self.send(ref["telegram_id"], text)
+
     async def archive(self, tags: list[str], text: str, person: dict | None = None, photo: str | None = None) -> bool:
         """Copy an important action to the private archive group with hashtags for search.
         Never raises: the business action already happened; a failed copy is logged in archive_log."""

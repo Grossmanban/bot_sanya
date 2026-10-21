@@ -808,6 +808,61 @@ def _goal_kinds(conn: sqlite3.Connection) -> None:
 
 MIGRATIONS.append(_goal_kinds)
 
+# the customer's module 3 — recruiting: referral links, the questionnaire in the Mini App, onboarding
+# (training → internship of N unpaid units → the referrer's bonuses), training shifts kept out of pay
+MIGRATIONS.append("""
+ALTER TABLE users ADD COLUMN ref_code TEXT;
+CREATE UNIQUE INDEX ux_users_ref_code ON users (ref_code) WHERE ref_code IS NOT NULL;
+ALTER TABLE users ADD COLUMN referrer_id INTEGER REFERENCES users(id);
+ALTER TABLE users ADD COLUMN trainee_since TEXT;
+ALTER TABLE users ADD COLUMN trainee_done_at TEXT;
+ALTER TABLE shifts ADD COLUMN training INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE referral_hits (
+    telegram_id  INTEGER PRIMARY KEY,
+    referrer_id  INTEGER NOT NULL REFERENCES users(id),
+    created_at   TEXT NOT NULL
+);
+CREATE TABLE applications (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                INTEGER NOT NULL REFERENCES users(id),
+    status                 TEXT NOT NULL DEFAULT 'new'
+                           CHECK (status IN ('new','scheduled','internship','done','rejected','returned')),
+    full_name              TEXT NOT NULL,
+    age                    INTEGER NOT NULL,
+    metro                  TEXT NOT NULL,
+    min_days               INTEGER NOT NULL,
+    training_days          TEXT NOT NULL,
+    communication          INTEGER NOT NULL,
+    referrer_id            INTEGER REFERENCES users(id),
+    consent_at             TEXT NOT NULL,
+    created_at             TEXT NOT NULL,
+    reject_reason          TEXT,
+    decided_by             INTEGER,
+    decided_at             TEXT,
+    training_date          TEXT,
+    training_time          TEXT,
+    training_location      TEXT,
+    trainer_id             INTEGER REFERENCES users(id),
+    training_set_by        INTEGER,
+    training_set_at        TEXT,
+    training_confirmed_at  TEXT,
+    reminded_eve           TEXT,
+    reminded_morning       TEXT,
+    contact_manager        TEXT,
+    contacted_at           TEXT,
+    contact_answer         TEXT CHECK (contact_answer IS NULL OR contact_answer IN ('wrote','cant_write')),
+    contact_answer_at      TEXT,
+    stage1_counted         INTEGER,
+    stage1_bonus_tx        INTEGER REFERENCES financial_transactions(id),
+    stage1_at              TEXT,
+    stage2_counted         INTEGER,
+    stage2_bonus_tx        INTEGER REFERENCES financial_transactions(id),
+    stage2_at              TEXT
+);
+CREATE INDEX ix_applications_status ON applications (status, created_at);
+CREATE INDEX ix_applications_user ON applications (user_id);
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

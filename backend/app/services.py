@@ -667,12 +667,14 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
         urgent = day == today
         status = "awaiting_approval" if urgent else "active"
         now = now_iso()
+        # a trainee's shifts are training ones: in the schedule as «стажёр», not paid (the customer's module 3)
+        training = bool(user.get("trainee_since") and not user.get("trainee_done_at"))
         cur = conn.execute(
             """INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status,
-                                   is_urgent, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   is_urgent, created_at, updated_at, training)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user["id"], day.isoformat(), data["start_time"], data["end_time"], data["volume"], data["location"],
-             status, int(urgent), now, now),
+             status, int(urgent), now, now, int(training)),
         )
         event = "SHIFT_URGENT_REQUESTED" if urgent else "SHIFT_CREATED"
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type=event, key=key,
@@ -962,6 +964,8 @@ def raspred(conn, day: date, viewer: dict | None = None) -> dict:
         name = full_name(s)
         if s["username"]:
             name += f" (@{s['username']})"
+        if s.get("training"):
+            name += " — стажёр"
         lines.append(f"{s['start_time']}–{s['end_time']} — {name} — {s['volume']} шт. — {s['location']}")
     total_volume = sum(s["volume"] for s in shifts)
     title = f" · сеть «{network[0]}»" if network else ""
@@ -983,6 +987,7 @@ def raspred(conn, day: date, viewer: dict | None = None) -> dict:
                 "end_time": s["end_time"],
                 "volume": s["volume"],
                 "location": s["location"],
+                "trainee": bool(s.get("training")),
             }
             for s in shifts
         ],

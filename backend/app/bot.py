@@ -20,7 +20,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import broadcasts, day_actual, finance, reports
+from . import broadcasts, day_actual, finance, recruiting, reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -113,22 +113,34 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
 
     # ------------------------------------------------------------ /start and registration
 
+    def questionnaire_keyboard() -> InlineKeyboardMarkup:
+        """The questionnaire lives in the Mini App (the customer's module 3); without HTTPS — the old chat flow."""
+        if settings.webapp_url.startswith("https://"):
+            return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="📝 Заполнить анкету", web_app=WebAppInfo(url=settings.webapp_url))]])
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Регистрация", callback_data="register")]])
+
     @router.message(CommandStart(), F.chat.type == "private")
     async def start(message: Message, state: FSMContext):
         tg = message.from_user
+        param = (message.text or "").split(maxsplit=1)[1:]  # /start ref_<code> — a referral link
+        if param and param[0].startswith("ref_"):
+            recruiting.remember_referral(conn, tg.id, param[0])
         user = svc.ensure_admin(conn, tg.id, tg.first_name or "", tg.last_name or "", tg.username)
         if user is None:
             await state.clear()
-            await message.answer(
-                "Вы ещё не зарегистрированы в системе.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="Регистрация", callback_data="register")
-                ]]),
-            )
+            await message.answer("👋 Добро пожаловать! Чтобы присоединиться к команде, заполните короткую анкету.",
+                                 reply_markup=questionnaire_keyboard())
             return
         svc.touch_username(conn, user, tg.username)
         if user["status"] == "pending":
-            await message.answer("Ваша заявка уже на рассмотрении. Мы сообщим, когда администратор её рассмотрит.")
+            application = recruiting.current(conn, user["id"])
+            if application is None:  # returned to the reserve, or an old chat request
+                await message.answer("Заполните анкету, чтобы мы могли рассмотреть вашу кандидатуру.",
+                                     reply_markup=questionnaire_keyboard())
+            else:
+                await message.answer("Ваша анкета на рассмотрении. Не выключайте уведомления — бот напишет, когда "
+                                     "согласует с тренерами день, время и место обучения.")
         elif user["status"] == "rejected":
             await message.answer("В доступе отказано.")
         elif user["account_state"] == "blocked":
@@ -608,6 +620,36 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         except Exception:
             log.debug("could not mark the broadcast as read", exc_info=True)
         await call.answer("Учтено")
+
+    # ------------------------------------------------------------ recruiting: the candidate's buttons
+
+    @router.callback_query(F.data.startswith("trc:"))
+    async def training_confirm(call: CallbackQuery):
+        try:
+            application, changed = recruiting.confirm_training(conn, call.from_user.id, int(call.data.split(":")[1]))
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            log.debug("could not drop the confirm button", exc_info=True)
+        await call.answer("Вы записаны" if changed else "Запись уже подтверждена")
+        if changed:
+            await notifier.training_confirmed(application)
+
+    @router.callback_query(F.data.startswith("ctw:") | F.data.startswith("ctc:"))
+    async def contact_reply(call: CallbackQuery):
+        kind, app_id = call.data.split(":")
+        try:
+            application, changed = recruiting.contact_answer(conn, call.from_user.id, int(app_id),
+                                                             "wrote" if kind == "ctw" else "cant_write")
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        await call.answer("Спасибо, менеджер получил сообщение" if kind == "ctw" else "Менеджер напишет вам сам")
+        if changed:
+            await notifier.contact_answered(application)
 
     # ------------------------------------------------------------ «Ответить» on a broadcast
 
