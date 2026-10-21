@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CalendarCheck, Check, ChevronLeft, Clock3, Info, LoaderCircle, Pencil, UserPlus } from "lucide-react";
+import { BellRing, CalendarCheck, Check, ChevronLeft, Clock3, Info, LoaderCircle, MessageCircle, Pencil, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -17,14 +17,14 @@ import { Button } from "@/components/ui/button";
 import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer";
 import { api, ApiError, type ApplicationForm, type Me } from "@/lib/api";
 import { dayMonth, plural } from "@/lib/format";
-import { haptic, tapHaptic } from "@/lib/telegram";
+import { ensureWriteAccess, haptic, openBotChat, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 
 const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 const field = "h-12 w-full rounded-2xl border-0 bg-card px-4 text-base shadow-lift outline-none focus:ring-2 focus:ring-ring/25";
 
 /** The questionnaire (the customer's module 3): start → 4 steps → a draft to check and edit → sent. */
-export function Registration({ onSent }: { onSent: () => void }) {
+export function Registration({ onSent, botUsername }: { onSent: () => void; botUsername?: string | null }) {
   const [step, setStep] = useState(0); // 0 — start, 1–4 — steps, 5 — the draft
   const [back, setBack] = useState<number | null>(null); // edit from the draft: «Готово» returns there
   const [form, setForm] = useState<ApplicationForm>({
@@ -34,6 +34,7 @@ export function Registration({ onSent }: { onSent: () => void }) {
   const [consentText, setConsentText] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
+  const [noWrite, setNoWrite] = useState(false); // refused to let the bot write: notifications would never come
   const set = (patch: Partial<ApplicationForm>) => setForm((f) => ({ ...f, ...patch }));
 
   const ok: Record<number, boolean> = {
@@ -68,7 +69,47 @@ export function Registration({ onSent }: { onSent: () => void }) {
     }
   }
 
+  // the bot must be able to write first: training, reminders and shifts come only through it
+  async function begin() {
+    tapHaptic();
+    setBusy(true);
+    const granted = await ensureWriteAccess();
+    setBusy(false);
+    if (granted === false) {
+      haptic("warning");
+      setNoWrite(true);
+    } else {
+      setNoWrite(false);
+      setStep(1);
+    }
+  }
+
   if (sent) return <Sent onDone={onSent} />;
+
+  if (noWrite) {
+    return (
+      <Screen>
+        <div className="flex flex-1 flex-col items-center justify-center text-center">
+          <span className="grid size-16 place-items-center rounded-3xl bg-card shadow-lift"><BellRing className="size-7" strokeWidth={1.8} /></span>
+          <h1 className="mt-6 font-display text-2xl font-semibold">Разрешите боту писать вам</h1>
+          <p className="mt-3 max-w-xs text-[15px] text-muted-foreground">
+            Дата обучения, напоминания и смены приходят только сообщениями от бота. Без разрешения вы их не получите.
+          </p>
+        </div>
+        <div className="grid gap-2">
+          <Button size="lg" className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={busy} onClick={begin}>
+            {busy && <LoaderCircle className="animate-spin" />} Разрешить
+          </Button>
+          {botUsername && (
+            <Button size="lg" variant="secondary" className="press h-14 w-full rounded-2xl text-base font-semibold"
+                    onClick={() => openBotChat(botUsername)}>
+              <MessageCircle /> Открыть чат с ботом
+            </Button>
+          )}
+        </div>
+      </Screen>
+    );
+  }
 
   if (step === 0) {
     return (
@@ -78,8 +119,8 @@ export function Registration({ onSent }: { onSent: () => void }) {
           <h1 className="mt-6 font-display text-2xl font-semibold">Присоединяйтесь к команде</h1>
           <p className="mt-3 max-w-xs text-[15px] text-muted-foreground">Анкета займёт пару минут. После неё кураторы назначат обучение.</p>
         </div>
-        <Button size="lg" className="press h-14 w-full rounded-2xl text-base font-semibold" onClick={() => { tapHaptic(); setStep(1); }}>
-          Зарегистрироваться
+        <Button size="lg" className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={busy} onClick={begin}>
+          {busy && <LoaderCircle className="animate-spin" />} Зарегистрироваться
         </Button>
       </Screen>
     );

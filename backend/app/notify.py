@@ -622,7 +622,13 @@ class Notifier:
         markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text="🧑‍🎓 Открыть «Онбординг»", web_app=WebAppInfo(url=settings.webapp_url))]]) \
             if settings.webapp_url.startswith("https://") else None
-        await self.to_admins(f"📝 <b>Новая анкета кандидата</b>\n{self._application_who(app)}", markup)
+        user = svc.get_user(self.conn, app["user_id"])
+        # the candidate hears back in the chat; when the bot can't write, the staff know to reach out themselves
+        reached = await self.send(user["telegram_id"], "📝 Анкета получена! Бот напишет сюда, когда назначат обучение. "
+                                                       "Не выключайте уведомления от бота.")
+        warn = "" if reached or self.bot is None else ("\n⚠️ Бот не может написать кандидату: он не открыл чат с ботом. "
+                                                       "Свяжитесь с ним в Telegram сами.")
+        await self.to_admins(f"📝 <b>Новая анкета кандидата</b>\n{self._application_who(app)}{warn}", markup)
 
     def _training_text(self, app: dict) -> str:
         from datetime import date as _date

@@ -44,7 +44,7 @@ export function Referrals() {
       <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
         <h2 className="font-semibold">Ваша ссылка-приглашение</h2>
         <p className="text-sm text-muted-foreground">
-          Друг заполнит анкету по ссылке. Когда он пройдёт стажировку ({data.targets.internship_units} ед.) и потом
+          Ссылка откроет чат с ботом: друг нажмёт «Старт» и заполнит анкету, а бот сможет присылать ему уведомления. Когда он пройдёт стажировку ({data.targets.internship_units} ед.) и потом
           отработает {data.targets.second_stage_units} ед., вам начислят бонусы.
         </p>
         {link ? (

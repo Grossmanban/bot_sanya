@@ -97,7 +97,7 @@ export function MiniApp() {
     body = <LoadingScreen />;
   } else if (!me.registered || !me.user || (me.user.status === "pending" && !me.application)) {
     // the questionnaire (the customer's module 3): a new person, or one returned to the reserve
-    body = <Registration onSent={loadMe} />;
+    body = <Registration onSent={loadMe} botUsername={me.bot_username} />;
   } else if (me.user.status === "pending" && me.application) {
     body = <ApplicationStatus application={me.application} />;
   } else if (me.user.status !== "approved") {

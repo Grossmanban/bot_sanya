@@ -41,6 +41,18 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
     assert e.value.code == "already_sent"
     assert [r["status"] for r in recruiting.referrals(conn, friend)] == ["new"]
 
+    # the candidate hears back in the chat; when the bot can't reach them, the staff are warned
+    class Unreachable(FakeNotifier):
+        async def send(self, chat_id, text, markup=None):
+            await super().send(chat_id, text, markup)
+            return chat_id != 5001
+
+    n = Unreachable(conn)
+    n.bot = object()
+    run(n.application_submitted(app))
+    assert any(chat == 5001 and "Анкета получена" in t for chat, t in n.sent)
+    assert any(chat == 999 and "Бот не может написать кандидату" in t for chat, t in n.sent)
+
     # the training: set, confirmed by the candidate, reminded once (not right after it was set)
     day = now_local().date() + timedelta(days=1)
     app, changed = recruiting.assign_training(conn, owner, app["id"], day, "11:00", "Европа", trainer["id"], svc.new_key())

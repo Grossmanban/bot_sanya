@@ -5,7 +5,12 @@ type HapticNotification = "success" | "error" | "warning";
 
 interface TelegramWebApp {
   initData: string;
-  initDataUnsafe: { user?: { id: number; first_name?: string; last_name?: string; username?: string } };
+  initDataUnsafe: {
+    user?: { id: number; first_name?: string; last_name?: string; username?: string; allows_write_to_pm?: boolean };
+    start_param?: string;
+  };
+  /** Bot API 6.9: ask the person to let the bot write to them */
+  requestWriteAccess?: (cb: (granted: boolean) => void) => void;
   colorScheme: "light" | "dark";
   version: string;
   platform: string;
@@ -49,6 +54,36 @@ export function webApp(): TelegramWebApp | undefined {
 
 export function initData(): string {
   return webApp()?.initData ?? "";
+}
+
+/**
+ * The bot must be able to write to the person (training, reminders, shifts). Someone who opened the Mini App
+ * without pressing «Старт» in the chat is asked for it. true — can write, false — refused,
+ * null — an old client that can't ask (go on: the staff are warned if the bot can't reach them).
+ */
+export function ensureWriteAccess(): Promise<boolean | null> {
+  const app = webApp();
+  if (!app) return Promise.resolve(null);
+  if (app.initDataUnsafe.user?.allows_write_to_pm) return Promise.resolve(true);
+  if (!app.requestWriteAccess || !app.isVersionAtLeast("6.9")) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      app.requestWriteAccess!((granted) => resolve(granted));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** The chat with the bot; a referral code rides along so /start counts it. */
+export function openBotChat(botUsername: string) {
+  const ref = webApp()?.initDataUnsafe.start_param;
+  const url = `https://t.me/${botUsername}?start=${ref?.startsWith("ref_") ? ref : "app"}`;
+  try {
+    webApp()?.openTelegramLink(url);
+  } catch {
+    window.open(url, "_blank");
+  }
 }
 
 export function haptic(type: HapticNotification) {
