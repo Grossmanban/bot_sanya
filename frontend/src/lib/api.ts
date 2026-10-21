@@ -27,6 +27,9 @@ export interface User {
   is_owner?: boolean;
   created_at?: string;
   notify_reminders?: boolean;
+  /** since when the current work status is on, and how many days that is */
+  work_status_at?: string | null;
+  status_days?: number | null;
   /** personal norm of work days a week; null — the common norm, 0 — no norm */
   min_weekly_shifts?: number | null;
   /** owners only: personal rate (null — the network's or the common) and «не применять налог на лень» */
@@ -187,6 +190,7 @@ export interface NetworkMember {
   role: Role;
   work_status: User["work_status"];
   account_state: User["account_state"];
+  status_days?: number | null;
 }
 
 export interface Network {

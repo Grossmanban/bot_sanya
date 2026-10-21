@@ -264,8 +264,7 @@ def test_eve_reminder_auto_raspred_once(conn, make_user):
     a, b = make_user(), make_user("Ваня", "Бургер", None)
     shift(conn, a)
     shift(conn, b, payload={**P, "start_time": "14:00"})
-    b = svc.set_work_status(conn, b, "not_working", svc.new_key())  # reminders can only be muted when not working
-    svc.set_notify(conn, b, False)
+    b = svc.set_work_status(conn, b, "not_working", svc.new_key())  # «Не работаю» mutes the reminders
     n = FakeNotifier(conn)
     ran = run(jobs.tick(conn, n, at(TODAY, "21:05")))
     assert "eve_reminder" in ran and "auto_raspred" in ran
@@ -377,7 +376,7 @@ def test_migration_from_first_schema(tmp_path):
     from app.db import MIGRATIONS
 
     assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
-    assert conn.execute("SELECT notify_reminders FROM users").fetchone()[0] == 1
+    assert conn.execute("SELECT notify_reminders FROM users").fetchone()[0] == 0  # «Не работаю» → no reminders
     connect(str(path))  # idempotent
 
 

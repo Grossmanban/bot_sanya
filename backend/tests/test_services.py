@@ -3,6 +3,7 @@ from datetime import date, timedelta
 import pytest
 
 from app import services as svc
+from app.timeutil import today_local
 
 TODAY = date(2026, 10, 14)  # Wednesday
 SAT = date(2026, 10, 17)
@@ -326,7 +327,11 @@ def test_reminders_locked_while_working(conn, make_user):
         svc.set_notify(conn, u, False)
     assert e.value.code == "reminders_locked"
     u = svc.set_work_status(conn, u, "not_working", svc.new_key())
-    assert svc.set_notify(conn, u, False)["notify_reminders"] == 0
+    assert u["notify_reminders"] == 0  # «Не работаю» switches them off by itself (the customer)
+    with pytest.raises(svc.ServiceError) as e:  # and they stay off until «Работаю»
+        svc.set_notify(conn, u, True)
+    assert e.value.code == "reminders_off"
+    assert svc.status_days(u, today_local() + timedelta(days=12)) == 12
     u = svc.set_work_status(conn, u, "working", svc.new_key())
     assert u["notify_reminders"] == 1  # switched back on automatically
 

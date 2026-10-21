@@ -372,6 +372,9 @@ def public_user(user: dict) -> dict:
         "network_id": user["network_id"],
         "is_owner": svc.is_owner(user),
         "notify_reminders": bool(user.get("notify_reminders", 1)),
+        # «не работает 12 дн.»: seen by the person and by admins and trainers
+        "work_status_at": user.get("work_status_at"),
+        "status_days": svc.status_days(user),
         "min_weekly_shifts": user.get("min_weekly_shifts"),
         "created_at": user["created_at"],
     }

@@ -7,7 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Network, type User } from "@/lib/api";
 import { useCan } from "@/lib/caps";
-import { plural } from "@/lib/format";
+import { offFor, plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
@@ -164,7 +164,10 @@ function NetworkCard({ net, people, owners, canEdit, onChanged }: {
             <li key={m.id} className="flex items-center gap-3 px-5 py-2.5 md:px-6">
               <span className={cn("size-1.5 rounded-full", m.work_status === "working" ? "bg-go" : "bg-idle")} />
               <span className="min-w-0 flex-1 truncate text-[15px]">{m.name}</span>
-              {m.account_state === "paused" && <span className="text-xs font-semibold text-wait">пауза</span>}
+              {m.account_state === "paused" ? <span className="text-xs font-semibold text-wait">пауза</span>
+                : m.work_status !== "working" && offFor(m.status_days) && (
+                  <span className="shrink-0 text-xs text-muted-foreground">не работает {offFor(m.status_days)}</span>
+                )}
               {canEdit && (
                 <Button variant="ghost" size="sm" className="h-8 rounded-lg text-muted-foreground" aria-label="Убрать из сети" disabled={!!busy}
                         onClick={() => act(`out-${m.id}`, (k) => api.admin.setMemberNetwork(m.id, null, k), "Убран из сети")}>
