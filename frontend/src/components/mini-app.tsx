@@ -8,6 +8,7 @@ import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type Them
 import { ThemeContext } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
+import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
@@ -40,7 +41,13 @@ export function MiniApp() {
   }, []);
   const [me, setMe] = useState<Me | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("schedule");
+  // the open tab survives a reload of the app (Telegram «Обновить страницу»)
+  const [shown, setTabState] = useState<Tab>(() => (readSession("tab") as Tab | null) ?? "schedule");
+  const setTab = useCallback((t: Tab) => {
+    rememberScroll();
+    setTabState(t);
+    writeSession("tab", t);
+  }, []);
 
   const loadMe = useCallback(async () => {
     try {
@@ -70,12 +77,14 @@ export function MiniApp() {
     return () => document.removeEventListener("gesturestart", stop);
   }, []);
 
+  // each tab keeps its scroll position (the admin tab — per section, in AdminScreen)
+  useScrollMemory(`tab:${shown}`, !!me?.user && shown !== "admin");
+
   const updateUser = useCallback((user: User) => setMe((m) => (m ? { ...m, user } : m)), []);
 
   const go = (id: Tab) => {
     tapHaptic();
     setTab(id);
-    window.scrollTo({ top: 0 });
   };
 
   let body: React.ReactNode;
@@ -97,6 +106,8 @@ export function MiniApp() {
     // the events tab appears while there is an active (or just finished) event for this person
     const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0));
     const working = user.work_status === "working";
+    // a remembered tab that is gone now (no events any more, no admin rights) falls back to the schedule
+    const tab = tabs.some((t) => t.id === shown) ? shown : "schedule";
     const activeIndex = tabs.findIndex((t) => t.id === tab);
 
     body = (

@@ -20,6 +20,7 @@ import {
 import { moscowToday, useLoad } from "@/lib/hooks";
 import { haptic, tapHaptic } from "@/lib/telegram";
 import { CapsContext } from "@/lib/caps";
+import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
 import { AdminShiftSheet, type EditableShift } from "./admin-shift-sheet";
@@ -60,7 +61,15 @@ const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus
 
 export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
   const sections = SECTIONS.filter((s) => caps.includes(s.need));
-  const [section, setSection] = useState<Section>(sections[0]?.id ?? "day");
+  // the open section and its scroll survive a reload and switching tabs
+  const [picked, setPicked] = useState<Section | null>(() => readSession("admin-section") as Section | null);
+  const section: Section = sections.some((s) => s.id === picked) ? picked! : sections[0]?.id ?? "day";
+  const setSection = (s: Section) => {
+    rememberScroll();
+    setPicked(s);
+    writeSession("admin-section", s);
+  };
+  useScrollMemory(`admin:${section}`);
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
   const counts = useLoad(() => api.admin.reportCounts(), [version, section]);
