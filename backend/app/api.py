@@ -568,7 +568,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def my_referrals(user: dict = Depends(current_user)):
         code = recruiting.ref_code(conn, user)
         bot = app.state.bot_username
-        return {"code": code, "link": f"https://t.me/{bot}?startapp=ref_{code}" if bot else None,
+        return {"code": code, "link": f"https://t.me/{bot}?start=ref_{code}" if bot else None,
                 "items": recruiting.referrals(conn, user),
                 "targets": {k: app_settings.get_all(conn)[k] for k in ("internship_units", "second_stage_units")}}
 

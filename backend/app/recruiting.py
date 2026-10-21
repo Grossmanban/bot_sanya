@@ -1,6 +1,7 @@
 """Recruiting and onboarding (the customer's module 3).
 
-    referral link (t.me/<bot>?startapp=ref_<code>, or /start ref_<code> in the bot)
+    referral link (t.me/<bot>?start=ref_<code>: the chat with the bot opens first, so the bot can write;
+    startapp=ref_<code> straight into the Mini App still counts)
       → the questionnaire in the Mini App (an application, status `new`)
       → staff assign a training: date, time, place, trainer (`scheduled`); the candidate confirms with a button;
         reminders the evening before and in the morning
