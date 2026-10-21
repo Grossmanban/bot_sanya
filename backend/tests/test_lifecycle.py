@@ -11,7 +11,7 @@ from app.api import create_app
 from app.timeutil import today_local
 
 from .test_api import headers, key
-from .test_features import THU, TODAY, FakeNotifier, at, report, run, shift
+from .test_features import THU, TODAY, FakeNotifier, approved, at, run, shift
 from .test_violations import person
 
 
@@ -172,8 +172,8 @@ def test_goal_edit_lower_raise_revoke_annul(conn, team):
                         network_id=t["north"]["id"], key=svc.new_key())
     for u in (t["a"], t["b"]):
         goals.join(conn, u, goal["id"], TODAY)
-    report(conn, t["a"], shift(conn, t["a"]), 30)
-    report(conn, t["b"], shift(conn, t["b"]), 25)
+    approved(conn, t["a"], shift(conn, t["a"]), 30)
+    approved(conn, t["b"], shift(conn, t["b"]), 25)
     assert goals.check_completions(conn, THU) == []
 
     with pytest.raises(svc.ServiceError):  # another network's trainer

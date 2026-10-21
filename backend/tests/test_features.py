@@ -60,6 +60,13 @@ def report(conn, user, s, value, now=None):
     return reports.submit(conn, user, s["id"], value, "photo-file-id", "app", svc.new_key(), now=now or at(THU, "19:30"))
 
 
+def approved(conn, user, s, value, now=None):
+    """Sent and accepted by an owner: every report waits for an admin, also when fact ≥ plan."""
+    report(conn, user, s, value, now)
+    owner = svc.get_user_by_tg(conn, 999) or svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    return reports.review(conn, owner, s["id"], "approve", svc.new_key())
+
+
 # ---------------------------------------------------------------- points
 
 
@@ -115,8 +122,10 @@ def test_report_window_auto_approve_and_stats(conn, make_user):
     with pytest.raises(svc.ServiceError) as e:
         reports.submit(conn, u, s["id"], 20, "", "app", svc.new_key(), now=at(THU, "19:30"))
     assert e.value.code == "photo_required"
-    res = report(conn, u, s, 30)
-    assert res.changed and res.report["status"] == "auto_approved" and res.shift["report_state"] == "approved"
+    sent = report(conn, u, s, 30)  # fact ≥ plan still waits for an admin (the customer's rule)
+    assert sent.report["status"] == "pending_review" and sent.shift["report_state"] == "pending_review"
+    res = approved(conn, u, s, 30)  # the employee may replace it while it waits; then an admin accepts
+    assert res.changed and res.shift["report_state"] == "approved"
     # with a report in, the plan it was checked against stays: no edits or cancelling by the employee
     for action in (lambda: svc.edit_shift(conn, u, s["id"], {**P, "volume": 20}, svc.new_key(), today=THU),
                    lambda: svc.cancel_shift(conn, u, s["id"], svc.new_key(), today=THU)):
@@ -212,7 +221,7 @@ def test_no_show_reminder_and_resolution(conn, make_user):
     run(jobs.tick(conn, n, at(THU, "22:00")))  # 2 hours before the 00:00 deadline
     reminders = [t for chat, t in n.sent if "Вы не сдали отчёт" in t]
     assert len(reminders) == 2 and "до 00:00" in reminders[0]
-    report(conn, svc.get_user(conn, other["user_id"]), other, 30, now=at(THU, "23:00"))
+    approved(conn, svc.get_user(conn, other["user_id"]), other, 30, now=at(THU, "23:00"))
 
     digest = [t for chat, t in n.sent if chat == 999 and "Отчёты за" in t]
     assert digest and "Иван Петров" in digest[0]  # 22:00 digest: who hasn't reported
@@ -811,8 +820,8 @@ def test_payout_calculation_and_commit(conn, make_user):
 
     s1 = shift(conn, a)                                         # 25 планом
     s2 = shift(conn, a, THU + timedelta(days=1), {**P, "volume": 10})
-    report(conn, a, s1, 30)                                     # approved, 30 × 120
-    report(conn, a, s2, 12, now=at(THU + timedelta(days=1), "19:30"))  # approved, lazy: 12 × 100
+    approved(conn, a, s1, 30)                                   # approved, 30 × 120
+    approved(conn, a, s2, 12, now=at(THU + timedelta(days=1), "19:30"))  # approved, lazy: 12 × 100
     sb = shift(conn, b)
     report(conn, b, sb, 10)                                     # below plan, not approved → not paid
     finance.create(conn, owner, a["id"], "fine", 500, "Опоздание", svc.new_key(), event_date=THU)
@@ -966,7 +975,7 @@ def test_goals_progress_and_completion(conn, make_user):
     assert goals.join(conn, a, team["id"], TODAY)[1] is False
 
     sa, sb = shift(conn, a), shift(conn, b)
-    report(conn, a, sa, 30)  # auto-approved: counts in every goal at once
+    approved(conn, a, sa, 30)  # approved: counts in every goal at once
     report(conn, b, sb, 10)  # below plan, waits for review → not counted yet
     v = goals.view(conn, goals.get(conn, shared["id"]), a)
     assert v["progress"] == 30 and v["my_volume"] == 30

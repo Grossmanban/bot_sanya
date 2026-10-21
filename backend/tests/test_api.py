@@ -187,7 +187,8 @@ def test_points_settings_and_fact_endpoints(client, conn):
     r = client.post(url, content=jpeg, headers={**h, "Content-Type": "image/jpeg"})
     assert r.status_code == 200, r.text
     shift = r.json()["shift"]
-    assert shift["fact_volume"] == 12 and shift["location"] == "Европа" and shift["report"]["state"] == "approved"
+    # fact ≥ plan, still on review: every report waits for an admin
+    assert shift["fact_volume"] == 12 and shift["location"] == "Европа" and shift["report"]["state"] == "pending_review"
     photo = shift["report"]["last"]["photo_url"]
     got = client.get(photo)
     assert got.status_code == 200 and got.content == jpeg
