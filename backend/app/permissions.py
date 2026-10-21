@@ -65,7 +65,8 @@ CAN = {
     "points": {OWNER, ADMIN},
     "registrations": {OWNER, ADMIN},
     "export": {OWNER, ADMIN, TRAINER},
-    "raspred": {OWNER, ADMIN},      # the whole-team list for the work chat
+    "raspred": {OWNER, ADMIN, TRAINER},  # the list for the work chat; a trainer gets their network's
+    "all_people": {OWNER, ADMIN},   # works with the whole team, not one network (company-wide goals, events)
 }
 
 

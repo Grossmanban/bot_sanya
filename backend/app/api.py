@@ -812,17 +812,17 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"ok": True}
 
     @api.get("/admin/raspred/tomorrow")
-    async def admin_raspred(_: dict = Depends(staff("raspred"))):
-        return svc.raspred(conn, today_local() + timedelta(days=1))
+    async def admin_raspred(admin: dict = Depends(staff("raspred"))):
+        return svc.raspred(conn, today_local() + timedelta(days=1), admin)
 
     @api.get("/admin/raspred/today")
-    async def admin_raspred_today(_: dict = Depends(staff("raspred"))):
-        return svc.raspred(conn, today_local())
+    async def admin_raspred_today(admin: dict = Depends(staff("raspred"))):
+        return svc.raspred(conn, today_local(), admin)
 
     @api.get("/admin/raspred")
-    async def admin_raspred_day(date: str, _: dict = Depends(staff("raspred"))):
-        """ТЗ №21: the same text for any day, past or future."""
-        return svc.raspred(conn, svc.parse_date(date))
+    async def admin_raspred_day(date: str, admin: dict = Depends(staff("raspred"))):
+        """ТЗ №21: the same text for any day, past or future; a trainer — their network only."""
+        return svc.raspred(conn, svc.parse_date(date), admin)
 
     @api.get("/admin/day")
     async def admin_day(day: str = Query(...), admin: dict = Depends(admin_user)):

@@ -215,7 +215,16 @@ def test_trainer_sees_only_own_network_and_cannot_fine(client, conn):
     assert me["role_title"] == "Тренер" and "money" not in me["capabilities"] and "review" in me["capabilities"]
     team = {u["id"] for u in client.get("/api/admin/team", headers=th).json()["items"]}
     assert ids["Свой"] in team and ids["Чужой"] not in team
-    assert client.get("/api/admin/raspred/tomorrow", headers=th).status_code == 403
+    # raspred: a trainer gets their network only (customer: «Да конечно»)
+    tomorrow = (today_local() + timedelta(days=1)).isoformat()
+    for name in ("Свой", "Чужой"):
+        conn.execute("""INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, created_at,
+                                            updated_at) VALUES (?, ?, '10:00', '16:00', 20, 'Европа', 'active', 't', 't')""",
+                     (ids[name], tomorrow))
+    rows = client.get("/api/admin/raspred/tomorrow", headers=th).json()["rows"]
+    assert [r["name"] for r in rows] == ["Свой Тест"]
+    assert client.get("/api/admin/raspred/tomorrow", headers=owner).json()["total_count"] == 2
+    assert "raspred" in me["capabilities"] and "all_people" not in me["capabilities"]
     assert client.get("/api/admin/settings", headers=th).status_code == 403
     stats = "/api/admin/stats?user_id={}&from=2026-10-12&to=2026-10-18"
     assert client.get(stats.format(ids["Свой"]), headers=th).status_code == 200

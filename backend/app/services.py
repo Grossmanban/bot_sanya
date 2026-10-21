@@ -425,7 +425,7 @@ def day_totals(conn, day: date) -> tuple[int, int]:
 
 def active_shifts_on(conn, day: date) -> list[dict]:
     rows = conn.execute(
-        f"""SELECT s.*, u.first_name, u.last_name, u.username, u.telegram_id
+        f"""SELECT s.*, u.first_name, u.last_name, u.username, u.telegram_id, u.network_id
             FROM shifts s JOIN users u ON u.id = s.user_id
             WHERE s.shift_date = ? AND s.status IN {ACTIVE}
             ORDER BY s.start_time, u.first_name""",
@@ -936,8 +936,14 @@ def admin_delete_shift(conn, admin: dict, shift_id: int, reason: str, key: str) 
 # ---------------------------------------------------------------- admin reports
 
 
-def raspred(conn, day: date) -> dict:
+def raspred(conn, day: date, viewer: dict | None = None) -> dict:
+    """The day's list for the work chat. A trainer (viewer) gets only their own network's people."""
     shifts = active_shifts_on(conn, day)
+    network = None
+    if viewer is not None and not perms.sees_everyone(viewer):
+        mine = viewer.get("network_id")
+        shifts = [s for s in shifts if mine is not None and s["network_id"] == mine]
+        network = conn.execute("SELECT name FROM networks WHERE id = ?", (mine,)).fetchone() if mine else None
     lines = []
     for s in shifts:
         name = full_name(s)
@@ -945,13 +951,14 @@ def raspred(conn, day: date) -> dict:
             name += f" (@{s['username']})"
         lines.append(f"{s['start_time']}–{s['end_time']} — {name} — {s['volume']} шт. — {s['location']}")
     total_volume = sum(s["volume"] for s in shifts)
+    title = f" · сеть «{network[0]}»" if network else ""
     if shifts:
         text = (
-            f"Распред на {day.strftime('%d.%m.%y')}\n\n" + "\n".join(lines)
+            f"Распред на {day.strftime('%d.%m.%y')}{title}\n\n" + "\n".join(lines)
             + f"\n\nВсего сотрудников: {len(shifts)}\nОбщий плановый объём: {total_volume} шт."
         )
     else:
-        text = f"Распред на {day.strftime('%d.%m.%y')}\n\nВ этот день нет сотрудников в графике."
+        text = f"Распред на {day.strftime('%d.%m.%y')}{title}\n\nВ этот день нет сотрудников в графике."
     return {
         "date": day.isoformat(),
         "rows": [

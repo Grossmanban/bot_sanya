@@ -458,9 +458,10 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     @router.message(Command("raspred_zavtra"))
     @router.message(F.text == RASPRED_BUTTON)
     async def raspred(message: Message):
-        if allowed(message.from_user.id, "raspred") is None:
+        actor = allowed(message.from_user.id, "raspred")
+        if actor is None:
             return
-        data = svc.raspred(conn, today_local() + timedelta(days=1))
+        data = svc.raspred(conn, today_local() + timedelta(days=1), actor)
         # plain text so it copies cleanly into the work chat
         await message.answer(data["text"], parse_mode=None)
 
