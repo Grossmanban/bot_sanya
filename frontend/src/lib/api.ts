@@ -47,7 +47,7 @@ export const ROLE_TITLES: Record<Role, string> = {
 export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
-  | "registrations" | "export" | "raspred";
+  | "registrations" | "export" | "raspred" | "all_people";
 
 export const isStaff = (u: User) => u.role !== "employee" && u.account_state !== "blocked";
 

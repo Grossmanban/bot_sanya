@@ -97,7 +97,7 @@ const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline
 /** Admin: create goals and watch progress (ТЗ 6.3). Trainers: personal goals for their people and their network.
  *  ТЗ №20/№22: edit a running goal, hide it from the feed, delete it, take «выполнено» back, annul a result. */
 export function GoalsSection({ me }: { me: User }) {
-  const everyone = useCan("raspred");
+  const everyone = useCan("all_people");
   const { data, reload } = useLoad(() => api.admin.goals(), []);
   const [open, setOpen] = useState(false);
   const types = data?.prize_types ?? [];

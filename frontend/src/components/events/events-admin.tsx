@@ -20,7 +20,7 @@ const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline
 
 /** Live events (ТЗ 8.2): create, review entries (👑 / reason), watch the board. Polls while open. */
 export function EventsAdmin({ me }: { me: User }) {
-  const everyone = useCan("raspred");
+  const everyone = useCan("all_people");
   const { data, reload } = useLoad(() => api.admin.events(), []);
   useEffect(() => {
     const t = setInterval(reload, 7000);
