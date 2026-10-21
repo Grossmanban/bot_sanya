@@ -131,6 +131,9 @@ export interface EventChanges {
 
 export interface GoalChanges {
   title?: string;
+  reset_time?: string;
+  location?: string;
+  forever?: boolean;
   description?: string | null;
   target?: number;
   date_from?: string;
@@ -158,7 +161,7 @@ export interface Goal extends Lifecycle {
   id: number;
   title: string;
   description: string | null;
-  kind: "personal" | "team" | "network";
+  kind: "personal" | "team" | "network" | "group" | "point";
   mode: "shared" | "each";
   target: number;
   date_from: string;
@@ -168,7 +171,15 @@ export interface Goal extends Lifecycle {
   person?: string;
   progress: number;
   total: number;
-  participants: { user_id: number; name: string; volume: number; done: boolean; annulled: boolean; annul_reason: string | null }[];
+  participants: { user_id: number; name: string; volume: number; done: boolean; annulled: boolean; annul_reason: string | null;
+    /** a point goal: this fact is still under review */
+    on_review?: boolean }[];
+  /** a point's daily norm: the point, when its day starts, the day counted now, «каждый день», the day's plan */
+  location?: string;
+  reset_time?: string;
+  day?: string;
+  forever?: boolean;
+  plan?: number;
   completed_at: string | null;
   /** ТЗ №20: how many have «выполнено» while below the (raised) target */
   revocable: number;
@@ -873,7 +884,7 @@ export const api = {
     createGoal: (
       body: { title: string; kind: Goal["kind"]; mode: Goal["mode"]; target: number; date_from: string; date_to: string;
         description?: string; user_id?: number | null; network_id?: number | null; prize?: string | null; prize_type?: string | null;
-        prize_photo?: string | null },
+        prize_photo?: string | null; user_ids?: number[]; location?: string; reset_time?: string; forever?: boolean },
       key: string,
     ) => post<{ goal: Goal }>("/api/admin/goals", { ...body, idempotency_key: key }),
     updateGoal: (id: number, body: GoalChanges & { version: number; notify: boolean }, key: string) =>

@@ -1,6 +1,6 @@
 """ТЗ №20–22: live editing of goals and events, results taken back, hiding, «Архив», deleting, raspred by date."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +11,7 @@ from app.api import create_app
 from app.timeutil import today_local
 
 from .test_api import headers, key
-from .test_features import THU, TODAY, FakeNotifier, approved, at, run, shift
+from .test_features import THU, TODAY, FakeNotifier, approved, at, report, run, shift
 from .test_violations import person
 
 
@@ -284,3 +284,59 @@ def test_http_edit_hide_archive_and_raspred_by_date(conn, team):
     assert raspred["date"] == day and "Распред на" in raspred["text"]
     assert client.get("/api/admin/raspred?date=вчера", headers=owner).status_code == 422
     assert client.get(f"/api/admin/raspred?date={day}", headers=emp).status_code == 403
+
+
+# ---------------------------------------------------------------- goals: a hand-picked group, a point's daily norm
+
+
+def test_group_goal_by_checkboxes(conn, team):
+    t = team
+    with pytest.raises(svc.ServiceError) as e:  # nobody ticked
+        goals.create(conn, t["owner"], title="Пусто", kind="group", target=10, date_from=TODAY, date_to=THU,
+                     user_ids=[], key=svc.new_key())
+    assert e.value.code == "people_required"
+    with pytest.raises(svc.ServiceError):  # a trainer — only their own people
+        goals.create(conn, t["trainer"], title="Чужие", kind="group", target=10, date_from=TODAY, date_to=THU,
+                     user_ids=[t["a"]["id"], t["admin"]["id"]], key=svc.new_key())
+    g = goals.create(conn, t["trainer"], title="Аня и Боря", kind="group", mode="each", target=20, date_from=TODAY,
+                     date_to=THU, user_ids=[t["a"]["id"], t["b"]["id"]], key=svc.new_key())
+    assert {p["user_id"] for p in goals.participants(conn, g["id"])} == {t["a"]["id"], t["b"]["id"]}  # joined at once
+    assert [x["title"] for x in goals.for_user(conn, t["a"], TODAY)] == ["Аня и Боря"]
+    assert goals.for_user(conn, t["other"], TODAY) == []
+    assert lifecycle.can_manage(conn, svc.get_user(conn, t["trainer"]["id"]), "goal", g)
+    approved(conn, t["a"], shift(conn, t["a"]), 25)
+    done = goals.check_completions(conn, THU)
+    assert [p["first_name"] for _, people in done for p in people] == ["Аня"]  # «норма каждому»
+
+
+def test_point_goal_resets_daily_and_counts_reviews(conn, team):
+    from app import reports
+
+    t = team
+    svc.create_point(conn, t["owner"], "Европа", None)
+    with pytest.raises(svc.ServiceError):  # trainers don't set points' goals
+        goals.create(conn, t["trainer"], title="Европа 50", kind="point", target=50, date_from=TODAY,
+                     date_to=date.fromisoformat(goals.FOREVER), location="Европа", key=svc.new_key())
+    g = goals.create(conn, t["owner"], title="Европа 50", kind="point", target=50, date_from=TODAY,
+                     date_to=date.fromisoformat(goals.FOREVER), location="европа", reset_time="06:00", key=svc.new_key())
+    assert g["location"] == "Европа" and g["reset_time"] == "06:00"
+    sa, sb = shift(conn, t["a"]), shift(conn, t["b"])  # both at «Европа» on THU
+    assert goals.goal_day(g, at(THU, "05:59")) == TODAY and goals.goal_day(g, at(THU, "06:00")) == THU
+    report(conn, t["a"], sa, 30)  # under review — counts already
+    approved(conn, t["b"], sb, 15)
+    v = goals.view(conn, g, t["a"], at(THU, "18:00"))
+    assert (v["progress"], v["pending"], v["joined"], v["day"]) == (45, 30, True, THU.isoformat())
+    assert goals.eligible(conn, g, t["a"], at(THU, "18:00")) and not goals.eligible(conn, g, t["other"], at(THU, "18:00"))
+    assert goals.check_completions(conn, THU, at(THU, "18:00")) == []
+    # an admin corrects the fact: it counts as corrected
+    reports.manual_result(conn, t["owner"], sb["id"], 20, svc.new_key(), comment="Пересчитали")
+    done = goals.check_completions(conn, THU, at(THU, "19:00"))
+    assert [(x["title"], len(p)) for x, p in done] == [("Европа 50", 2)]
+    assert goals.check_completions(conn, THU, at(THU, "19:05")) == []  # once a day
+    # the next morning after 06:00 it starts from zero
+    assert goals.view(conn, g, None, at(THU + timedelta(days=1), "07:00"))["progress"] == 0
+    assert goals.view(conn, g, None, at(THU + timedelta(days=1), "05:00"))["done"]  # before the reset — still Thursday
+    upd = goals.update(conn, t["owner"], g["id"], g["version"], {"reset_time": "08:00"}, svc.new_key())
+    assert upd.critical == ["reset_time"]
+    lifecycle.delete(conn, t["owner"], "goal", g["id"], svc.new_key())
+    assert goals.for_user(conn, t["a"], THU) == []

@@ -1067,13 +1067,20 @@ class Notifier:
         pool = [u for u in svc.list_users(self.conn) if goals.eligible(self.conn, goal, u)]
         reports, pieces = goals.counted_so_far(self.conn, goal, [u["id"] for u in pool])
         creator = svc.get_user_by_tg(self.conn, goal["created_by"])
-        kind = {"personal": "личная", "team": "командная", "network": "сетевая"}[goal["kind"]]
+        kind = {"personal": "личная", "team": "командная", "network": "сетевая", "group": "для группы",
+                "point": f"точки «{goal['location']}» на день"}[goal["kind"]]
         await self.archive(["цель"], (
             f"🎯 <b>ЦЕЛЬ СОЗДАНА: {escape(goal['title'])}</b>\nТип: {kind}, норма {goal['target']} шт., период {period}\n"
             f"Принятых отчётов за период уже: {reports} ({pieces} шт.) — учитываются автоматически"
             + (f"\nСоздал: {who(creator)}" if creator else "")))
-        text = (f"🎯 <b>Новая цель: {escape(goal['title'])}</b>\n"
-                f"{'Норма' if goal['mode'] == 'each' or goal['kind'] == 'personal' else 'Общая норма'}: {goal['target']} шт., {period}")
+        if goal["kind"] == "point":
+            every = "каждый день" if goal["date_to"] == goals.FOREVER else period
+            text = (f"🎯 <b>Цель точки «{escape(goal['location'])}»: {escape(goal['title'])}</b>\n"
+                    f"Общая норма на день: {goal['target']} шт., {every}. Считается всё, что сделали на точке за день; "
+                    f"день начинается в {goal['reset_time']}.")
+        else:
+            text = (f"🎯 <b>Новая цель: {escape(goal['title'])}</b>\n"
+                    f"{'Норма' if goal['mode'] == 'each' or goal['kind'] == 'personal' else 'Общая норма'}: {goal['target']} шт., {period}")
         if goal["description"]:
             text += f"\n{escape(goal['description'])}"
         if goal["prize"] or goal["prize_type"]:
@@ -1084,7 +1091,9 @@ class Notifier:
             already = f"\nУже учтены ваши принятые отчёты с начала периода: {mine} шт." if mine else ""
             return await self._photo_or_text(user["telegram_id"], goal["prize_photo"],
                                              text + "\n\nПрогресс считается по принятым отчётам." + already)
-        join = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🙋 Участвую", callback_data=f"goal:{goal['id']}")]])
+        # «Участвую» — for team and network goals; a group and a point's people take part by themselves
+        join = (InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🙋 Участвую", callback_data=f"goal:{goal['id']}")]])
+                if goal["kind"] in ("team", "network") else None)
         sent = 0
         for user in svc.list_users(self.conn):
             if user["account_state"] == "active" and goals.eligible(self.conn, goal, user):
@@ -1095,7 +1104,10 @@ class Notifier:
     async def goals_completed(self, done: list) -> None:
         for goal, people in done:
             for p in people:
-                await self.send(p["telegram_id"], f"✅ Цель выполнена: <b>{escape(goal['title'])}</b>! Норма {goal['target']} шт.")
+                await self.send(p["telegram_id"], (
+                    f"✅ Цель точки «{escape(goal['location'])}» на сегодня выполнена: <b>{escape(goal['title'])}</b>! "
+                    f"Вместе сделали {goal['target']} шт. и больше." if goal["kind"] == "point" else
+                    f"✅ Цель выполнена: <b>{escape(goal['title'])}</b>! Норма {goal['target']} шт."))
             creator = svc.get_user_by_tg(self.conn, goal["created_by"])
             if creator:
                 names = ", ".join(escape(svc.full_name(p)) for p in people)

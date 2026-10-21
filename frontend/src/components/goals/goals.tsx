@@ -5,6 +5,7 @@ import { Ban, CircleCheck, LoaderCircle, Plus, Target, TrendingUp, Users } from 
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { api, type Goal, type GoalChanges, type User } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { addDays, dayMonth, plural } from "@/lib/format";
@@ -15,7 +16,17 @@ import {
   prizePhotoValue, prizeState, prizeText,
 } from "../lifecycle";
 
-const KIND: Record<Goal["kind"], string> = { personal: "Личная", team: "Командная", network: "Сеть" };
+const KIND: Record<Goal["kind"], string> = { personal: "Личная", team: "Командная", network: "Сеть", group: "Группа", point: "Точка" };
+const FOREVER = "9999-12-31";
+
+/** «Точка «Европа» · каждый день с 06:00» or «Сеть «Север» · до 23 октября». */
+function subtitle(g: Goal): string {
+  if (g.kind === "point") {
+    const when = g.forever ? `каждый день с ${g.reset_time}` : `до ${dayMonth(g.date_to)}, день с ${g.reset_time}`;
+    return `Точка «${g.location}» · ${when}`;
+  }
+  return `${KIND[g.kind]}${g.network ? ` «${g.network}»` : ""} · до ${dayMonth(g.date_to)}`;
+}
 
 function Progress({ value, target, done }: { value: number; target: number; done: boolean }) {
   const pct = Math.min(100, Math.round((value / Math.max(target, 1)) * 100));
@@ -37,6 +48,10 @@ function Breakdown({ g }: { g: Goal }) {
   const before = g.backfill ?? 0;
   const pending = g.pending ?? 0;
   if (!before && !pending) return null;
+  if (g.kind === "point") {
+    // a point's day counts reports under review at once
+    return <p className="text-xs text-muted-foreground">Из них на проверке: <b className="text-wait">{pending} шт.</b></p>;
+  }
   return (
     <p className="text-xs text-muted-foreground">
       {before > 0 && <>Учтено автоматически за дни до создания цели: <b className="text-foreground">{before} шт.</b></>}
@@ -62,13 +77,14 @@ export function MyGoals() {
               <div className="min-w-0 flex-1">
                 <p className="font-semibold">{g.done && <CircleCheck className="mr-1 inline size-4 text-go" />}{g.title}</p>
                 <p className="text-xs text-muted-foreground">
-                  {KIND[g.kind]}{g.network ? ` «${g.network}»` : ""} · до {dayMonth(g.date_to)}
-                  {g.mode === "shared" && g.kind !== "personal" ? ` · общая норма, ${g.participants.length} ${plural(g.participants.length, "участник", "участника", "участников")}` : ""}
+                  {subtitle(g)}
+                  {g.kind === "point" ? ` · сегодня на точке ${g.participants.length}`
+                    : g.mode === "shared" && g.kind !== "personal" ? ` · общая норма, ${g.participants.length} ${plural(g.participants.length, "участник", "участника", "участников")}` : ""}
                 </p>
                 {prizeText(g) && <p className="mt-1 text-sm">🏆 {prizeText(g)}</p>}
               </div>
               {(g.prize || g.prize_type || g.prize_photo_url) && <PrizeThumb url={g.prize_photo_url} className="size-14" />}
-              {!g.joined && !g.my_annulled && g.status === "active" && (
+              {!g.joined && !g.my_annulled && g.status === "active" && (g.kind === "team" || g.kind === "network") && (
                 <Button size="sm" className="press h-9 shrink-0 rounded-xl" disabled={!!busy}
                         onClick={async () => { try { await run(`j${g.id}`, () => api.joinGoal(g.id), "Вы участвуете"); await reload(); } catch { /* toast */ } }}>
                   {busy === `j${g.id}` ? <LoaderCircle className="animate-spin" /> : null} Участвую
@@ -150,8 +166,10 @@ function GoalCard({ goal: g, me, types, days, onDone }: { goal: Goal; me: User; 
         <div className="min-w-0">
           <p className="font-semibold">{g.status === "completed" && <CircleCheck className="mr-1 inline size-4 text-go" />}{g.title}</p>
           <p className="text-xs text-muted-foreground">
-            {KIND[g.kind]}{g.network ? ` «${g.network}»` : ""}{g.person ? ` · ${g.person}` : ""} · {dayMonth(g.date_from)} – {dayMonth(g.date_to)}
-            {g.kind !== "personal" ? ` · ${g.mode === "shared" ? "общая норма" : "норма каждому"}` : ""}
+            {g.kind === "point"
+              ? `${subtitle(g)} · ${dayMonth(g.day ?? g.date_from)}: план ${g.plan ?? 0} шт.`
+              : `${KIND[g.kind]}${g.network ? ` «${g.network}»` : ""}${g.person ? ` · ${g.person}` : ""} · ${dayMonth(g.date_from)} – ${dayMonth(g.date_to)}`}
+            {g.kind !== "personal" && g.kind !== "point" ? ` · ${g.mode === "shared" ? "общая норма" : "норма каждому"}` : ""}
           </p>
           {(prize || note) && (
             <p className="mt-1 text-xs font-semibold text-muted-foreground">
@@ -201,6 +219,7 @@ function GoalCard({ goal: g, me, types, days, onDone }: { goal: Goal; me: User; 
                   {p.done && <CircleCheck className="mr-1 inline size-3.5 text-go" />}
                   <span className={cn(p.annulled && "line-through")}>{p.name}</span>
                   {p.annulled && <span className="ml-1 text-xs">· аннулировано: {p.annul_reason}</span>}
+                  {p.on_review && <span className="ml-1 text-xs text-wait">· на проверке</span>}
                 </span>
                 {g.mode === "each" && !p.annulled && (
                   <span className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
@@ -208,7 +227,7 @@ function GoalCard({ goal: g, me, types, days, onDone }: { goal: Goal; me: User; 
                   </span>
                 )}
                 <span className="w-14 text-right font-semibold tabular">{p.volume}</span>
-                {g.can_manage && !p.annulled && (
+                {g.can_manage && !p.annulled && g.kind !== "point" && (
                   <button aria-label="Аннулировать результат" title="Аннулировать результат"
                           className="press grid size-8 place-items-center rounded-lg text-muted-foreground hover:text-cancel"
                           onClick={() => { setAnnulFor(annulFor === p.user_id ? null : p.user_id); setReason(""); }}>
@@ -241,7 +260,7 @@ function GoalCard({ goal: g, me, types, days, onDone }: { goal: Goal; me: User; 
   );
 }
 
-const CRITICAL: (keyof GoalChanges)[] = ["target", "date_from", "date_to", "prize", "prize_type"];
+const CRITICAL: (keyof GoalChanges)[] = ["target", "date_from", "date_to", "prize", "prize_type", "reset_time", "location", "forever"];
 
 /** One form to create and to edit a goal. Kind, mode and who it is for are fixed once created. */
 function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
@@ -250,6 +269,7 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
   const editing = !!initial;
   const users = useLoad(() => (editing ? Promise.resolve({ items: [] as User[] }) : api.admin.users()), [editing]);
   const nets = useLoad(() => (editing || !everyone ? Promise.resolve({ items: [] }) : api.admin.networks()), [editing, everyone]);
+  const points = useLoad(() => (everyone ? api.points() : Promise.resolve({ items: [] })), [everyone]);
   const today = moscowToday();
   const [kind, setKind] = useState<Goal["kind"]>(initial?.kind ?? (everyone ? "team" : "network"));
   const [mode, setMode] = useState<Goal["mode"]>(initial?.mode ?? "shared");
@@ -257,23 +277,35 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
   const [description, setDescription] = useState(initial?.description ?? "");
   const [target, setTarget] = useState(initial ? String(initial.target) : "");
   const [from, setFrom] = useState(initial?.date_from ?? today);
-  const [to, setTo] = useState(initial?.date_to ?? addDays(today, 6));
+  const [to, setTo] = useState(initial?.date_to && initial.date_to !== FOREVER ? initial.date_to : addDays(today, 6));
+  // a point's daily norm: which point, when the day starts again, «каждый день» or until a date
+  const [location, setLocation] = useState(initial?.location ?? "");
+  const [reset, setReset] = useState(initial?.reset_time ?? "06:00");
+  const [forever, setForever] = useState(initial ? !!initial.forever : true);
+  const [picked, setPicked] = useState<number[]>([]);
   const [prize, setPrize] = useState(prizeState(initial));
   const [userId, setUserId] = useState<number | null>(null);
   const [networkId, setNetworkId] = useState<number | null>(me.network_id);
   const [asking, setAsking] = useState<string[] | null>(null);
   const { busy, run } = useAction();
-  const kinds: Goal["kind"][] = everyone ? ["team", "network", "personal"] : ["network", "personal"];
+  const kinds: Goal["kind"][] = everyone ? ["team", "network", "group", "point", "personal"] : ["network", "group", "personal"];
   const people = (users.data?.items ?? []).filter((u) => u.id !== me.id);
 
   function changes(): GoalChanges {
     const next: GoalChanges = {
-      title: title.trim(), description: description.trim() || null, target: Number(target), date_from: from, date_to: to,
+      title: title.trim(), description: description.trim() || null, target: Number(target), date_from: from,
+      ...(kind === "point" && forever ? {} : { date_to: to }),
       prize: prize.prize.trim() || null, prize_type: prize.type.trim() || null,
+      ...(kind === "point" ? { reset_time: reset, location } : {}),
     };
     if (!initial) return next;
     const was = initial as unknown as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(next).filter(([k, v]) => (was[k] ?? null) !== v)) as GoalChanges;
+    const out = Object.fromEntries(Object.entries(next).filter(([k, v]) => (was[k] ?? null) !== v)) as GoalChanges;
+    if (kind === "point" && forever !== !!initial.forever) {
+      if (forever) out.forever = true;
+      else out.date_to = to;
+    }
+    return out;
   }
 
   async function save(notify: boolean) {
@@ -283,10 +315,12 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
         const photo = await prizePhotoValue(prize);
         if (!initial) {
           return api.admin.createGoal({
-            title: title.trim(), kind, mode: kind === "personal" ? "each" : mode, target: Number(target), date_from: from, date_to: to,
+            title: title.trim(), kind, mode: kind === "personal" ? "each" : kind === "point" ? "shared" : mode, target: Number(target),
+            date_from: from, date_to: to, forever: kind === "point" && forever,
             description: description.trim() || undefined, user_id: kind === "personal" ? userId : null,
             network_id: kind === "network" ? networkId : null, prize: prize.prize.trim() || null, prize_type: prize.type.trim() || null,
-            prize_photo: photo ?? null,
+            prize_photo: photo ?? null, user_ids: kind === "group" ? picked : undefined,
+            location: kind === "point" ? location : undefined, reset_time: kind === "point" ? reset : undefined,
           }, k);
         }
         return api.admin.updateGoal(initial.id, { ...changes(), ...(photo !== undefined ? { prize_photo: photo } : {}), version: initial.version, notify }, k);
@@ -309,9 +343,9 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
   return (
     <div className="space-y-3">
       {!editing && (
-        <div className="grid gap-1 rounded-2xl bg-muted p-1" style={{ gridTemplateColumns: `repeat(${kinds.length}, minmax(0, 1fr))` }}>
+        <div className="flex flex-wrap gap-1 rounded-2xl bg-muted p-1">
           {kinds.map((k) => (
-            <button key={k} onClick={() => setKind(k)} className={cn("press h-10 rounded-xl text-sm font-semibold", kind === k ? "bg-card shadow-lift" : "text-muted-foreground")}>
+            <button key={k} onClick={() => setKind(k)} className={cn("press h-10 min-w-[30%] flex-1 rounded-xl px-2 text-sm font-semibold", kind === k ? "bg-card shadow-lift" : "text-muted-foreground")}>
               {KIND[k]}
             </button>
           ))}
@@ -330,7 +364,32 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
           {nets.data?.items.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
         </select>
       )}
-      {!editing && kind !== "personal" && (
+      {!editing && kind === "group" && <PeopleChecklist people={people} value={picked} onChange={setPicked} />}
+      {kind === "point" && (
+        <div className="space-y-3 rounded-2xl bg-muted/50 p-3">
+          <select className={field} value={location} onChange={(e) => setLocation(e.target.value)} aria-label="Точка">
+            <option value="">Точка</option>
+            {(points.data?.items ?? []).map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+          </select>
+          {(points.data?.items.length ?? 1) === 0 && <p className="text-xs text-cancel">Сначала добавьте точки в разделе «Точки».</p>}
+          <label className="flex items-center gap-3 text-sm">
+            <span className="flex-1">
+              <span className="block font-medium">День начинается в</span>
+              <span className="block text-xs text-muted-foreground">В это время прогресс точки обнуляется и считается новый день</span>
+            </span>
+            <input type="time" className="h-10 rounded-xl border-0 bg-card px-3 tabular outline-none" value={reset}
+                   onChange={(e) => e.target.value && setReset(e.target.value)} />
+          </label>
+          <label className="flex cursor-pointer items-center gap-3 text-sm">
+            <span className="flex-1 font-medium">Каждый день, пока не измените</span>
+            <Switch checked={forever} onCheckedChange={setForever} />
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Участвуют все, у кого в этот день смена на точке. Считаются принятые отчёты и отчёты на проверке — с правками администратора.
+          </p>
+        </div>
+      )}
+      {!editing && kind !== "personal" && kind !== "point" && (
         <div className="grid grid-cols-2 gap-1 rounded-2xl bg-muted p-1">
           {(["shared", "each"] as const).map((m) => (
             <button key={m} onClick={() => setMode(m)} className={cn("press h-10 rounded-xl text-sm font-semibold", mode === m ? "bg-card shadow-lift" : "text-muted-foreground")}>
@@ -340,12 +399,14 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
         </div>
       )}
       <div className="grid grid-cols-3 gap-2">
-        <label className="space-y-1"><span className="text-xs text-muted-foreground">Норма, шт.</span>
+        <label className="space-y-1"><span className="text-xs text-muted-foreground">{kind === "point" ? "Норма на день" : "Норма, шт."}</span>
           <input inputMode="numeric" className={cn(field, "tabular")} value={target} onChange={(e) => setTarget(e.target.value.replace(/\D/g, "").slice(0, 7))} /></label>
         <label className="space-y-1"><span className="text-xs text-muted-foreground">С</span>
           <input type="date" className={field} value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-        <label className="space-y-1"><span className="text-xs text-muted-foreground">По</span>
-          <input type="date" className={field} value={to} onChange={(e) => setTo(e.target.value)} /></label>
+        {!(kind === "point" && forever) && (
+          <label className="space-y-1"><span className="text-xs text-muted-foreground">По</span>
+            <input type="date" className={field} value={to} onChange={(e) => setTo(e.target.value)} /></label>
+        )}
       </div>
       {editing && Number(target) > (initial?.target ?? 0) && initial?.status === "completed" && (
         <p className="text-xs text-muted-foreground">Выполнение не снимется само — после сохранения появится кнопка «Снять выполнение».</p>
@@ -357,12 +418,47 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
         {onCancel && <Button variant="secondary" className="press h-12 rounded-2xl px-5" onClick={onCancel}>Отмена</Button>}
         <Button className="press h-12 flex-1 rounded-2xl text-[15px] font-semibold"
                 disabled={!!busy || !title.trim() || !Number(target) || nothing
-                  || (!editing && kind === "personal" && !userId) || (!editing && kind === "network" && !networkId)}
+                  || (!editing && kind === "personal" && !userId) || (!editing && kind === "network" && !networkId)
+                  || (!editing && kind === "group" && picked.length === 0) || (kind === "point" && !location)}
                 onClick={submit}>
           {busy === "save" && <LoaderCircle className="animate-spin" />} {editing ? "Сохранить" : "Создать и сообщить"}
         </Button>
       </div>
       <NotifyDialog fields={asking} onChoose={save} onCancel={() => setAsking(null)} />
+    </div>
+  );
+}
+
+/** A group goal: tick the people (the customer: no saved groups, just checkboxes each time). */
+function PeopleChecklist({ people, value, onChange }: { people: User[]; value: number[]; onChange: (v: number[]) => void }) {
+  const [q, setQ] = useState("");
+  const shown = people.filter((u) => `${u.first_name} ${u.last_name ?? ""}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const all = shown.length > 0 && shown.every((u) => value.includes(u.id));
+  return (
+    <div className="rounded-2xl bg-muted/50 p-3">
+      <div className="flex items-center gap-2">
+        <input className="h-10 min-w-0 flex-1 rounded-xl border-0 bg-card px-3 text-sm outline-none focus:ring-2 focus:ring-ring/25"
+               placeholder="Поиск по имени" value={q} onChange={(e) => setQ(e.target.value)} />
+        <Button variant="ghost" size="sm" className="h-10 shrink-0 rounded-xl"
+                onClick={() => onChange(all ? value.filter((id) => !shown.some((u) => u.id === id)) : [...new Set([...value, ...shown.map((u) => u.id)])])}>
+          {all ? "Снять выбор" : "Выбрать всех"}
+        </Button>
+      </div>
+      <ul className="mt-2 max-h-64 overflow-y-auto" aria-label="Кому цель">
+        {shown.map((u) => {
+          const on = value.includes(u.id);
+          return (
+            <li key={u.id}>
+              <label className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-card">
+                <input type="checkbox" className="size-4 accent-[var(--primary)]" checked={on}
+                       onChange={() => onChange(on ? value.filter((x) => x !== u.id) : [...value, u.id])} />
+                <span className="min-w-0 flex-1 truncate text-[15px]">{u.first_name} {u.last_name}</span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-1 px-2 text-xs text-muted-foreground">Выбрано: {value.length}</p>
     </div>
   );
 }

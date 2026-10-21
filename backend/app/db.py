@@ -757,6 +757,58 @@ def _unmarked_days(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_unmarked_days)
 
 
+def _goal_kinds(conn: sqlite3.Connection) -> None:
+    """Goals for a hand-picked group (`group`) and a point's daily norm (`point`: the location, when the day
+    resets). A rebuild — SQLite can't change a CHECK in place; ids and the counter stay."""
+    seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'goals'").fetchone()
+    cols = ("id, title, description, kind, mode, target, date_from, date_to, user_id, network_id, status, created_by, "
+            "created_at, completed_at, prize, prize_type, prize_photo, version, visibility, hidden_at, deleted_at, updated_at")
+    _run_script(conn, f"""
+    CREATE TABLE goals_new (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        title        TEXT NOT NULL,
+        description  TEXT,
+        kind         TEXT NOT NULL CHECK (kind IN ('personal','team','network','group','point')),
+        mode         TEXT NOT NULL DEFAULT 'shared' CHECK (mode IN ('shared','each')),
+        target       INTEGER NOT NULL CHECK (target > 0),
+        date_from    TEXT NOT NULL,
+        date_to      TEXT NOT NULL,
+        user_id      INTEGER REFERENCES users(id),
+        network_id   INTEGER REFERENCES networks(id),
+        status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','archived')),
+        created_by   INTEGER NOT NULL,
+        created_at   TEXT NOT NULL,
+        completed_at TEXT,
+        prize        TEXT,
+        prize_type   TEXT,
+        prize_photo  TEXT,
+        version      INTEGER NOT NULL DEFAULT 1,
+        visibility   TEXT NOT NULL DEFAULT 'auto' CHECK (visibility IN ('auto','shown','hidden')),
+        hidden_at    TEXT,
+        deleted_at   TEXT,
+        updated_at   TEXT,
+        location     TEXT,
+        reset_time   TEXT,
+        CHECK ((kind = 'point') = (location IS NOT NULL))
+    );
+    INSERT INTO goals_new ({cols}) SELECT {cols} FROM goals;
+    DROP TABLE goals;
+    ALTER TABLE goals_new RENAME TO goals;
+    -- a point goal is met day by day: one row per goal-day it was reached
+    CREATE TABLE goal_days (
+        goal_id      INTEGER NOT NULL REFERENCES goals(id),
+        day          TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        PRIMARY KEY (goal_id, day)
+    );
+    """)
+    if seq:
+        conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'goals'", (seq[0],))
+
+
+MIGRATIONS.append(_goal_kinds)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):
