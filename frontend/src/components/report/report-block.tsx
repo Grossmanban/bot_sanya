@@ -74,7 +74,7 @@ export function ReportBlock({ shift, pricing, onChanged }: { shift: Shift; prici
     ].filter(Boolean);
     return (
       <Status tone="go" icon={CircleCheck} title="Отчёт принят" photo={last?.photo_url}
-              text={`${fact} из ${plan} шт.${shift.fact_pay != null ? `, заработок ${rub(shift.fact_pay)}` : ""}${extra.length ? ` · ${extra.join(", ")}` : ""}`}>
+              text={`${fact} из ${plan} шт.${shift.fact_pay != null && !shift.training ? `, заработок ${rub(shift.fact_pay)}` : ""}${extra.length ? ` · ${extra.join(", ")}` : ""}`}>
         {fact < plan && <PlanFactBar plan={plan} fact={fact} />}
         {report.note && <p className="text-sm text-muted-foreground">{report.note}</p>}
       </Status>

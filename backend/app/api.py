@@ -550,7 +550,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "events": len(events.visible(conn, user)),
             "network": (networks.get(conn, user["network_id"]) or {}).get("name") if user["network_id"] else None,
             "capabilities": perms.capabilities(user),
-            "pricing": pricing.pricing_info(rates.for_user(conn, user["id"])),
+            # a trainee's shifts are training ones and not paid
+            "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user)},
             "bot_username": app.state.bot_username,
         }
 

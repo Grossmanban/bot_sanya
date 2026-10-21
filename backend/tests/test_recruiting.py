@@ -63,6 +63,8 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
     s = svc.create_shift(conn, trainee, today + timedelta(days=1), {"start_time": "10:00", "end_time": "16:00", "volume": 20,
                                                                    "location": "Европа"}, svc.new_key(), today=today).shift
     assert s["training"] == 1
+    view = svc.serialize_shift(s, today, conn)
+    assert view["training"] and view["expected_pay"] == 0 and view["rate"] == 0
     assert "стажёр" in svc.raspred(conn, today + timedelta(days=1))["text"]
     conn.execute("UPDATE shifts SET status = 'active', report_state = 'approved', fact_volume = 21 WHERE id = ?", (s["id"],))
     p = recruiting.progress(conn, app)

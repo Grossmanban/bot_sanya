@@ -8,6 +8,7 @@ import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type Them
 import { ThemeContext } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
+import { ApplicationStatus, Registration } from "./register/register";
 import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
@@ -94,8 +95,11 @@ export function MiniApp() {
     body = <AccessScreen kind="error" message={fatal} onRetry={loadMe} />;
   } else if (!me) {
     body = <LoadingScreen />;
-  } else if (!me.registered || !me.user) {
-    body = <AccessScreen kind="unregistered" botUsername={me.bot_username} />;
+  } else if (!me.registered || !me.user || (me.user.status === "pending" && !me.application)) {
+    // the questionnaire (the customer's module 3): a new person, or one returned to the reserve
+    body = <Registration onSent={loadMe} />;
+  } else if (me.user.status === "pending" && me.application) {
+    body = <ApplicationStatus application={me.application} />;
   } else if (me.user.status !== "approved") {
     body = <AccessScreen kind={me.user.status} botUsername={me.bot_username} />;
   } else if (me.user.account_state === "blocked") {
@@ -177,7 +181,8 @@ export function MiniApp() {
 
           <main key={tab} className="screen-in mx-auto w-full max-w-2xl flex-1 px-4 pb-36 md:px-6 lg:max-w-6xl lg:px-10 lg:pt-10 lg:pb-12">
             {tab === "schedule" && (
-              <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => go("profile")} onUserChange={updateUser} />
+              <ScheduleScreen user={user} pricing={me.pricing!} onOpenProfile={() => go("profile")} onUserChange={updateUser}
+                              internship={me.internship} />
             )}
             {tab === "events" && <EventsScreen />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} botUsername={me.bot_username} />}
