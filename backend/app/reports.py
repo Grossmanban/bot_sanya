@@ -2,8 +2,8 @@
 
 One shift has a chain of report attempts; the shift row carries the summary:
 
-    report_state  NULL ── submit, fact ≥ plan ──> approved          (auto)
-                  NULL ── submit, fact < plan ──> pending_review
+    report_state  NULL ── submit ──> pending_review      (every report waits for an admin, even fact ≥ plan)
+                  NULL ── submit, the team already met the day's plan ──> approved   (ТЗ 3.5)
         pending_review ── approve ──> approved
         pending_review ── return (comment) ──> needs_fix ── submit ──> …  (next attempt, no deadline)
         pending_review ── fine (amount, reason) ──> rejected
@@ -218,7 +218,8 @@ def check_submittable(shift: dict | None, user: dict, now: datetime) -> dict:
 
 def submit(conn: sqlite3.Connection, user: dict, shift_id: int, value: int, photo_file_id: str, source: str, key: str,
            now: datetime | None = None) -> ReportResult:
-    """Fact + screenshot. Fact ≥ plan is approved at once; below plan waits for a review.
+    """Fact + screenshot → review by an admin (the customer: no auto-approval, also when fact ≥ plan).
+    Only a day whose team plan is already met approves it at once (ТЗ 3.5).
     While a report waits for review the employee may replace it (same attempt)."""
     now = now or now_local()
     _check_key(key)
@@ -230,10 +231,9 @@ def submit(conn: sqlite3.Connection, user: dict, shift_id: int, value: int, phot
             shift = svc.get_shift(conn, shift_id)
             return ReportResult(shift, latest(conn, shift_id), False)
         shift = check_submittable(svc.get_shift(conn, shift_id), user, now)
-        auto = bool(shift["volume"]) and value >= shift["volume"]
         team = day_actual.get(conn, shift["shift_date"])
-        by_team = not auto and bool(team and team["met"])  # the team already met the day's plan (ТЗ 3.5)
-        status = "auto_approved" if auto else "approved_team" if by_team else "pending_review"
+        by_team = bool(team and team["met"])  # the team already met the day's plan (ТЗ 3.5)
+        status = "approved_team" if by_team else "pending_review"
         last = latest(conn, shift_id)
         if last and last["status"] == "pending_review":
             conn.execute(
@@ -254,12 +254,12 @@ def submit(conn: sqlite3.Connection, user: dict, shift_id: int, value: int, phot
             """UPDATE shifts SET fact_volume = ?, fact_set_at = ?, fact_set_by = ?, report_state = ?, report_note = NULL,
                                  shortfall_status = NULL, shortfall_penalty = NULL, shortfall_decided_by = NULL,
                                  shortfall_decided_at = NULL, updated_at = ? WHERE id = ?""",
-            (value, now_iso(), user["telegram_id"], "approved" if auto or by_team else "pending_review", now_iso(), shift_id),
+            (value, now_iso(), user["telegram_id"], "approved" if by_team else "pending_review", now_iso(), shift_id),
         )
         if by_team:
             conn.execute("UPDATE shifts SET report_note = ?, shortfall_status = 'waived' WHERE id = ?",
                          (day_actual.TEAM_NOTE, shift_id))
-        event = "REPORT_AUTO_APPROVED" if auto else "REPORT_TEAM_APPROVED" if by_team else "REPORT_SUBMITTED"
+        event = "REPORT_TEAM_APPROVED" if by_team else "REPORT_SUBMITTED"
         log_event(conn, user_id=shift["user_id"], actor_id=user["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, old={"fact_volume": shift["fact_volume"], "report_state": shift["report_state"]},
                   new={"fact_volume": value, "report_id": report_id})
