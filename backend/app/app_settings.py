@@ -47,6 +47,11 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "daily_mark_enabled": ("1", "bool"),
     "daily_mark_reminder_time": ("20:00", "time"),
     "daily_mark_deadline": ("22:00", "time"),
+    # the customer's module 3: unpaid internship units, then work units for the referrer's second bonus
+    "internship_units": ("20", "count"),
+    "second_stage_units": ("50", "count"),
+    "training_reminder_eve_time": ("20:00", "time"),
+    "training_reminder_morning_time": ("08:00", "time"),
     # ТЗ №9: employees see who else works that day (off — only how many)
     "show_colleague_names": ("1", "bool"),
     # ТЗ №22: finished goals and events leave the feed for «Архив» after this many days (0 — at once)

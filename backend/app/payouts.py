@@ -141,7 +141,7 @@ def _approved(conn, user_ids: list[int], date_from: date, date_to: date) -> list
         return []
     return [dict(r) for r in conn.execute(
         f"""SELECT user_id, shift_date, fact_volume FROM shifts WHERE status IN {ACTIVE} AND report_state = 'approved'
-            AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ?
+            AND fact_volume IS NOT NULL AND training = 0 AND shift_date BETWEEN ? AND ?
             AND user_id IN ({','.join('?' * len(user_ids))})""",
         (date_from.isoformat(), date_to.isoformat(), *user_ids))]
 

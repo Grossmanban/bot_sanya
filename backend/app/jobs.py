@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import app_settings, events, export, goals, notify, reports, violations
+from . import app_settings, events, export, goals, notify, recruiting, reports, violations
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -97,6 +97,13 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
         ran.append("event_finished")
         if event["visibility"] != "hidden":  # a hidden event finishes quietly
             await notifier.event_finished(event)
+    # recruiting: training reminders and trainees who reached a stage (each once)
+    for application, kind in recruiting.training_reminders(conn, now):
+        ran.append("training_reminder")
+        await notifier.training_reminder(application, kind)
+    for application in recruiting.reached(conn):
+        ran.append("stage_reached")
+        await notifier.stage_reached(application)
     done = goals.check_completions(conn, today, now)
     if done:
         ran.append("goals")
