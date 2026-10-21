@@ -887,6 +887,28 @@ def test_broadcast_audiences_by_network_and_people(conn, make_user):
     t = svc.get_user(conn, trainer["id"])
     assert names(svc.broadcast_recipients(conn, ["working", "not_working"], actor=t)) == ["Аня", "Боря"]
 
+    # the bug «6 вместо 1»: a trainer ticks one person — only that person gets it, not the whole network
+    row, rec = svc.create_broadcast(conn, t, [], "Аня, зайди", user_ids=[a["id"]])
+    assert names(rec) == ["Аня"] and row["recipients"] == 1
+    assert names(svc.broadcast_recipients(conn, [], user_ids=[a["id"], c["id"]], actor=t)) == ["Аня"]  # not their network
+
+
+def test_broadcast_only_to_those_who_have_not_marked_tomorrow(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a, b, c, d = (make_user(first=n) for n in ("Аня", "Боря", "Вика", "Гоша"))
+    tomorrow = TODAY + timedelta(days=1)
+    shift(conn, a, tomorrow)  # going
+    svc.pre_declare_off(conn, b, tomorrow, svc.new_key(), today=TODAY)  # a day off is marked too
+    gone = shift(conn, c, tomorrow)
+    svc.cancel_shift(conn, c, gone["id"], svc.new_key(), today=TODAY)  # cancelled — nothing marked any more
+    assert svc.marked_on(conn, tomorrow) == {a["id"], b["id"]}
+    everyone = [a["id"], b["id"], c["id"], d["id"]]
+    row, rec = svc.create_broadcast(conn, owner, [], "Отметьте график на завтра", user_ids=everyone, only_unmarked=tomorrow)
+    assert sorted(u["first_name"] for u in rec) == ["Вика", "Гоша"] and "unmarked_tomorrow" in row["audience"]
+    with pytest.raises(svc.ServiceError) as e:
+        svc.create_broadcast(conn, owner, [], "Привет", user_ids=[a["id"]], only_unmarked=tomorrow)
+    assert e.value.code == "no_recipients"
+
 
 def test_read_receipts_and_reminders(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")

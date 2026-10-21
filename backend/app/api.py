@@ -327,6 +327,8 @@ class BroadcastBody(BaseModel):
     user_ids: list[int] | None = None
     require_ack: bool = False
     media_file_id: str | None = None
+    # ТЗ: «отправить только тем, кто не отметил график на завтра»
+    only_unmarked_tomorrow: bool = False
 
 
 class BroadcastTest(BaseModel):
@@ -732,15 +734,16 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.get("/admin/broadcasts")
     async def admin_broadcasts(admin: dict = Depends(staff("broadcast_network"))):
         nets = networks.names(conn)
+        marked = svc.marked_on(conn, today_local() + timedelta(days=1))
         people = [
             {"id": u["id"], "name": svc.full_name(u), "working": u["work_status"] == "working", "admin": u["role"] == "admin",
-             "network_id": u["network_id"], "network": nets.get(u["network_id"])}
+             "network_id": u["network_id"], "network": nets.get(u["network_id"]), "marked_tomorrow": u["id"] in marked}
             for u in visible(admin, svc.list_users(conn)) if u["account_state"] != "blocked"
         ]
         everyone = perms.can(admin, "broadcast_all")
         return {
             "items": svc.list_broadcasts(conn, author_tg=None if everyone else admin["telegram_id"]),
-            "audiences": svc.AUDIENCES,
+            "audiences": svc.AUDIENCE_LABELS,
             "people": people,
             "networks": [{"id": n["id"], "name": n["name"]} for n in networks.listing(conn, admin)],
             "scope": "all" if everyone else "network",
@@ -753,7 +756,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if not perms.can(admin, "broadcast_all") and body.network_id not in (None, admin["network_id"]):
             raise svc.ServiceError("Тренер пишет только своей сети", 403, "forbidden")
         row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed, body.network_id,
-                                               body.user_ids, body.require_ack, body.media_file_id)
+                                               body.user_ids, body.require_ack, body.media_file_id,
+                                               today_local() + timedelta(days=1) if body.only_unmarked_tomorrow else None)
         notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], bool(row["signed"]), row["media_file_id"],
                                           bool(row["require_ack"])))
         return {"broadcast": row}

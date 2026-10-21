@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BellRing, CheckCheck, ChevronDown, FlaskConical, LoaderCircle, Send, X } from "lucide-react";
+import { BellRing, Check, CheckCheck, ChevronDown, FlaskConical, LoaderCircle, Search, Send } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -19,24 +19,19 @@ import { Switch } from "@/components/ui/switch";
 import { api, type Broadcast, type BroadcastPerson, type User } from "@/lib/api";
 import { ddmm, plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
+import { tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { RichEditor, type RichEditorHandle } from "./rich-editor";
 import { PhotoPicker } from "../report/photo";
 
-type Group = "working" | "not_working" | "admins";
-const GROUPS: { id: Group; title: string; hint: string }[] = [
-  { id: "working", title: "Работают", hint: "статус «Работаю»" },
-  { id: "not_working", title: "Не работают", hint: "статус «Не работаю»" },
-  { id: "admins", title: "Администраторы", hint: "все админы" },
-];
 const LIMIT = 4000;
 
 export function BroadcastSection({ me }: { me: User }) {
   const { data, reload } = useLoad(() => api.admin.broadcasts(), []);
   const editor = useRef<RichEditorHandle>(null);
-  const [groups, setGroups] = useState<Record<Group, boolean>>({ working: true, not_working: false, admins: false });
-  const [network, setNetwork] = useState<number | null>(null);
+  // exactly these people get the message (a checklist); groups and networks only tick boxes
   const [picked, setPicked] = useState<number[]>([]);
+  const [unmarked, setUnmarked] = useState(false);
   const [photo, setPhoto] = useState<Blob | null>(null);
   const [mediaId, setMediaId] = useState<{ blob: Blob; id: string } | null>(null);
   const [ack, setAck] = useState(false);
@@ -54,22 +49,11 @@ export function BroadcastSection({ me }: { me: User }) {
   }, [sending, reload]);
 
   const scopeAll = data?.scope !== "network";
-  // a trainer writes only to their network (ТЗ 7.1)
-  const ownNetwork = !scopeAll ? (data?.networks[0]?.id ?? null) : null;
-  const chosen = useMemo(() => (scopeAll ? (Object.keys(groups) as Group[]).filter((g) => groups[g]) : []), [scopeAll, groups]);
-  const targetNetwork = scopeAll ? network : ownNetwork;
-  const counts = useMemo(() => {
-    const people = (data?.people ?? []).filter((p) => scopeAll || p.id !== me.id);
-    const inGroup = (p: BroadcastPerson, g: Group) => (g === "working" ? p.working : g === "not_working" ? !p.working : p.admin);
-    return {
-      working: people.filter((p) => inGroup(p, "working")).length,
-      not_working: people.filter((p) => inGroup(p, "not_working")).length,
-      admins: people.filter((p) => inGroup(p, "admins")).length,
-      // union: a working admin who is also picked by name is one person
-      total: people.filter((p) => chosen.some((g) => inGroup(p, g)) || (targetNetwork != null && p.network_id === targetNetwork)
-        || picked.includes(p.id)).length,
-    };
-  }, [data, chosen, targetNetwork, picked, scopeAll, me.id]);
+  const people = useMemo(() => (data?.people ?? []).filter((p) => scopeAll || p.id !== me.id), [data, scopeAll, me.id]);
+  const recipients = useMemo(
+    () => people.filter((p) => picked.includes(p.id) && (!unmarked || !p.marked_tomorrow)),
+    [people, picked, unmarked],
+  );
 
   async function media(): Promise<string | null> {
     if (!photo) return null;
@@ -107,8 +91,8 @@ export function BroadcastSection({ me }: { me: User }) {
     if (!html) return;
     try {
       await run("send", async () => api.admin.broadcast({
-        audiences: chosen, html, signed, network_id: targetNetwork, user_ids: picked.length ? picked : null,
-        require_ack: ack, media_file_id: await media(),
+        audiences: [], html, signed, network_id: null, user_ids: picked, require_ack: ack, media_file_id: await media(),
+        only_unmarked_tomorrow: unmarked,
       }), "Рассылка запущена");
       editor.current?.clear();
       setPhoto(null);
@@ -137,44 +121,11 @@ export function BroadcastSection({ me }: { me: User }) {
         <PhotoPicker value={photo} onChange={setPhoto} label="Добавить фото" optional />
       </section>
 
+      <Recipients people={people} networks={scopeAll ? data.networks : []} trainerNetwork={scopeAll ? null : data.networks[0]?.name ?? null}
+                  value={picked} onChange={setPicked} unmarked={unmarked} onUnmarked={setUnmarked} willGet={recipients.length} />
+
       <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
-        <h2 className="px-5 pt-5 pb-1 font-semibold md:px-6">Кому отправить</h2>
         <ul className="divide-y">
-          {!scopeAll && (
-            <li className="px-5 py-3.5 md:px-6">
-              <span className="block font-medium">Ваша сеть{data.networks[0] ? ` «${data.networks[0].name}»` : ""}</span>
-              <span className="block text-sm text-muted-foreground">Тренер пишет только своей сети</span>
-            </li>
-          )}
-          {scopeAll && GROUPS.map((g) => (
-            <li key={g.id}>
-              <label className="flex cursor-pointer items-center gap-4 px-5 py-3.5 md:px-6">
-                <span className="flex-1">
-                  <span className="block font-medium">{g.title}</span>
-                  <span className="block text-sm text-muted-foreground">
-                    {g.hint}, {counts[g.id]} {plural(counts[g.id], "человек", "человека", "человек")}
-                  </span>
-                </span>
-                <Switch checked={groups[g.id]} onCheckedChange={(on) => setGroups({ ...groups, [g.id]: on })} />
-              </label>
-            </li>
-          ))}
-          {scopeAll && data.networks.length > 0 && (
-            <li className="flex items-center gap-4 px-5 py-3.5 md:px-6">
-              <span className="flex-1">
-                <span className="block font-medium">Сеть</span>
-                <span className="block text-sm text-muted-foreground">все люди сети вместе с тренером</span>
-              </span>
-              <select className="h-10 rounded-xl border-0 bg-muted px-3 text-sm outline-none" value={network ?? ""}
-                      onChange={(e) => setNetwork(e.target.value ? Number(e.target.value) : null)}>
-                <option value="">не выбрана</option>
-                {data.networks.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
-              </select>
-            </li>
-          )}
-          <li className="px-5 py-3.5 md:px-6">
-            <PeoplePicker people={data.people.filter((p) => scopeAll || p.id !== me.id)} value={picked} onChange={setPicked} />
-          </li>
           <li>
             <label className="flex cursor-pointer items-center gap-4 px-5 py-3.5 md:px-6">
               <span className="flex-1">
@@ -202,11 +153,11 @@ export function BroadcastSection({ me }: { me: User }) {
         </Button>
         <Button
           className="press h-12 rounded-2xl text-[15px] font-semibold"
-          disabled={!!busy || counts.total === 0}
+          disabled={!!busy || recipients.length === 0}
           onClick={() => message() && setConfirm(true)}
         >
           {busy === "send" ? <LoaderCircle className="animate-spin" /> : <Send />}
-          {counts.total ? `Отправить ${counts.total} ${plural(counts.total, "человеку", "людям", "людям")}` : "Выберите, кому отправить"}
+          {recipients.length ? `Отправить ${recipients.length} ${plural(recipients.length, "человеку", "людям", "людям")}` : "Выберите, кому отправить"}
         </Button>
       </div>
 
@@ -226,7 +177,7 @@ export function BroadcastSection({ me }: { me: User }) {
           <AlertDialogHeader>
             <AlertDialogTitle className="font-display">Отправить рассылку?</AlertDialogTitle>
             <AlertDialogDescription>
-              Сообщение получат {counts.total} {plural(counts.total, "человек", "человека", "человек")}
+              Сообщение получат {recipients.length} {plural(recipients.length, "человек", "человека", "человек")}
               {ack ? ", с кнопкой «Я ознакомился»" : ""}. Отменить отправку будет нельзя.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -242,58 +193,98 @@ export function BroadcastSection({ me }: { me: User }) {
   );
 }
 
-function PeoplePicker({ people, value, onChange }: { people: BroadcastPerson[]; value: number[]; onChange: (v: number[]) => void }) {
-  const [open, setOpen] = useState(false);
+/** ТЗ: a checkbox next to every person, «Выбрать всех / Снять выбор», «Выбрано: N». Group and network buttons only
+ *  tick or untick their people; what is ticked is exactly who gets the message. */
+function Recipients({ people, networks, trainerNetwork, value, onChange, unmarked, onUnmarked, willGet }: {
+  people: BroadcastPerson[];
+  networks: { id: number; name: string }[];
+  trainerNetwork: string | null;
+  value: number[];
+  onChange: (v: number[]) => void;
+  unmarked: boolean;
+  onUnmarked: (v: boolean) => void;
+  willGet: number;
+}) {
   const [q, setQ] = useState("");
-  const list = people.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())).slice(0, 40);
+  const chosen = new Set(value);
+  const shown = people.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
+  const groups: { key: string; label: string; ids: number[] }[] = [
+    { key: "all", label: trainerNetwork ? `Вся сеть «${trainerNetwork}»` : "Все", ids: people.map((p) => p.id) },
+    { key: "working", label: "Работают", ids: people.filter((p) => p.working).map((p) => p.id) },
+    { key: "not_working", label: "Не работают", ids: people.filter((p) => !p.working).map((p) => p.id) },
+    ...(trainerNetwork ? [] : [{ key: "admins", label: "Админы", ids: people.filter((p) => p.admin).map((p) => p.id) }]),
+    ...networks.map((n) => ({ key: `n${n.id}`, label: `Сеть «${n.name}»`, ids: people.filter((p) => p.network_id === n.id).map((p) => p.id) })),
+  ].filter((g) => g.ids.length > 0);
+  const full = (ids: number[]) => ids.length > 0 && ids.every((id) => chosen.has(id));
+  const toggle = (ids: number[]) => {
+    tapHaptic();
+    onChange(full(ids) ? value.filter((id) => !ids.includes(id)) : [...new Set([...value, ...ids])]);
+  };
+  const unmarkedCount = people.filter((p) => !p.marked_tomorrow).length;
+  const picked = value.length;
+
   return (
-    <div>
-      <button className="flex w-full items-center gap-4 text-left" onClick={() => setOpen((v) => !v)}>
-        <span className="flex-1">
-          <span className="block font-medium">Конкретные люди</span>
-          <span className="block text-sm text-muted-foreground">{value.length ? `выбрано: ${value.length}` : "добавить к выбранным группам"}</span>
+    <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
+      <div className="space-y-3 px-5 pt-5 md:px-6">
+        <h2 className="font-semibold">Кому отправить</h2>
+        <div className="flex flex-wrap gap-1.5">
+          {groups.map((g) => (
+            <button key={g.key} type="button" onClick={() => toggle(g.ids)}
+                    className={cn("press h-9 rounded-full px-3.5 text-sm font-medium",
+                      full(g.ids) ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+              {g.label} <span className="tabular opacity-70">{g.ids.length}</span>
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+            <input className="h-10 w-full rounded-xl border-0 bg-muted pr-3 pl-9 text-sm outline-none focus:ring-2 focus:ring-ring/25"
+                   placeholder="Поиск по имени" value={q} onChange={(e) => setQ(e.target.value)} />
+          </label>
+          <Button variant="ghost" size="sm" className="h-10 shrink-0 rounded-xl" onClick={() => toggle(shown.map((p) => p.id))}>
+            {full(shown.map((p) => p.id)) ? "Снять выбор" : "Выбрать всех"}
+          </Button>
+        </div>
+      </div>
+      <ul className="mt-2 max-h-80 overflow-y-auto px-3 md:px-4" aria-label="Сотрудники">
+        {shown.map((p) => {
+          const on = chosen.has(p.id);
+          return (
+            <li key={p.id}>
+              <label className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2.5 hover:bg-muted/60">
+                <input type="checkbox" className="peer sr-only" checked={on}
+                       onChange={() => onChange(on ? value.filter((x) => x !== p.id) : [...value, p.id])} />
+                <span aria-hidden className={cn("grid size-5 shrink-0 place-items-center rounded-md border-2 peer-focus-visible:ring-2 peer-focus-visible:ring-ring",
+                  on ? "border-primary bg-primary text-primary-foreground" : "border-border")}>
+                  {on && <Check className="size-3" strokeWidth={3} />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{p.name}</span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {[p.working ? "работает" : "не работает", p.network, p.marked_tomorrow ? null : "не отметил завтра"].filter(Boolean).join(" · ")}
+                  </span>
+                </span>
+              </label>
+            </li>
+          );
+        })}
+        {shown.length === 0 && <li className="px-2 py-4 text-sm text-muted-foreground">Никого не нашли</li>}
+      </ul>
+      <label className="flex cursor-pointer items-center gap-4 border-t px-5 py-3.5 md:px-6">
+        <span className="min-w-0 flex-1">
+          <span className="block font-medium">Только тем, кто не отметил график на завтра</span>
+          <span className="block text-sm text-muted-foreground">
+            Нет ни смены, ни выходного на завтра — сейчас {unmarkedCount} {plural(unmarkedCount, "человек", "человека", "человек")}
+          </span>
         </span>
-        <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-180")} />
-      </button>
-      {value.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {value.map((id) => {
-            const p = people.find((x) => x.id === id);
-            return (
-              <span key={id} className="flex items-center gap-1 rounded-full bg-muted py-1 pr-1 pl-3 text-sm">
-                {p?.name ?? id}
-                <button aria-label="Убрать" className="grid size-6 place-items-center rounded-full hover:bg-black/5" onClick={() => onChange(value.filter((x) => x !== id))}>
-                  <X className="size-3.5" />
-                </button>
-              </span>
-            );
-          })}
-        </div>
-      )}
-      {open && (
-        <div className="row-in mt-3 space-y-2">
-          <input className="h-10 w-full rounded-xl border-0 bg-muted px-3 outline-none focus:ring-2 focus:ring-ring/25" placeholder="Поиск"
-                 value={q} onChange={(e) => setQ(e.target.value)} />
-          <ul className="max-h-56 overflow-y-auto">
-            {list.map((p) => {
-              const on = value.includes(p.id);
-              return (
-                <li key={p.id}>
-                  <button onClick={() => onChange(on ? value.filter((x) => x !== p.id) : [...value, p.id])}
-                          className="press flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-muted">
-                    <span className={cn("grid size-5 place-items-center rounded-md border-2", on ? "border-primary bg-primary text-primary-foreground" : "border-border")}>
-                      {on && <CheckCheck className="size-3" />}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                    {p.network && <span className="text-xs text-muted-foreground">{p.network}</span>}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-    </div>
+        <Switch checked={unmarked} onCheckedChange={onUnmarked} />
+      </label>
+      <p className="border-t bg-muted/40 px-5 py-3 text-sm md:px-6" aria-live="polite">
+        Выбрано: <b className="tabular">{picked}</b>
+        {unmarked && picked > 0 && <> · получат <b className="tabular">{willGet}</b>: остальные уже отметили завтра</>}
+      </p>
+    </section>
   );
 }
 

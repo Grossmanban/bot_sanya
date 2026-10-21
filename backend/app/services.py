@@ -1174,12 +1174,24 @@ AUDIENCES = {
     "not_working": "Не работают",
     "admins": "Администраторы",
 }
+# a filter on top of the chosen people, not a group: only those who haven't marked tomorrow
+UNMARKED = "unmarked_tomorrow"
+AUDIENCE_LABELS = {**AUDIENCES, UNMARKED: "Не отметили график на завтра"}
+MARKED = (*BUSY, "pre_declared_off")  # going (incl. waiting for approval) or a day off
+
+
+def marked_on(conn, day: date) -> set[int]:
+    """Who has marked the day in the schedule: a shift or a day off."""
+    return {r[0] for r in conn.execute(
+        f"SELECT user_id FROM shifts WHERE shift_date = ? AND status IN {MARKED}", (day.isoformat(),))}
 
 
 def broadcast_recipients(conn, audiences: list[str] | str, network_id: int | None = None,
-                         user_ids: list[int] | None = None, actor: dict | None = None) -> list[dict]:
+                         user_ids: list[int] | None = None, actor: dict | None = None,
+                         only_unmarked: date | None = None) -> list[dict]:
     """Union of the chosen groups, a network and hand-picked people, among people with access; each once.
-    A trainer reaches only their own network (ТЗ 7.1)."""
+    The Mini App sends only hand-picked people (a checklist), so they get exactly that list.
+    A trainer reaches only their own network (ТЗ 7.1). only_unmarked: keep those with nothing on that day."""
     if isinstance(audiences, str):
         audiences = ["working", "not_working"] if audiences == "all" else [audiences]
     audiences = audiences or []
@@ -1205,6 +1217,9 @@ def broadcast_recipients(conn, audiences: list[str] | str, network_id: int | Non
             ORDER BY id""", params)]
     if actor is not None and not perms.sees_everyone(actor):
         people = [u for u in people if perms.manages(actor, u)]
+    if only_unmarked is not None:
+        marked = marked_on(conn, only_unmarked)
+        people = [u for u in people if u["id"] not in marked]
     return people
 
 
@@ -1221,14 +1236,17 @@ def prepare_message(html: str) -> tuple[str, str]:
 
 def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True,
                      network_id: int | None = None, user_ids: list[int] | None = None, require_ack: bool = False,
-                     media: str | None = None) -> tuple[dict, list[dict]]:
+                     media: str | None = None, only_unmarked: date | None = None) -> tuple[dict, list[dict]]:
     clean, text = prepare_message(html)
     if media and len(clean) > 4000:
         raise ServiceError("Слишком длинный текст", 422, "too_long")
-    recipients = broadcast_recipients(conn, audiences, network_id, user_ids, admin)
+    recipients = broadcast_recipients(conn, audiences, network_id, user_ids, admin, only_unmarked)
     if not recipients:
-        raise ServiceError("В выбранных группах никого нет", 422, "no_recipients")
+        raise ServiceError("Среди выбранных никого нет" if only_unmarked is None
+                           else "Все выбранные уже отметили график на завтра", 422, "no_recipients")
     audience = ",".join(audiences) if isinstance(audiences, list) else audiences
+    if only_unmarked is not None:
+        audience = ",".join(x for x in (audience, UNMARKED) if x)
     with transaction(conn):
         cur = conn.execute(
             """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at, media_file_id,
