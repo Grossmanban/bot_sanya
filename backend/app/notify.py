@@ -152,7 +152,7 @@ def urgent_keyboard(shift_id: int) -> InlineKeyboardMarkup:
 
 def cancelled_text(conn, user: dict, shift: dict) -> str:
     return (
-        "❌ <b>Отмена смены</b>\n"
+        "❌ <b>Отмена смены — взял(а) выходной</b>\n"
         f"{who(user)}\n"
         f"Дата: {ddmm_wd(_day(shift))}\n"
         f"Было: {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт., {escape(shift['location'] or '')}\n"
