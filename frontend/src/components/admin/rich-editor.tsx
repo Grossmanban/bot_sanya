@@ -22,6 +22,10 @@ import { cn } from "@/lib/utils";
  * blockquote, a). The server sanitizes it again before sending.
  */
 
+/** Telegram HTML (sanitized by the server) for showing in the app: spoilers become spans the CSS hides. */
+export const displayHtml = (html: string) =>
+  html.replace(/<tg-spoiler>/g, '<span class="tg-spoiler">').replace(/<\/tg-spoiler>/g, "</span>");
+
 export interface RichEditorHandle {
   getHtml: () => { html: string; length: number };
   clear: () => void;
@@ -114,8 +118,10 @@ function unwrap(el: HTMLElement) {
   parent.removeChild(el);
 }
 
-export const RichEditor = forwardRef<RichEditorHandle, { placeholder?: string; onChange?: (length: number) => void }>(
-  function RichEditor({ placeholder, onChange }, ref) {
+export const RichEditor = forwardRef<RichEditorHandle, {
+  placeholder?: string; onChange?: (length: number) => void; label?: string; compact?: boolean;
+}>(
+  function RichEditor({ placeholder, onChange, label = "Текст сообщения", compact }, ref) {
     const root = useRef<HTMLDivElement>(null);
     const saved = useRef<Range | null>(null);
     const [active, setActive] = useState<Partial<Record<Mark, boolean>>>({});
@@ -331,7 +337,7 @@ export const RichEditor = forwardRef<RichEditorHandle, { placeholder?: string; o
           ref={root}
           role="textbox"
           aria-multiline
-          aria-label="Текст сообщения"
+          aria-label={label}
           contentEditable
           suppressContentEditableWarning
           data-placeholder={placeholder}
@@ -341,7 +347,7 @@ export const RichEditor = forwardRef<RichEditorHandle, { placeholder?: string; o
             e.preventDefault();
             document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
           }}
-          className="tg-editor min-h-40 px-4 py-3 text-[15px] leading-relaxed outline-none"
+          className={cn("tg-editor px-4 py-3 text-[15px] leading-relaxed outline-none", compact ? "min-h-24" : "min-h-40")}
         />
       </div>
     );

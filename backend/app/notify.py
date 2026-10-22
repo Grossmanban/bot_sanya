@@ -537,6 +537,10 @@ class Notifier:
                                    502, "upload_failed") from exc
         if msg.video is None:
             raise svc.ServiceError("Telegram не принял файл как видео — нужен MP4 или MOV", 415, "bad_video")
+        try:
+            media.keep_video(msg.video.file_id, data, ext)
+        except OSError as exc:  # the broadcast still goes out; only the preview in the app is lost
+            log.warning("keeping a video copy failed: %s", exc)
         return msg.video.file_id
 
     async def broadcast_reply(self, broadcast: dict, user: dict, reply: dict) -> bool:
@@ -592,6 +596,25 @@ class Notifier:
             self._photo_cache.pop(next(iter(self._photo_cache)))
         self._photo_cache[file_id] = item
         return item
+
+    async def fetch_video(self, file_id: str):
+        """A sent video for the Mini App: the kept copy, else downloaded once from Telegram (up to 20 MB)."""
+        path = media.kept_video(file_id)
+        if path is not None or self.bot is None:
+            return path
+        try:
+            file = await self._retry(lambda: self.bot.get_file(file_id))
+            buf = await self.bot.download_file(file.file_path)
+            data = buf.read()
+        except Exception as exc:  # over 20 MB, or gone
+            log.warning("video download failed: %s", exc)
+            return None
+        try:
+            media.keep_video(file_id, data, media.sniff_video(data) or "mp4")
+        except OSError as exc:
+            log.warning("keeping a video copy failed: %s", exc)
+            return None
+        return media.kept_video(file_id)
 
     async def fetch_avatar(self, telegram_id: int) -> tuple[bytes, str] | None:
         """A person's current Telegram profile photo (the onboarding card), None if hidden or absent."""
@@ -1297,18 +1320,19 @@ class Notifier:
     async def event_created(self, event: dict) -> int:
         from . import events
 
-        rule = (f"Гонка: первые {event['max_winners']} до {event['target']} шт." if event["mode"] == "first_to_reach"
-                else f"Кто больше сделает: топ-{event['max_winners']}")
-        text = (f"🏁 <b>Событие: {escape(event['title'])}</b>\n{rule}\n"
-                f"До {event['ends_at'][11:16]} {event['ends_at'][8:10]}.{event['ends_at'][5:7]}")
+        text = (f"🏁 <b>Событие: {escape(event['title'])}</b>\n{escape(events.rule(event))}\n"
+                f"👑 {escape(events.how_to_win(event))}\n"
+                f"⏱ {_shown('starts_at', event['starts_at'])} – {_shown('ends_at', event['ends_at'])}")
         if event["prize"] or event["prize_type"]:
             text += f"\n🏆 Приз: {escape(prize_line(event))}"
-        if event["description"]:
-            text += f"\n{escape(event['description'])}"
+        if event["description_html"] or event["description"]:
+            text += "\n\n" + (event["description_html"] or escape(event["description"]))
         sent = 0
         for user in svc.list_users(self.conn):
             if events.eligible(event, user):
-                sent += await self._photo_or_text(user["telegram_id"], event["prize_photo"], text, self._event_markup())
+                # the prize photo or video carries the text (or goes first when the text is too long for a caption)
+                sent += await self._deliver(user["telegram_id"], text, event["prize_photo"], self._event_markup(),
+                                            event["prize_media_kind"]) is not None
                 await asyncio.sleep(0.05)
         return sent
 

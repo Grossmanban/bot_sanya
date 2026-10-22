@@ -49,6 +49,31 @@ def save_local(data: bytes, ext: str) -> str:
     return f"local:{name}"
 
 
+VIDEO_TYPES = {"mp4": "video/mp4", "mov": "video/quicktime"}
+
+
+def _kept(file_id: str) -> Path:
+    return Path(settings.media_dir) / f"v_{hashlib.sha256(file_id.encode()).hexdigest()[:32]}"
+
+
+def keep_video(file_id: str, data: bytes, ext: str) -> None:
+    """A copy of a video sent through Telegram: the Bot API won't hand back files over 20 MB, and the Mini App
+    shows sent videos (a broadcast, a prize)."""
+    path = _kept(file_id).with_suffix(f".{ext}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def kept_video(file_id: str) -> Path | None:
+    if file_id.startswith("local:"):
+        return local_path(file_id)
+    for ext in VIDEO_TYPES:
+        path = _kept(file_id).with_suffix(f".{ext}")
+        if path.is_file():
+            return path
+    return None
+
+
 def local_path(file_id: str) -> Path | None:
     name = file_id.removeprefix("local:")
     path = (Path(settings.media_dir) / name).resolve()

@@ -340,3 +340,48 @@ def test_point_goal_resets_daily_and_counts_reviews(conn, team):
     assert upd.critical == ["reset_time"]
     lifecycle.delete(conn, t["owner"], "goal", g["id"], svc.new_key())
     assert goals.for_user(conn, t["a"], THU) == []
+
+
+def test_event_wording_formatting_and_video_prize(conn, team):
+    """«Гонка до 30 шт., 1 победитель»; the description keeps bold/italic; the prize can be a video."""
+    rule = lambda e: events.rule(e).replace("\xa0", " ")  # numbers are glued to their words with a no-break space
+    t = team
+    one = race(conn, t["owner"], description="<b>Первый</b>, кто сделает 30 отзывов <i>и загрузит</i> скриншот",
+               prize_photo="tg-video-prize", prize_media_kind="video")
+    assert rule(one) == "Гонка до 30 шт., 1 победитель"
+    assert events.how_to_win(one).replace("\xa0", " ") == "Побеждает первый, кто сделает 30 шт. и подтвердит скриншотом"
+    three = race(conn, t["owner"], mode="accumulative", target=None, max_winners=3)
+    five = race(conn, t["owner"], max_winners=5, target=50)
+    assert rule(three) == "Кто больше сделает, 3 победителя"
+    assert events.how_to_win(three) == "Побеждают 3 лучших по подтверждённым штукам к финишу"
+    assert rule(five) == "Гонка до 50 шт., 5 победителей"
+    assert events.winners_text(21) == "21\xa0победитель" and events.winners_text(12) == "12\xa0победителей"
+
+    view = events.view(conn, one)
+    assert view["description_html"] == "<b>Первый</b>, кто сделает 30 отзывов <i>и загрузит</i> скриншот"
+    assert view["description"] == "Первый, кто сделает 30 отзывов и загрузит скриншот"
+    assert view["prize_media_kind"] == "video" and view["rule"] == events.rule(one)
+    # an old plain description is shown escaped
+    conn.execute("UPDATE events SET description_html = NULL, description = 'a < b' WHERE id = ?", (three["id"],))
+    assert events.view(conn, events.get(conn, three["id"]))["description_html"] == "a &lt; b"
+    with pytest.raises(svc.ServiceError) as e:
+        race(conn, t["owner"], prize_media_kind="gif")
+    assert e.value.code == "bad_media"
+    with pytest.raises(svc.ServiceError) as e:
+        race(conn, t["owner"], description="я" * 1001)
+    assert e.value.code == "too_long"
+
+    # a new prize photo replaces the video; only the formatting changed still counts as «description»
+    before = at(THU, "09:00")
+    assert edit(conn, t["owner"], one, before, prize_photo="tg-photo").changed == ["prize_photo"]
+    assert events.get(conn, one["id"])["prize_media_kind"] == "photo"
+    assert edit(conn, t["owner"], one, before,
+                description="<i>Первый</i>, кто сделает 30 отзывов <i>и загрузит</i> скриншот").changed == ["description"]
+
+    # the announcement: the rule, how to win and the formatted description, the video carries it
+    edit(conn, t["owner"], one, before, prize_photo="tg-video-prize", prize_media_kind="video")
+    n = FakeNotifier(conn)
+    assert run(n.event_created(events.get(conn, one["id"]))) == len(n.sent) > 0  # everyone in the company
+    text = n.sent[0][1].replace("\xa0", " ")
+    assert "Гонка до 30 шт., 1 победитель" in text and "👑 Побеждает первый" in text and "<i>Первый</i>" in text
+    assert set(n.kinds) == {"video"}

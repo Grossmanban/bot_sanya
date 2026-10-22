@@ -120,6 +120,7 @@ class EventBody(BaseModel):
     network_id: int | None = None
     prize_type: str | None = None
     prize_photo: str | None = None
+    prize_media_kind: str | None = None
     idempotency_key: str
 
 
@@ -137,6 +138,7 @@ class EventPatch(BaseModel):
     prize: str | None = None
     prize_type: str | None = None
     prize_photo: str | None = None
+    prize_media_kind: str | None = None
     idempotency_key: str
 
 
@@ -615,11 +617,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def prize_photo(kind: str, item_id: int, exp: int, sig: str):
         if kind not in lifecycle.TABLES or not media.verify(item_id, exp, sig, kind=f"prize_{kind}"):
             raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
-        row = conn.execute(f"SELECT prize_photo FROM {lifecycle.TABLES[kind]} WHERE id = ?", (item_id,)).fetchone()
-        found = await notifier.fetch_photo(row[0]) if row and row[0] else None
-        if found is None:
-            raise svc.ServiceError("Фото недоступно", 404, "not_found")
-        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
+        row = dict(conn.execute(f"SELECT * FROM {lifecycle.TABLES[kind]} WHERE id = ?", (item_id,)).fetchone() or {})
+        return await media_response(row.get("prize_photo"), row.get("prize_media_kind"))
 
     @api.post("/events/{event_id}/entries")
     async def event_entry(event_id: int, request: Request, value: int = Query(...), idempotency_key: str = Query(...),
@@ -826,7 +825,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         ]
         everyone = perms.can(admin, "broadcast_all")
         return {
-            "items": svc.list_broadcasts(conn, author_tg=None if everyone else admin["telegram_id"]),
+            "items": [{**b, "media_url": media.photo_url(b["id"], kind="broadcast") if b["media_file_id"] else None}
+                      for b in svc.list_broadcasts(conn, author_tg=None if everyone else admin["telegram_id"])],
             "audiences": svc.AUDIENCE_LABELS,
             "people": people,
             "networks": [{"id": n["id"], "name": n["name"]} for n in networks.listing(conn, admin)],
@@ -858,6 +858,26 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                   "reminded_at": d["reminded_at"], "replies": replies.get(d["user_id"], [])}
                  for d in svc.broadcast_deliveries(conn, broadcast_id)]
         return {"broadcast": dict(row), "items": items}
+
+    @api.get("/media/broadcast/{broadcast_id}")
+    async def broadcast_media(broadcast_id: int, exp: int, sig: str):
+        """The photo or video of a sent broadcast — to see it in full in «Отправленные»."""
+        if not media.verify(broadcast_id, exp, sig, kind="broadcast"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        row = conn.execute("SELECT media_file_id, media_kind FROM broadcasts WHERE id = ?", (broadcast_id,)).fetchone()
+        return await media_response(row["media_file_id"] if row else None, row["media_kind"] if row else None)
+
+    async def media_response(file_id: str | None, kind: str | None):
+        if file_id and kind == "video":
+            path = await notifier.fetch_video(file_id)
+            if path is None:
+                raise svc.ServiceError("Видео недоступно в приложении — оно есть в чате с ботом", 404, "not_found")
+            return FileResponse(path, media_type=media.VIDEO_TYPES.get(path.suffix.lstrip("."), "video/mp4"),
+                                headers={"Cache-Control": "private, max-age=3600"})
+        found = await notifier.fetch_photo(file_id) if file_id else None
+        if found is None:
+            raise svc.ServiceError("Фото недоступно", 404, "not_found")
+        return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
     @api.post("/admin/broadcasts/{broadcast_id}/remind")
     async def admin_broadcast_remind(broadcast_id: int, body: RemindBody, admin: dict = Depends(staff("broadcast_network"))):
@@ -1091,7 +1111,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                               ends_at=when(body.ends_at), key=body.idempotency_key, description=body.description,
                               prize=body.prize, target=body.target, max_winners=body.max_winners,
                               max_attempts=body.max_attempts, network_id=body.network_id, prize_type=body.prize_type,
-                              prize_photo=body.prize_photo)
+                              prize_photo=body.prize_photo, prize_media_kind=body.prize_media_kind)
         notifier.spawn(notifier.event_created(event))
         return {"event": events.view(conn, event)}
 
@@ -1100,6 +1120,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         """ТЗ №20: critical changes are announced only when the editor confirmed «уведомить»."""
         sent = body.model_fields_set - {"version", "notify", "idempotency_key"}
         changes = {k: getattr(body, k) for k in sent}
+        if "prize_media_kind" in changes and "prize_photo" not in changes:
+            raise svc.ServiceError("Видео или фото приза меняется вместе с файлом", 422, "bad_media")
         for k in ("starts_at", "ends_at"):
             if k in changes:
                 changes[k] = when(changes[k])
@@ -1367,8 +1389,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"profile": payouts.public_profile(profile, True)}
 
     @api.post("/admin/media/video")
-    async def admin_upload_video(request: Request, admin: dict = Depends(staff("broadcast_network"))):
-        """A video for a broadcast (MP4/MOV up to 50 MB — Telegram's limit for bots)."""
+    async def admin_upload_video(request: Request, admin: dict = Depends(admin_user)):
+        """A video for a broadcast or an event's prize (MP4/MOV up to 50 MB — Telegram's limit for bots)."""
         data = await request.body()
         if not data:
             raise svc.ServiceError("Выберите видео", 422, "video_required")
@@ -1377,7 +1399,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         ext = media.sniff_video(data)
         if ext is None:
             raise svc.ServiceError("Нужно видео MP4 или MOV", 415, "bad_video")
-        file_id = await notifier.store_video(admin["telegram_id"], data, ext, "🎬 Видео для рассылки загружено")
+        file_id = await notifier.store_video(admin["telegram_id"], data, ext, "🎬 Видео загружено в приложение")
         return {"file_id": file_id}
 
     # ------------------------------------------------------------ broadcast templates

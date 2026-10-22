@@ -203,6 +203,7 @@ def view(conn: sqlite3.Connection, app: dict) -> dict:
         "training_days": _days(app),
         "user_id": user["id"], "telegram_id": user["telegram_id"], "username": user["username"],
         "referrer": svc.full_name(ref) if ref else None,
+        "referrer_tg": {"telegram_id": ref["telegram_id"], "username": ref["username"]} if ref else None,
         "trainer": {"id": trainer["id"], "name": svc.full_name(trainer), "username": trainer["username"]} if trainer else None,
         "earlier": history,  # earlier applications of the same person (kept in history)
         "progress": progress(conn, app, user),

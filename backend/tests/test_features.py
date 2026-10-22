@@ -1164,3 +1164,30 @@ def test_broadcast_templates(conn, make_user):
         broadcasts.save_template(conn, owner, "", "текст")
     broadcasts.delete_template(conn, trainer, mine["id"])
     assert [x["title"] for x in broadcasts.templates(conn)] == ["Сбор"]
+
+
+def test_sent_broadcast_media_opens_in_full(conn, make_user):
+    """«Отправленные»: the photo or video of a sent broadcast opens in the app (videos — from the kept copy)."""
+    from fastapi.testclient import TestClient
+
+    from app import media
+    from app.api import create_app
+    from app.auth import sign_init_data
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    a = make_user(first="Аня")
+    clip = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 64
+    media.keep_video("tg-video-1", clip, "mp4")  # what store_video keeps after the upload to Telegram
+    row, _ = svc.create_broadcast(conn, owner, [], "<b>Длинный</b> текст", user_ids=[a["id"]], media="tg-video-1",
+                                  media_kind="video")
+    client = TestClient(create_app(conn, FakeNotifier(conn)))
+    headers = {"X-Telegram-Init-Data": sign_init_data({"id": 999, "first_name": "Саня"}, settings.bot_token)}
+    item = client.get("/api/admin/broadcasts", headers=headers).json()["items"][0]
+    assert item["id"] == row["id"] and item["media_url"].startswith(f"/api/media/broadcast/{row['id']}?")
+    got = client.get(item["media_url"])
+    assert got.status_code == 200 and got.headers["content-type"] == "video/mp4" and got.content == clip
+    part = client.get(item["media_url"], headers={"Range": "bytes=0-7"})  # the player asks for pieces
+    assert part.status_code == 206 and part.content == clip[:8]
+    assert client.get(item["media_url"].replace("sig=", "sig=0")).status_code == 403
+    plain, _ = svc.create_broadcast(conn, owner, [], "Без медиа", user_ids=[a["id"]])
+    assert client.get("/api/admin/broadcasts", headers=headers).json()["items"][0]["media_url"] is None

@@ -129,6 +129,8 @@ export interface Application {
   telegram_id: number;
   username: string | null;
   referrer: string | null;
+  /** to open the referrer's Telegram profile */
+  referrer_tg: { telegram_id: number; username: string | null } | null;
   trainer: { id: number; name: string; username: string | null } | null;
   earlier: number;
   progress: StageProgress | null;
@@ -163,6 +165,13 @@ export interface LiveEvent extends Lifecycle {
   id: number;
   title: string;
   description: string | null;
+  /** the description with formatting (Telegram HTML, sanitized by the server) */
+  description_html: string | null;
+  /** «Гонка до 30 шт., 1 победитель» */
+  rule: string;
+  /** «Побеждает первый, кто сделает 30 шт. и подтвердит скриншотом» */
+  how_to_win: string;
+  prize_media_kind?: "photo" | "video" | null;
   mode: "first_to_reach" | "accumulative";
   target: number | null;
   max_winners: number;
@@ -201,6 +210,7 @@ export interface EventChanges {
   prize?: string | null;
   prize_type?: string | null;
   prize_photo?: string | null;
+  prize_media_kind?: "photo" | "video";
 }
 
 export interface GoalChanges {
@@ -735,6 +745,8 @@ export interface Broadcast {
   /** «Возможность ответить»: how many people replied */
   allow_reply?: number;
   replied?: number;
+  /** the photo or video, signed — to see the sent message in full */
+  media_url?: string | null;
 }
 
 export interface BroadcastTemplate {
@@ -962,7 +974,7 @@ export const api = {
     createEvent: (
       body: { title: string; mode: LiveEvent["mode"]; starts_at: string; ends_at: string; description?: string; prize?: string;
         target?: number | null; max_winners: number; max_attempts: number; network_id?: number | null; prize_type?: string | null;
-        prize_photo?: string | null },
+        prize_photo?: string | null; prize_media_kind?: "photo" | "video" },
       key: string,
     ) => post<{ event: LiveEvent }>("/api/admin/events", { ...body, idempotency_key: key }),
     updateEvent: (id: number, body: EventChanges & { version: number; notify: boolean }, key: string) =>

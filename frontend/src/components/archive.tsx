@@ -57,7 +57,7 @@ function ArchivedEvent({ event: e }: { event: LiveEvent }) {
           </span>
           {e.my.score > 0 && <span className="block text-xs text-muted-foreground">Мой результат: {e.my.confirmed} шт.{e.my.winner ? " · 👑 победа" : ""}</span>}
         </span>
-        {(e.prize || e.prize_type || e.prize_photo_url) && <PrizeThumb url={e.prize_photo_url} className="size-12" />}
+        {(e.prize || e.prize_type || e.prize_photo_url) && <PrizeThumb url={e.prize_photo_url} kind={e.prize_media_kind} className="size-12" />}
         <ChevronDown className={cn("mt-1 size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
       </button>
       {open && (
