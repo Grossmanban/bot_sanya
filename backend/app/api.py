@@ -268,6 +268,11 @@ class TxCancel(BaseModel):
     idempotency_key: str
 
 
+class TxForgive(BaseModel):
+    reason: str | None = None
+    idempotency_key: str
+
+
 class TxAmount(BaseModel):
     amount: int
     idempotency_key: str
@@ -1353,6 +1358,15 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             for row in conn.execute("SELECT * FROM financial_transactions WHERE linked_tx_id = ? AND status = 'cancelled'",
                                     (tx_id,)):
                 notifier.spawn(notifier.tx_cancelled(dict(row), admin, "active"))
+        return {"tx": finance.public(result.tx), "changed": result.changed}
+
+    @api.post("/admin/finances/{tx_id}/forgive")
+    async def admin_tx_forgive(tx_id: int, body: TxForgive, admin: dict = Depends(staff("forgive_fines"))):
+        """«Простить» a fine: owners and admins — anyone's, a trainer — their network's; the reason is optional."""
+        before = finance.get(conn, tx_id)
+        result = finance.forgive(conn, admin, tx_id, body.reason, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.tx_forgiven(result.tx, admin, before["status"], (body.reason or "").strip() or None))
         return {"tx": finance.public(result.tx), "changed": result.changed}
 
     @api.post("/admin/finances/{tx_id}/amount")

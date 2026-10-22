@@ -268,7 +268,7 @@ def violation_text(v: dict, user: dict, tx: dict | None) -> str:
              f"📊 <b>Статистика:</b>\n• Требование: {req} {violations.days_word(req)}\n"
              f"• Факт: {act} {violations.days_word(act)}")
     head = (f"👤 Сотрудник: {escape(svc.full_name(user))}\n📅 Период: {violations.period(v)}\n\n")
-    comment = f"📝 Комментарий администратора: «{escape(v['resolution_comment'] or '')}»"
+    comment = f"📝 Комментарий администратора: «{escape(v['resolution_comment'])}»" if v["resolution_comment"] else ""
     if v["status"] == "penalized":
         missed = max(0, req - act)
         return ("⚠️ <b>НАРУШЕНИЕ ГРАФИКА | ШТРАФ НАЗНАЧЕН</b>\n\n" + head + stats +
@@ -277,7 +277,7 @@ def violation_text(v: dict, user: dict, tx: dict | None) -> str:
                 f"📎 Доказательства: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
                 "ℹ️ Ваш текущий баланс обновлён. Пожалуйста, ознакомьтесь с правилами выхода на работу.")
     return ("✅ <b>НАРУШЕНИЕ ГРАФИКА | СНЯТО АДМИНИСТРАЦИЕЙ</b>\n\n" + head + stats +
-            f"\n\n💬 Решение: штраф не начислен.\n{comment}\n"
+            f"\n\n💬 Решение: штраф не начислен.\n" + (f"{comment}\n" if comment else "") +
             f"📎 Документы: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
             "ℹ️ Спасибо за своевременное информирование. Соблюдайте график в будущем.")
 
@@ -298,7 +298,7 @@ def violation_archive_text(v: dict, user: dict, resolver: dict, tx: dict | None,
                 f"{media_line}\n⏱ Время: {stamp()}")
     return (f"☑️ <b>НАРУШЕНИЕ ПОГАШЕНО (БЕЗ ШТРАФА)</b>\n👤 Кто: {name_handle(user)}\n"
             f"👮‍♂️ Решил: {role} {name_handle(resolver)}\n📊 Нарушение: {escape(reason)}\n"
-            f"💬 Основание: {escape(v['resolution_comment'] or '')}\n{media_line}\n⏱ Время: {stamp()}")
+            f"💬 Основание: {escape(v['resolution_comment'] or 'без указания причины')}\n{media_line}\n⏱ Время: {stamp()}")
 
 
 # ---------------------------------------------------------------- sender
@@ -1026,7 +1026,7 @@ class Notifier:
         user = svc.get_user(self.conn, tx["user_id"])
         text = (f"🧾 <b>Заявка на штраф</b> от тренера {who(trainer)}\n{who(user)}: <b>{tx['amount']} ₽</b>\n"
                 f"Причина: {escape(tx['reason'])}")
-        for chat in svc.owner_telegram_ids():
+        for chat in svc.admin_telegram_ids(self.conn):  # owners and admins decide
             await self._photo_or_text(chat, tx["media_file_id"], text, fine_decision_keyboard(tx["id"]))
 
     async def tx_created(self, tx: dict, actor: dict) -> None:
@@ -1075,6 +1075,19 @@ class Notifier:
                             f"{'одобрена' if tx['status'] == 'active' else 'отклонена'}.{comment}")
         await self.archive(tags, f"{verdict} ШТРАФ {tx['amount']} ₽ — {who(user)}\nПричина: {escape(tx['reason'])}"
                            f"{comment}\nРешил: {who(actor)}", user)
+
+    async def tx_forgiven(self, tx: dict, actor: dict, was: str, reason: str | None) -> None:
+        user = svc.get_user(self.conn, tx["user_id"])
+        amount = f" {tx['amount']} ₽" if tx["amount"] else ""
+        why = f"\nПричина: {escape(reason)}" if reason else ""
+        if was != "pending_admin_approval":  # a request nobody approved was never shown to the employee
+            await self.send(user["telegram_id"], f"🤝 Штраф{amount} прощён.{why}")
+        role = perms.ROLE_TITLES[perms.role_of(actor)].lower()
+        await self.archive(["штраф", "прощён"], f"🤝 ШТРАФ{amount} ПРОЩЁН — {who(user)}\nБыло: {escape(tx['reason'])}"
+                           f"{why}\nПростил: {who(actor)} ({role})", user)
+        creator = svc.get_user_by_tg(self.conn, tx["created_by"]) if tx["created_by"] else None
+        if creator and creator["telegram_id"] != actor["telegram_id"] and perms.is_staff(creator):
+            await self.send(creator["telegram_id"], f"🤝 Ваш штраф{amount} ({who(user)}) простил {who(actor)}.{why}")
 
     async def tx_cancelled(self, tx: dict, actor: dict, was: str) -> None:
         user = svc.get_user(self.conn, tx["user_id"])

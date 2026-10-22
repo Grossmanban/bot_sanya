@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Gift, LoaderCircle, MinusCircle, Receipt, Undo2 } from "lucide-react";
+import { Gift, HeartHandshake, LoaderCircle, MinusCircle, Receipt, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api, type Balance, type Tx, type TxType } from "@/lib/api";
@@ -59,11 +59,14 @@ export function TxRow({ tx, showName, actions, onChanged }: { tx: Tx; showName?:
   const meta = TYPE_META[tx.type];
   const Icon = meta.icon;
   const dead = DEAD.includes(tx.status);
-  const [mode, setMode] = useState<null | "cancel" | "amount">(null);
+  const [mode, setMode] = useState<null | "cancel" | "amount" | "forgive">(null);
   const canFine = useCan("fine_direct");
   const canMoney = useCan("money");
-  const canCancel = actions && ["draft", "active", "pending_admin_approval"].includes(tx.status)
-    && (tx.type === "deduction" ? canMoney : canFine);
+  const canForgiveAny = useCan("forgive_fines");
+  const open = actions && ["draft", "active", "pending_admin_approval"].includes(tx.status);
+  // a fine is forgiven (the reason is optional); bonuses and deductions are annulled with a reason
+  const canForgive = open && tx.type === "fine" && canForgiveAny;
+  const canCancel = open && tx.type !== "fine" && (tx.type === "deduction" ? canMoney : canFine);
   const canFill = actions && tx.status === "draft" && canFine;
 
   return (
@@ -89,9 +92,14 @@ export function TxRow({ tx, showName, actions, onChanged }: { tx: Tx; showName?:
           {tx.amount != null ? `${meta.sign}${rub(tx.amount)}` : "—"}
         </span>
       </div>
-      {(canCancel || canFill) && !mode && (
+      {(canCancel || canFill || canForgive) && !mode && (
         <div className="mt-2 flex gap-2 pl-12">
           {canFill && <Button size="sm" className="press h-8 rounded-lg" onClick={() => setMode("amount")}>Назначить сумму</Button>}
+          {canForgive && (
+            <Button size="sm" variant="ghost" className="press h-8 rounded-lg text-muted-foreground" onClick={() => setMode("forgive")}>
+              <HeartHandshake /> Простить
+            </Button>
+          )}
           {canCancel && (
             <Button size="sm" variant="ghost" className="press h-8 rounded-lg text-muted-foreground" onClick={() => setMode("cancel")}>
               <Undo2 /> Аннулировать
@@ -100,6 +108,7 @@ export function TxRow({ tx, showName, actions, onChanged }: { tx: Tx; showName?:
         </div>
       )}
       {mode === "cancel" && <CancelForm tx={tx} onClose={() => setMode(null)} onDone={onChanged} />}
+      {mode === "forgive" && <ForgiveForm tx={tx} onClose={() => setMode(null)} onDone={onChanged} />}
       {mode === "amount" && <AmountForm tx={tx} onClose={() => setMode(null)} onDone={onChanged} />}
     </li>
   );
@@ -124,6 +133,30 @@ function CancelForm({ tx, onClose, onDone }: { tx: Tx; onClose: () => void; onDo
                 }
               }}>
         {busy && <LoaderCircle className="animate-spin" />} OK
+      </Button>
+      <Button size="sm" variant="ghost" className="h-10 rounded-xl" onClick={onClose}>Отмена</Button>
+    </div>
+  );
+}
+
+/** «Простить»: the fine stops counting; the reason is optional (the employee sees it if given). */
+function ForgiveForm({ tx, onClose, onDone }: { tx: Tx; onClose: () => void; onDone?: () => void }) {
+  const [reason, setReason] = useState("");
+  const { busy, run } = useAction();
+  return (
+    <div className="mt-2 flex gap-2 pl-12">
+      <input autoFocus className={input} placeholder="Причина (по желанию)" value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} />
+      <Button size="sm" className="press h-10 rounded-xl" disabled={!!busy}
+              onClick={async () => {
+                try {
+                  await run("forgive", (k) => api.admin.forgiveTx(tx.id, reason.trim() || null, k), "Штраф прощён");
+                  onClose();
+                  onDone?.();
+                } catch {
+                  /* toast shown */
+                }
+              }}>
+        {busy && <LoaderCircle className="animate-spin" />} Простить
       </Button>
       <Button size="sm" variant="ghost" className="h-10 rounded-xl" onClick={onClose}>Отмена</Button>
     </div>
@@ -214,7 +247,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
         setPhoto(null);
         onDone?.();
       } else if (res) {
-        toast.success(res.tx.status === "pending_admin_approval" ? "Заявка на штраф отправлена владельцу" : `${TYPE_META[type].label} ${rub(n)} начислен`);
+        toast.success(res.tx.status === "pending_admin_approval" ? "Заявка на штраф отправлена на согласование администраторам" : `${TYPE_META[type].label} ${rub(n)} начислен`);
         setAmount("");
         setReason("");
         setPhoto(null);
@@ -282,7 +315,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
       <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 500))} placeholder="Причина"
                 className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
       <PhotoPicker value={photo} onChange={setPhoto} label="Фото или скриншот" optional />
-      {type === "fine" && !canFine && <p className="text-xs text-muted-foreground">Штраф от тренера вступит в силу после одобрения владельцем.</p>}
+      {type === "fine" && !canFine && <p className="text-xs text-muted-foreground">Штраф от тренера вступит в силу после одобрения администратором.</p>}
       <Button className={cn("press h-12 w-full rounded-2xl text-[15px] font-semibold", type === "bonus" && "bg-go text-white hover:bg-go/90",
         type === "fine" && "bg-cancel text-white hover:bg-cancel/90")}
               disabled={!!busy || !n || !reason.trim()} onClick={submit}>

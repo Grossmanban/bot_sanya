@@ -160,7 +160,7 @@ function PendingCard({ v, onPick }: { v: Violation; onPick: (mode: "fine" | "wai
         </Button>
         <Button variant="secondary" className="press h-12 rounded-2xl bg-go-soft text-[15px] font-semibold text-go hover:bg-go-soft/80"
                 onClick={() => onPick("waive")}>
-          <ShieldCheck /> {v.kind === "unmarked" ? "Простить" : "Снять нарушение"}
+          <ShieldCheck /> Простить
         </Button>
       </div>
     </section>
@@ -209,7 +209,7 @@ function DecisionDrawer({ open, onClose, onDone }: {
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
                 <DrawerTitle className="font-display text-xl font-semibold">
-                  {open.mode === "fine" ? "Штраф за пропуск графика" : "Снять нарушение"}
+                  {open.mode === "fine" ? "Штраф за пропуск графика" : "Простить нарушение"}
                 </DrawerTitle>
                 <DrawerDescription>
                   {open.v.name} · {what(open.v)}
@@ -236,14 +236,15 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
   const [sent, setSent] = useState(false);
   const { busy, run } = useAction();
   const sum = Number(amount);
-  const ready = comment.trim().length > 0 && (!fine || (Number.isInteger(sum) && sum > 0));
+  // a fine needs its reason; «Простить» — the reason is optional
+  const ready = !fine || (comment.trim().length > 0 && Number.isInteger(sum) && sum > 0);
 
   async function submit() {
     try {
       await run(mode, (k) => fine
         ? api.admin.fineViolation(v.id, { amount: sum, comment: comment.trim(), media_files: files }, k)
         : api.admin.waiveViolation(v.id, { comment: comment.trim(), media_files: files }, k),
-      fine ? (direct ? "Штраф назначен, сотрудник получил уведомление" : "Штраф отправлен владельцу на согласование")
+      fine ? (direct ? "Штраф назначен, сотрудник получил уведомление" : "Штраф отправлен на согласование администраторам")
         : "Нарушение снято, сотрудник получил уведомление");
       setSent(true);  // the buttons stay disabled: one violation, one decision
       onDone();
@@ -273,7 +274,7 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
       )}
 
       <div>
-        <p className="mb-2 text-sm font-semibold">{fine ? "Причина" : "Почему штраф не назначается"}</p>
+        <p className="mb-2 text-sm font-semibold">{fine ? "Причина" : "Почему прощаете (по желанию)"}</p>
         {!fine && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {EXCUSES.map((e) => (
@@ -285,14 +286,16 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
         <textarea rows={fine ? 4 : 3} className={cn(field, "resize-none py-3 leading-snug")} maxLength={500}
                   placeholder={fine ? "" : "Например: предоставлена справка из больницы, претензий нет"}
                   value={comment} onChange={(e) => setComment(e.target.value)} />
-        <p className="mt-1 text-xs text-muted-foreground">Обязательно — сотрудник увидит этот текст, копия уйдёт в архив.</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {fine ? "Обязательно — сотрудник увидит этот текст, копия уйдёт в архив." : "По желанию — если укажете, сотрудник увидит этот текст."}
+        </p>
       </div>
 
       <Uploads title={fine ? "Доказательства" : "Документы"} max={5} value={files} onChange={setFiles}
                hint={fine ? "Переписка, фото прогула — до 5 файлов, по желанию" : "Скриншот больничного, приказ, переписка — до 5 файлов"} />
 
       {fine && !direct && (
-        <p className="rounded-2xl bg-wait-soft p-3 text-sm text-wait">Штраф тренера вступит в силу после согласования владельцем.</p>
+        <p className="rounded-2xl bg-wait-soft p-3 text-sm text-wait">Штраф тренера вступит в силу после согласования администратором.</p>
       )}
 
       <Button className={cn("press h-12 w-full rounded-2xl text-[15px] font-semibold",

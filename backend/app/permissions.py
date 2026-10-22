@@ -52,8 +52,9 @@ CAN = {
     "roles": {OWNER},
     "global_actual": {OWNER},
     "networks": {OWNER},
-    "fine_direct": {OWNER, ADMIN},  # trainers' fines wait for an owner
-    "approve_fines": {OWNER},
+    "fine_direct": {OWNER, ADMIN},  # trainers' fines wait for an owner or an admin
+    "approve_fines": {OWNER, ADMIN},
+    "forgive_fines": {OWNER, ADMIN, TRAINER},  # «Простить» a fine, the reason is optional; a trainer — their network
     "fine_request": {TRAINER},
     "bonus": {OWNER, ADMIN, TRAINER},
     "pause": {OWNER, ADMIN, TRAINER},

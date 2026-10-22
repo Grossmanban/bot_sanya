@@ -50,7 +50,7 @@ export const ROLE_TITLES: Record<Role, string> = {
 export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
-  | "registrations" | "export" | "raspred" | "all_people";
+  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines";
 
 export const isStaff = (u: User) => u.role !== "employee" && u.account_state !== "blocked";
 
@@ -964,6 +964,9 @@ export const api = {
       post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, amount, reason, media_file_id, idempotency_key: key }),
     decideTx: (id: number, approve: boolean, comment: string | null, key: string) =>
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/decide`, { approve, comment, idempotency_key: key }),
+    /** «Простить» a fine: the reason is optional */
+    forgiveTx: (id: number, reason: string | null, key: string) =>
+      post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/forgive`, { reason, idempotency_key: key }),
     cancelTx: (id: number, reason: string, key: string) =>
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/cancel`, { reason, idempotency_key: key }),
     fillTx: (id: number, amount: number, key: string) =>
