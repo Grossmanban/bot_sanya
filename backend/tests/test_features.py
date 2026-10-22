@@ -909,11 +909,14 @@ def test_broadcast_only_to_those_who_have_not_marked_tomorrow(conn, make_user):
     shift(conn, a, tomorrow)  # going
     svc.pre_declare_off(conn, b, tomorrow, svc.new_key(), today=TODAY)  # a day off is marked too
     gone = shift(conn, c, tomorrow)
-    svc.cancel_shift(conn, c, gone["id"], svc.new_key(), today=TODAY)  # cancelled — nothing marked any more
-    assert svc.marked_on(conn, tomorrow) == {a["id"], b["id"]}
+    svc.cancel_shift(conn, c, gone["id"], svc.new_key(), today=TODAY)  # «Беру выходной»: the day is marked as off
+    assert svc.marked_on(conn, tomorrow) == {a["id"], b["id"], c["id"]}
+    offset = 0 if tomorrow.isocalendar()[1] == TODAY.isocalendar()[1] else 1
+    day = next(d for d in svc.week_view(conn, a, offset, today=TODAY)["days"] if d["date"] == tomorrow.isoformat())
+    assert sorted(o["first_name"] for o in day["colleagues_off"]) == ["Боря", "Вика"]  # colleagues see it as off
     everyone = [a["id"], b["id"], c["id"], d["id"]]
     row, rec = svc.create_broadcast(conn, owner, [], "Отметьте график на завтра", user_ids=everyone, only_unmarked=tomorrow)
-    assert sorted(u["first_name"] for u in rec) == ["Вика", "Гоша"] and "unmarked_tomorrow" in row["audience"]
+    assert sorted(u["first_name"] for u in rec) == ["Гоша"] and "unmarked_tomorrow" in row["audience"]
     with pytest.raises(svc.ServiceError) as e:
         svc.create_broadcast(conn, owner, [], "Привет", user_ids=[a["id"]], only_unmarked=tomorrow)
     assert e.value.code == "no_recipients"

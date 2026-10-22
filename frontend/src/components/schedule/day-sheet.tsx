@@ -258,7 +258,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
                 className="press h-12 w-full rounded-2xl text-[15px] font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
               >
                 {(busy === "cancel" || busy === "final") && <LoaderCircle className="animate-spin" />}
-                Не выйду
+                Беру выходной
               </Button>
             )}
           </>
@@ -268,9 +268,10 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
       <AlertDialog open={confirm === "cancel"} onOpenChange={(o) => !o && setConfirm(null)}>
         <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle className="font-display">Отменить выход?</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Взять выходной?</AlertDialogTitle>
             <AlertDialogDescription>
-              Администраторы получат уведомление. Потом можно один раз вернуться в график на этот день.
+              Смена отменится, а день станет выходным — коллеги это увидят, администраторы получат уведомление.
+              Передумаешь — один раз можно вернуться в график на этот день.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -278,9 +279,9 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
             <AlertDialogAction
               variant="destructive"
               className="rounded-xl"
-              onClick={() => shift && act("cancel", (k) => api.cancel(shift.id, k), "Выход отменён")}
+              onClick={() => shift && act("cancel", (k) => api.cancel(shift.id, k), "Выходной отмечен, смена отменена")}
             >
-              Отменить выход
+              Беру выходной
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -289,9 +290,10 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
       <AlertDialog open={confirm === "final"} onOpenChange={(o) => !o && setConfirm(null)}>
         <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle className="font-display">Отменить окончательно?</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Выходной со штрафом?</AlertDialogTitle>
             <AlertDialogDescription>
-              Вернуться на этот день будет нельзя, и начислится штраф. Сумму назначит администратор.
+              Эту смену ты уже отменял и восстанавливал, поэтому отмена будет окончательной: вернуться на этот день
+              будет нельзя, и начислится штраф. Сумму назначит администратор.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -299,9 +301,9 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
             <AlertDialogAction
               variant="destructive"
               className="rounded-xl"
-              onClick={() => shift && act("final", (k) => api.finalCancel(shift.id, k), "Смена отменена окончательно")}
+              onClick={() => shift && act("final", (k) => api.finalCancel(shift.id, k), "Выходной отмечен, смена отменена окончательно")}
             >
-              Отменить со штрафом
+              Беру выходной со штрафом
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -347,8 +349,11 @@ function ShiftView({ shift }: { shift: Shift }) {
         <Notice tone="wait">Администратор ещё не ответил на срочную заявку. Статус обновится сам.</Notice>
       )}
       {status === "restored" && <Notice tone="wait">Смена восстановлена. Следующая отмена будет окончательной и со штрафом.</Notice>}
+      {status === "cancelled" && shift.can_restore && (
+        <Notice tone="muted">Ты взял выходной — смена отменена. Передумаешь — нажми «Передумал, выйду» (это можно один раз).</Notice>
+      )}
       {status === "cancelled" && !shift.can_restore && (
-        <Notice tone="cancel">Выход отменён. Вернуться на этот день можно только через администратора.</Notice>
+        <Notice tone="cancel">Ты взял выходной — смена отменена. Вернуться на этот день можно только через администратора.</Notice>
       )}
       {status === "finally_cancelled" && (
         <Notice tone="cancel">

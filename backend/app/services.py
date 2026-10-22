@@ -7,6 +7,8 @@ Shift lifecycle (one row per user per date):
     awaiting_approval --admin--> active | rejected_by_admin
     (none) --pre-declare--> pre_declared_off --clear--> (none)
     active --cancel--> cancelled --restore--> restored --final cancel--> finally_cancelled
+
+A cancelled shift is a day off («Беру выходной»): the day counts as marked and colleagues see it as off.
 """
 
 import json
@@ -29,6 +31,8 @@ MAX_LOCATION = 100
 MAX_PENALTY = 1_000_000
 BOOKING_WEEKS_AHEAD = 1
 BUSY = ("active", "restored", "awaiting_approval")
+# a day off: declared ahead, or the shift given up («Беру выходной»)
+DAY_OFF = ("pre_declared_off", "cancelled", "finally_cancelled")
 # soft-deleted rows: kept as history, invisible everywhere else
 DEAD = ("withdrawn", "removed")
 LIVE = f"status NOT IN {DEAD}"  # statuses that take a place at a point
@@ -532,7 +536,7 @@ def week_view(conn, user: dict, offset: int, today: date | None = None, hide_nam
         f"""SELECT s.shift_date, s.status, s.start_time, s.end_time, s.location, u.first_name, u.last_name
             FROM shifts s JOIN users u ON u.id = s.user_id
             WHERE s.shift_date BETWEEN ? AND ? AND s.user_id != ?
-              AND s.status IN ('active','restored','pre_declared_off')
+              AND s.status IN {(*ACTIVE, *DAY_OFF)}
             ORDER BY s.start_time IS NULL, s.start_time, u.first_name""",
         (first, last, user["id"]),
     ):
@@ -552,7 +556,7 @@ def week_view(conn, user: dict, offset: int, today: date | None = None, hide_nam
             name = "Коллега" if hide_names else full_name(c)
             if hide_names:
                 c = {**c, "first_name": ""}
-            if c["status"] == "pre_declared_off":
+            if c["status"] in DAY_OFF:
                 off.append({"name": name, "first_name": c["first_name"]})
             else:
                 colleagues.append(
@@ -1213,7 +1217,7 @@ AUDIENCES = {
 # a filter on top of the chosen people, not a group: only those who haven't marked tomorrow
 UNMARKED = "unmarked_tomorrow"
 AUDIENCE_LABELS = {**AUDIENCES, UNMARKED: "Не отметили график на завтра"}
-MARKED = (*BUSY, "pre_declared_off")  # going (incl. waiting for approval) or a day off
+MARKED = (*BUSY, *DAY_OFF)  # going (incl. waiting for approval) or a day off (incl. a given-up shift)
 
 
 def marked_on(conn, day: date) -> set[int]:

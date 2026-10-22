@@ -75,14 +75,14 @@ export const STATUS_META: Record<DayState, StatusMeta> = {
   awaiting_approval: { label: "Ждёт решения", text: "text-wait", dot: "bg-wait", soft: "bg-wait-soft", bar: "bg-wait" },
   pre_declared_off: { label: "Выходной", text: "text-off", dot: "bg-off", soft: "bg-muted", bar: "" },
   cancelled: {
-    label: "Отменено",
+    label: "Взят выходной",
     text: "text-cancel",
     dot: "bg-cancel",
     soft: "bg-cancel-soft",
     bar: "border-[1.5px] border-dashed border-cancel bg-cancel-soft",
   },
   finally_cancelled: {
-    label: "Отменено со штрафом",
+    label: "Выходной со штрафом",
     text: "text-final",
     dot: "bg-final",
     soft: "bg-cancel-soft",
