@@ -53,6 +53,7 @@ export function ShiftForm({
   load = {},
   ownLocation,
   disabled,
+  volumeLocked,
 }: {
   form: FormState;
   onChange: (f: FormState) => void;
@@ -65,6 +66,8 @@ export function ShiftForm({
   /** my own booking on this day already counts in `load` */
   ownLocation?: string | null;
   disabled?: boolean;
+  /** 00:00 after booking has passed: the volume stays as it is */
+  volumeLocked?: boolean;
 }) {
   const set = (patch: Partial<FormState>) => onChange({ ...form, ...patch });
   const volume = Number(form.volume) || 0;
@@ -150,6 +153,15 @@ export function ShiftForm({
         </>
       )}
 
+      {volumeLocked ? (
+        <div className="space-y-1.5">
+          <span className="text-sm text-muted-foreground">Объём, шт.</span>
+          <p className="flex items-center gap-3 rounded-2xl bg-muted px-4 py-3">
+            <span className="font-display text-2xl font-semibold tabular">{form.volume}</span>
+            <span className="text-sm text-muted-foreground">зафиксирован в 00:00 после записи — изменить может администратор</span>
+          </p>
+        </div>
+      ) : (
       <div className="space-y-1.5">
         <span className="text-sm text-muted-foreground">Объём, шт.</span>
         <div className="flex items-center gap-2">
@@ -176,6 +188,7 @@ export function ShiftForm({
               : `${volume} × ${rate} ₽, план ${rub(volume * rate)}`}
         </p>
       </div>
+      )}
     </fieldset>
   );
 }

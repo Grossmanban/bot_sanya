@@ -9,6 +9,10 @@ Shift lifecycle (one row per user per date):
     active --cancel--> cancelled --restore--> restored --final cancel--> finally_cancelled
 
 A cancelled shift is a day off («Беру выходной»): the day counts as marked and colleagues see it as off.
+
+Changing a shift yourself: until 00:00 of the day it was booked (or restored) — anything, as often as needed
+(the schedule is still being set). From 00:00 the volume is fixed; the time or the point can be changed once,
+the next change is a request that an admin or the network's trainer approves (shift_change_requests).
 """
 
 import json
@@ -16,13 +20,13 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 from . import permissions as perms
 from . import pricing
 from .config import settings
 from .db import transaction
-from .timeutil import now_iso, today_local, week_dates
+from .timeutil import now_iso, now_local, today_local, week_dates
 
 ACTIVE = ("active", "restored")
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -462,8 +466,30 @@ def shifts_on(conn, day: date) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | None = None) -> dict | None:
-    """conn adds the report block (state, deadline, last attempt) for cards that show it."""
+def volume_until(shift: dict) -> datetime:
+    """The end of the free editing window: 00:00 after the moment the shift was booked (or restored)."""
+    try:
+        booked = datetime.fromisoformat(shift.get("restored_at") or shift["created_at"])
+    except (TypeError, ValueError):  # no usable stamp: the window closed by the shift's day
+        return datetime.combine(date.fromisoformat(shift["shift_date"]), time(0), tzinfo=settings.tz)
+    booked = booked.astimezone(settings.tz) if booked.tzinfo else booked.replace(tzinfo=settings.tz)
+    return datetime.combine(booked.date() + timedelta(days=1), time(0), tzinfo=settings.tz)
+
+
+def in_window(shift: dict, now: datetime) -> bool:
+    """Still setting the schedule: before 00:00 after booking, unless an admin has changed the shift by hand."""
+    return not shift.get("edit_window_closed") and now < volume_until(shift)
+
+
+def pending_change(conn, shift_id: int) -> dict | None:
+    row = conn.execute("SELECT * FROM shift_change_requests WHERE shift_id = ? AND status = 'pending'",
+                       (shift_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | None = None,
+                    now: datetime | None = None) -> dict | None:
+    """conn adds the report block (state, deadline, last attempt) and a pending change request."""
     if shift is None:
         return None
     day = date.fromisoformat(shift["shift_date"])
@@ -471,6 +497,10 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
     status = shift["status"]
     volume = shift["volume"]
     reported = bool(shift.get("report_state"))
+    until = volume_until(shift)
+    window = in_window(shift, now or now_local())  # the schedule is still being set: change anything
+    changeable = not past and not reported and status in ACTIVE
+    pending = pending_change(conn, shift["id"]) if conn is not None and changeable else None
     data = {
         "id": shift["id"],
         "date": shift["shift_date"],
@@ -484,7 +514,14 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
         "penalty_amount": shift["penalty_amount"],
         "admin_locked": bool(shift["admin_locked"]),
         # a report was sent: the shift stays as reported (changes — through an admin)
-        "can_edit": not past and not reported and status in ACTIVE and shift["edit_count"] == 0,
+        "can_edit": changeable and (window or shift["edit_count"] == 0),
+        # the volume is fixed at 00:00 after booking; until then — `volume_until`
+        "volume_open": changeable and window,
+        "volume_until": until.isoformat(timespec="minutes"),
+        # the self-change is used up: the next one goes to an admin or the trainer
+        "can_request_change": changeable and not window and shift["edit_count"] >= 1 and pending is None,
+        "change_request": {k: pending[k] for k in ("id", "start_time", "end_time", "location", "created_at")}
+        if pending else None,
         "can_cancel": not past and not reported and status == "active",
         "can_final_cancel": not past and not reported and status == "restored",
         "can_restore": not past and status == "cancelled" and not shift["admin_locked"] and not shift["restored_at"],
@@ -691,8 +728,12 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
     return Result(get_shift(conn, cur.lastrowid), True, event)
 
 
-def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: date | None = None) -> Result:
-    today = today or today_local()
+def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: date | None = None,
+               now: datetime | None = None) -> Result:
+    """Until 00:00 after booking — anything, not counted. Then the volume is fixed and the time or the point
+    change once; the next change is a request (request_change)."""
+    now = now or now_local()
+    today = today or now.date()
     _check_key(key)
     data = validate_payload(**payload)
     with transaction(conn):
@@ -702,17 +743,127 @@ def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: 
         if shift["status"] not in ACTIVE:
             raise ServiceError("Изменить можно только активную смену", 409, "bad_status")
         _require_no_report(shift)
-        if shift["edit_count"] >= 1:
-            raise ServiceError("Смену можно изменить только один раз. Дальше — через администратора", 409, "edit_limit")
+        window = in_window(shift, now)
+        if not window:
+            if data["volume"] != shift["volume"]:
+                raise ServiceError("Объём фиксируется в 00:00 после записи — изменить его может администратор",
+                                   409, "volume_locked")
+            if shift["edit_count"] >= 1:
+                raise ServiceError("Время и точку сам можно изменить один раз — дальше запрос администратору",
+                                   409, "edit_limit")
         data["location"] = check_point(conn, date.fromisoformat(shift["shift_date"]), data["location"], exclude=shift_id)
         conn.execute(
             """UPDATE shifts SET start_time = ?, end_time = ?, volume = ?, location = ?,
-                                 edit_count = edit_count + 1, updated_at = ? WHERE id = ?""",
-            (data["start_time"], data["end_time"], data["volume"], data["location"], now_iso(), shift_id),
+                                 edit_count = edit_count + ?, updated_at = ? WHERE id = ?""",
+            (data["start_time"], data["end_time"], data["volume"], data["location"], 0 if window else 1, now_iso(),
+             shift_id),
         )
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="SHIFT_EDITED_BY_USER",
                   key=key, shift_id=shift_id, old=_snapshot(shift), new=data)
     return Result(get_shift(conn, shift_id), True, "SHIFT_EDITED_BY_USER")
+
+
+@dataclass
+class ChangeResult:
+    request: dict
+    shift: dict
+    changed: bool
+
+
+def _change(conn, request_id: int) -> dict | None:
+    row = conn.execute("SELECT * FROM shift_change_requests WHERE id = ?", (request_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def request_change(conn, user: dict, shift_id: int, payload: dict, key: str, today: date | None = None,
+                   now: datetime | None = None) -> ChangeResult:
+    """The second change of the time or the point: waits for an admin or the network's trainer."""
+    now = now or now_local()
+    today = today or now.date()
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            shift = get_shift(conn, shift_id)
+            return ChangeResult(pending_change(conn, shift_id) or {}, shift, False)
+        shift = _own_shift(conn, user, shift_id, today)
+        data = validate_payload(**{**payload, "volume": shift["volume"]})  # the volume stays as it is
+        if shift["status"] not in ACTIVE:
+            raise ServiceError("Изменить можно только активную смену", 409, "bad_status")
+        _require_no_report(shift)
+        if in_window(shift, now) or shift["edit_count"] < 1:
+            raise ServiceError("Эту смену пока можно изменить самому", 409, "edit_yourself")
+        if pending_change(conn, shift_id):
+            raise ServiceError("Запрос на изменение уже ждёт решения", 409, "already_requested")
+        if (data["start_time"], data["end_time"], data["location"]) == (shift["start_time"], shift["end_time"], shift["location"]):
+            raise ServiceError("Ничего не изменилось", 422, "no_changes")
+        data["location"] = check_point(conn, date.fromisoformat(shift["shift_date"]), data["location"], exclude=shift_id)
+        cur = conn.execute(
+            """INSERT INTO shift_change_requests (shift_id, user_id, start_time, end_time, location, old_start_time,
+                                                  old_end_time, old_location, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (shift_id, user["id"], data["start_time"], data["end_time"], data["location"], shift["start_time"],
+             shift["end_time"], shift["location"], now_iso()))
+        log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="SHIFT_CHANGE_REQUESTED", key=key,
+                  shift_id=shift_id, old=_snapshot(shift), new={"request": cur.lastrowid, **data})
+    return ChangeResult(_change(conn, cur.lastrowid), get_shift(conn, shift_id), True)
+
+
+def withdraw_change(conn, user: dict, request_id: int, key: str) -> ChangeResult:
+    _check_key(key)
+    with transaction(conn):
+        req = _change(conn, request_id)
+        if req is None or req["user_id"] != user["id"]:
+            raise ServiceError("Запрос не найден", 404, "not_found")
+        if _seen(conn, key) or req["status"] != "pending":
+            return ChangeResult(req, get_shift(conn, req["shift_id"]), False)
+        conn.execute("UPDATE shift_change_requests SET status = 'withdrawn', decided_at = ? WHERE id = ?",
+                     (now_iso(), request_id))
+        log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="SHIFT_CHANGE_WITHDRAWN", key=key,
+                  shift_id=req["shift_id"], new={"request": request_id})
+    return ChangeResult(_change(conn, request_id), get_shift(conn, req["shift_id"]), True)
+
+
+def decide_change(conn, actor: dict, request_id: int, approve: bool, comment: str | None, key: str,
+                  today: date | None = None) -> ChangeResult:
+    """An admin, an owner or the trainer of the person's network approves or declines a change request."""
+    today = today or today_local()
+    comment = (comment or "").strip()[:500] or None
+    _check_key(key)
+    with transaction(conn):
+        req = _change(conn, request_id)
+        if req is None:
+            raise ServiceError("Запрос не найден", 404, "not_found")
+        shift = get_shift(conn, req["shift_id"])
+        if _seen(conn, key) or req["status"] != "pending":
+            return ChangeResult(req, shift, False)
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "schedule", get_user(conn, req["user_id"])):
+            raise ServiceError("Недостаточно прав", 403, "forbidden")
+        stale = (shift["status"] not in ACTIVE or date.fromisoformat(shift["shift_date"]) < today
+                 or shift.get("report_state"))
+        if stale:  # cancelled, over or reported meanwhile — nothing to change any more
+            conn.execute("UPDATE shift_change_requests SET status = 'expired', decided_by = ?, decided_at = ? WHERE id = ?",
+                         (actor["telegram_id"], now_iso(), request_id))
+            raise ServiceError("Смена уже отменена, прошла или по ней сдан отчёт — запрос закрыт", 409, "expired")
+        if approve:
+            location = check_point(conn, date.fromisoformat(shift["shift_date"]), req["location"], exclude=shift["id"])
+            conn.execute("""UPDATE shifts SET start_time = ?, end_time = ?, location = ?, edit_count = edit_count + 1,
+                                              updated_at = ? WHERE id = ?""",
+                         (req["start_time"], req["end_time"], location, now_iso(), shift["id"]))
+        status = "approved" if approve else "rejected"
+        conn.execute("UPDATE shift_change_requests SET status = ?, decided_by = ?, decided_at = ?, comment = ? WHERE id = ?",
+                     (status, actor["telegram_id"], now_iso(), comment, request_id))
+        event = "SHIFT_CHANGE_APPROVED" if approve else "SHIFT_CHANGE_REJECTED"
+        log_event(conn, user_id=req["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
+                  shift_id=shift["id"], old=_snapshot(shift), new={"request": request_id, "status": status},
+                  description=comment)
+    return ChangeResult(_change(conn, request_id), get_shift(conn, req["shift_id"]), True)
+
+
+def _close_changes(conn, shift_id: int) -> None:
+    """The shift was cancelled: a change request waiting for it has nothing to change."""
+    conn.execute("UPDATE shift_change_requests SET status = 'withdrawn', decided_at = ? WHERE shift_id = ? AND status = 'pending'",
+                 (now_iso(), shift_id))
 
 
 def cancel_shift(conn, user: dict, shift_id: int, key: str, today: date | None = None) -> Result:
@@ -733,6 +884,7 @@ def cancel_shift(conn, user: dict, shift_id: int, key: str, today: date | None =
         now = now_iso()
         conn.execute("UPDATE shifts SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?",
                      (now, now, shift_id))
+        _close_changes(conn, shift_id)
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="SHIFT_CANCELLED", key=key,
                   shift_id=shift_id, old=_snapshot(shift), new={"status": "cancelled"})
     return Result(get_shift(conn, shift_id), True, "SHIFT_CANCELLED")
@@ -777,6 +929,7 @@ def final_cancel_shift(conn, user: dict, shift_id: int, key: str, today: date | 
             "UPDATE shifts SET status = 'finally_cancelled', finally_cancelled_at = ?, updated_at = ? WHERE id = ?",
             (now, now, shift_id),
         )
+        _close_changes(conn, shift_id)
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="SHIFT_FINAL_CANCELLED",
                   key=key, shift_id=shift_id, old=_snapshot(shift), new={"status": "finally_cancelled"},
                   description="Сотрудник подтвердил окончательную отмену и согласился со штрафом")
@@ -917,8 +1070,9 @@ def admin_edit_shift(conn, admin: dict, shift_id: int, changes: dict, key: str) 
         if not updates:
             raise ServiceError("Нет изменений", 422, "no_changes")
         if any(k in updates for k in field_keys):
-            # after a manual admin edit the employee can no longer edit this shift themselves
+            # after a manual admin edit the employee no longer changes it freely: the next change is a request
             updates["edit_count"] = max(1, shift["edit_count"])
+            updates["edit_window_closed"] = 1
         updates["updated_at"] = now_iso()
         sets = ", ".join(f"{k} = ?" for k in updates)
         conn.execute(f"UPDATE shifts SET {sets} WHERE id = ?", (*updates.values(), shift_id))

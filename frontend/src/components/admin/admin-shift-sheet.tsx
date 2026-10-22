@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
-import { api, type AdminAction, type ReportView, type ShiftStatus } from "@/lib/api";
+import { api, type AdminAction, type ReportView, type Shift, type ShiftStatus } from "@/lib/api";
 import { STATUS_META, longDate } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { useWide } from "@/lib/use-media";
@@ -37,6 +37,8 @@ export interface EditableShift {
   shortfall_status?: "fined" | "waived" | null;
   shortfall_penalty?: number | null;
   report?: ReportView | null;
+  /** the employee's second change of the time or the point, waiting for a decision */
+  change_request?: Shift["change_request"];
   name: string;
   username: string | null;
 }
@@ -124,6 +126,18 @@ export function AdminShiftSheet({
     }
   }
 
+  async function decideChange(approve: boolean) {
+    if (!shift?.change_request) return;
+    const id = shift.change_request.id;
+    try {
+      await run(approve ? "change-ok" : "change-no", (k) => api.admin.decideChange(id, approve, reason.trim() || null, k),
+        approve ? "Изменение разрешено" : "Запрос отклонён");
+      onChanged();
+    } catch {
+      /* toast shown */
+    }
+  }
+
   async function remove() {
     if (!shift) return;
     try {
@@ -177,6 +191,28 @@ export function AdminShiftSheet({
                             onClick={() => action("reject_urgent", "Выход запрещён")}>
                       {spin("reject_urgent")} Запретить
                     </Button>
+                  </div>
+                )}
+
+                {shift.change_request && (
+                  <div className="space-y-3 rounded-2xl bg-wait-soft p-4">
+                    <div className="text-sm">
+                      <p className="font-semibold text-wait">Запрос на изменение</p>
+                      <p className="mt-0.5">
+                        {shift.start_time}–{shift.end_time}, {shift.location} → <b>{shift.change_request.start_time}–{shift.change_request.end_time}, {shift.change_request.location}</b>
+                      </p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">Сам сотрудник уже менял смену; объём остаётся {shift.volume} шт.</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button className="press h-11 rounded-xl bg-go font-semibold text-white hover:bg-go/90" disabled={!!busy}
+                              onClick={() => decideChange(true)}>
+                        {spin("change-ok")} Разрешить
+                      </Button>
+                      <Button variant="secondary" className="press h-11 rounded-xl font-semibold" disabled={!!busy}
+                              onClick={() => decideChange(false)}>
+                        {spin("change-no")} Отклонить
+                      </Button>
+                    </div>
                   </div>
                 )}
 

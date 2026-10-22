@@ -871,6 +871,31 @@ ALTER TABLE events ADD COLUMN prize_media_kind TEXT NOT NULL DEFAULT 'photo' CHE
 """)
 
 
+# 24: the second change of a shift's time or point waits for an admin or the network's trainer
+MIGRATIONS.append("""
+CREATE TABLE shift_change_requests (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    shift_id        INTEGER NOT NULL REFERENCES shifts(id),
+    user_id         INTEGER NOT NULL REFERENCES users(id),
+    start_time      TEXT NOT NULL,
+    end_time        TEXT NOT NULL,
+    location        TEXT NOT NULL,
+    old_start_time  TEXT,
+    old_end_time    TEXT,
+    old_location    TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','approved','rejected','withdrawn','expired')),
+    created_at      TEXT NOT NULL,
+    decided_by      INTEGER,
+    decided_at      TEXT,
+    comment         TEXT
+);
+CREATE UNIQUE INDEX ux_change_requests_pending ON shift_change_requests (shift_id) WHERE status = 'pending';
+-- an admin changed the shift by hand: the employee's free editing window is over
+ALTER TABLE shifts ADD COLUMN edit_window_closed INTEGER NOT NULL DEFAULT 0;
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):
