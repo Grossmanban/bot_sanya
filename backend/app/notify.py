@@ -143,6 +143,23 @@ def urgent_text(user: dict, shift: dict) -> str:
     )
 
 
+def change_request_text(user: dict, shift: dict, req: dict) -> str:
+    return (
+        f"🔁 <b>Запрос на изменение смены</b> {ddmm_wd(_day(shift))}\n{who(user)}\n"
+        f"Было: {req['old_start_time']}–{req['old_end_time']}, {escape(req['old_location'] or '')}\n"
+        f"Стало: <b>{req['start_time']}–{req['end_time']}, {escape(req['location'])}</b>\n"
+        f"Объём без изменений: {shift['volume']} шт.\n"
+        "Сам сотрудник уже менял смену — второе изменение ждёт решения."
+    )
+
+
+def change_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Разрешить", callback_data=f"chg:ok:{request_id}"),
+        InlineKeyboardButton(text="⛔ Отклонить", callback_data=f"chg:no:{request_id}"),
+    ]])
+
+
 def urgent_keyboard(shift_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Разрешить", callback_data=f"urg:ok:{shift_id}"),
@@ -824,6 +841,25 @@ class Notifier:
         await self.send(user["telegram_id"], text)
         await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
                            f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
+
+    async def change_requested(self, req: dict) -> None:
+        """Owners, admins and the trainer of the person's network decide (any one of them)."""
+        shift, user = svc.get_shift(self.conn, req["shift_id"]), svc.get_user(self.conn, req["user_id"])
+        await self.to_managers(user, change_request_text(user, shift, req), change_request_keyboard(req["id"]))
+
+    async def change_decided(self, req: dict, actor: dict) -> None:
+        shift, user = svc.get_shift(self.conn, req["shift_id"]), svc.get_user(self.conn, req["user_id"])
+        day = ddmm(_day(shift))
+        if req["status"] == "approved":
+            text = (f"✅ Изменение смены {day} одобрено: {shift['start_time']}–{shift['end_time']}, "
+                    f"{escape(shift['location'])}.")
+        else:
+            text = (f"❌ Изменение смены {day} отклонено — смена остаётся {shift['start_time']}–{shift['end_time']}, "
+                    f"{escape(shift['location'])}." + (f"\nКомментарий: {escape(req['comment'])}" if req["comment"] else ""))
+        await self.send(user["telegram_id"], text)
+        verdict = "✅ разрешил(а)" if req["status"] == "approved" else "⛔ отклонил(а)"
+        await self.to_managers(user, f"🔁 {who(actor)} {verdict} изменение смены {day} — {who(user)}",
+                               exclude=actor["telegram_id"])
 
     async def urgent_decided(self, shift: dict, approved: bool) -> None:
         user = svc.get_user(self.conn, shift["user_id"])

@@ -23,7 +23,7 @@ import { DayLanes, type Lane } from "../day-line";
 import { initialForm, prefillFrom, ShiftForm, validateForm, type FormState } from "./shift-form";
 import { ReportBlock } from "../report/report-block";
 
-type Mode = "view" | "create" | "edit" | "restore";
+type Mode = "view" | "create" | "edit" | "restore" | "request";
 
 export interface DetailProps {
   user: User;
@@ -32,6 +32,11 @@ export interface DetailProps {
   points: Point[];
   onChanged: () => Promise<void> | void;
   onOpenProfile: () => void;
+}
+
+/** «00:00, в ночь на 24 октября» — the end of the free editing window. */
+function untilText(iso: string) {
+  return `00:00, в ночь на ${dayMonth(iso.slice(0, 10))}`;
 }
 
 /** Phones and iPad portrait: the day opens in a bottom sheet. */
@@ -73,7 +78,9 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
   const state = dayState(shift);
   const meta = STATUS_META[state];
   const formMode = mode !== "view";
-  const blocked = !working && mode !== "edit";
+  const blocked = !working && mode !== "edit" && mode !== "request";
+  // 00:00 after booking has passed: the volume stays, only the time and the point change
+  const volumeLocked = (mode === "edit" || mode === "request") && !!shift && !shift.volume_open;
   const { weekday } = parseDay(day.date);
 
   async function submit() {
@@ -89,7 +96,11 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
         if (res?.shift?.status === "awaiting_approval") toast("Заявка на сегодня у администратора");
         else toast.success("Ты в графике");
       } else if (mode === "edit" && shift) {
-        await run("edit", (k) => api.edit(shift.id, payload, k), "Смена изменена");
+        if (await run("edit", (k) => api.edit(shift.id, payload, k), "Смена изменена")) setMode("view");
+      } else if (mode === "request" && shift) {
+        if (await run("request", (k) => api.requestChange(shift.id, payload, k), "Запрос отправлен — ответ придёт в бот")) {
+          setMode("view");
+        }
       } else if (mode === "restore" && shift) {
         await run("restore", (k) => api.restore(shift.id, payload, k), "Смена восстановлена");
       }
@@ -123,6 +134,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
   const submitLabel = () => {
     const range = form.start_time && form.end_time ? ` ${form.start_time}–${form.end_time}` : "";
     if (mode === "edit") return "Сохранить изменения";
+    if (mode === "request") return "Отправить запрос";
     if (mode === "restore") return `Вернуться в график${range}`;
     return day.is_today ? `Попроситься на сегодня${range}` : `Выйду${range}`;
   };
@@ -156,6 +168,12 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
           {mode === "restore" && (
             <Notice tone="wait">Вернуться можно один раз. Если потом снова отменишь, это будет окончательно и со штрафом.</Notice>
           )}
+          {mode === "request" && (
+            <Notice tone="wait">Сам ты уже менял эту смену. Второе изменение времени или точки подтверждает администратор или тренер сети — ответ придёт в бот.</Notice>
+          )}
+          {mode === "edit" && shift && !shift.volume_open && (
+            <Notice tone="muted">Время или точку сам можно изменить один раз. Дальше — запросом администратору.</Notice>
+          )}
           {mode === "create" && day.is_today && (
             <Notice tone="wait">Запись на сегодня срочная: администратор подтвердит её в боте.</Notice>
           )}
@@ -174,12 +192,33 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
             locations={locations}
             points={points}
             load={day.points_load}
-            ownLocation={mode === "edit" ? shift?.location : null}
+            ownLocation={mode === "edit" || mode === "request" ? shift?.location : null}
             disabled={blocked}
+            volumeLocked={volumeLocked}
           />
         </div>
       ) : (
         shift && <ShiftView shift={shift} />
+      )}
+
+      {!formMode && shift?.change_request && (
+        <div className="row-in flex items-start gap-3 rounded-2xl bg-wait-soft p-4 text-sm">
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold text-wait">Запрос на изменение ждёт решения</p>
+            <p className="mt-0.5">
+              {shift.change_request.start_time}–{shift.change_request.end_time}, {shift.change_request.location}. Ответ придёт в бот.
+            </p>
+          </div>
+          <Button size="sm" variant="ghost" className="h-8 shrink-0 rounded-lg" disabled={!!busy}
+                  onClick={() => act("withdraw", (k) => api.withdrawChange(shift.change_request!.id, k), "Запрос отозван")}>
+            {busy === "withdraw" && <LoaderCircle className="animate-spin" />} Отозвать
+          </Button>
+        </div>
+      )}
+      {!formMode && shift?.volume_open && shift.volume_until && (
+        <p className="text-sm text-muted-foreground">
+          Объём, время и точку можно менять до {untilText(shift.volume_until)}. Потом объём фиксируется.
+        </p>
       )}
 
       {!formMode && shift && <ReportBlock shift={shift} pricing={pricing} onChanged={onChanged} />}
@@ -203,7 +242,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
                 Отметить выходной
               </Button>
             )}
-            {(mode === "edit" || mode === "restore") && (
+            {(mode === "edit" || mode === "restore" || mode === "request") && (
               <Button variant="ghost" className="h-11 w-full rounded-2xl" onClick={() => setMode("view")}>
                 Назад
               </Button>
@@ -246,7 +285,20 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
                   setMode("edit");
                 }}
               >
-                Изменить время, точку или объём
+                {shift.volume_open ? "Изменить время, точку или объём" : "Изменить время или точку"}
+              </Button>
+            )}
+            {shift.can_request_change && (
+              <Button
+                size="lg"
+                variant="secondary"
+                className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
+                onClick={() => {
+                  setForm(initialForm(prefillFrom(shift)));
+                  setMode("request");
+                }}
+              >
+                Попросить изменить время или точку
               </Button>
             )}
             {(shift.can_cancel || shift.can_final_cancel) && (
@@ -362,7 +414,8 @@ function ShiftView({ shift }: { shift: Shift }) {
         </Notice>
       )}
       {status === "rejected_by_admin" && <Notice tone="muted">Администратор не подтвердил выход на этот день.</Notice>}
-      {(status === "active" || status === "restored") && !shift.can_edit && shift.edit_count > 0 && !shift.report?.started && (
+      {(status === "active" || status === "restored") && !shift.can_edit && !shift.can_request_change && !shift.change_request
+        && shift.edit_count > 0 && !shift.report?.started && !shift.report_state && (
         <p className="text-sm text-muted-foreground">Изменение уже использовано. Дальше через администратора.</p>
       )}
     </div>
