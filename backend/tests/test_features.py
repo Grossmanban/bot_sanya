@@ -593,7 +593,7 @@ def test_final_cancel_creates_a_draft_fine(conn, make_user):
     assert finance.linked(conn, s["id"], ("final_cancel",)) == [] and finance.balance(conn, u["id"])["balance"] == 0
 
 
-def test_trainer_fine_needs_owner_approval_and_balance(conn, make_user):
+def test_trainer_fine_needs_approval_and_balance(conn, make_user):
     from app import finance
 
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
@@ -607,10 +607,10 @@ def test_trainer_fine_needs_owner_approval_and_balance(conn, make_user):
     assert req.tx["status"] == "pending_admin_approval" and finance.balance(conn, u["id"])["balance"] == 0
     with pytest.raises(svc.ServiceError):  # not their network
         finance.create(conn, trainer, stranger["id"], "fine", 500, "x", svc.new_key())
-    with pytest.raises(svc.ServiceError) as e:  # only owners decide
-        finance.decide(conn, admin, req.tx["id"], True, None, svc.new_key())
+    with pytest.raises(svc.ServiceError) as e:  # owners and admins decide, not trainers
+        finance.decide(conn, trainer, req.tx["id"], True, None, svc.new_key())
     assert e.value.status == 403
-    ok = finance.decide(conn, owner, req.tx["id"], True, None, svc.new_key())
+    ok = finance.decide(conn, admin, req.tx["id"], True, None, svc.new_key())
     assert ok.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -500
 
     bonus = finance.create(conn, trainer, u["id"], "bonus", 300, "Лучший день", svc.new_key())
@@ -1194,3 +1194,41 @@ def test_sent_broadcast_media_opens_in_full(conn, make_user):
     assert client.get(item["media_url"].replace("sig=", "sig=0")).status_code == 403
     plain, _ = svc.create_broadcast(conn, owner, [], "Без медиа", user_ids=[a["id"]])
     assert client.get("/api/admin/broadcasts", headers=headers).json()["items"][0]["media_url"] is None
+
+
+def test_forgive_fines_trainer_and_admin_reason_optional(conn, make_user):
+    """«Простить»: a trainer — their network's fines, an admin — anyone's; the reason is optional."""
+    from app import finance
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = _staff(conn, make_user, "trainer", "Тренер", network=1)
+    admin = _staff(conn, make_user, "admin", "Админ")
+    u = make_user(first="Иван")
+    conn.execute("UPDATE users SET network_id = 1 WHERE id = ?", (u["id"],))
+    stranger = make_user(first="Чужой")
+    mine = finance.create(conn, admin, u["id"], "fine", 500, "Опоздал", svc.new_key()).tx
+    theirs = finance.create(conn, admin, stranger["id"], "fine", 300, "Опоздал", svc.new_key()).tx
+    bonus = finance.create(conn, admin, u["id"], "bonus", 200, "Молодец", svc.new_key()).tx
+    with pytest.raises(svc.ServiceError) as e:  # not their network
+        finance.forgive(conn, trainer, theirs["id"], None, svc.new_key())
+    assert e.value.status == 403
+    with pytest.raises(svc.ServiceError) as e:
+        finance.forgive(conn, admin, bonus["id"], None, svc.new_key())
+    assert e.value.code == "not_a_fine"
+    done = finance.forgive(conn, trainer, mine["id"], None, svc.new_key())  # no reason
+    assert done.tx["status"] == "cancelled" and done.tx["decision_comment"] == "Прощён"
+    assert finance.balance(conn, u["id"])["balance"] == 200
+    with pytest.raises(svc.ServiceError):  # once
+        finance.forgive(conn, admin, mine["id"], None, svc.new_key())
+    with_reason = finance.forgive(conn, admin, theirs["id"], "Больничный", svc.new_key())
+    assert with_reason.tx["decision_comment"] == "Прощён: Больничный"
+    # a trainer's request waiting for approval can be forgiven too; the employee isn't told about it
+    req = finance.create(conn, trainer, u["id"], "fine", 400, "Спорно", svc.new_key()).tx
+    n = FakeNotifier(conn)
+    run(n.tx_forgiven(finance.forgive(conn, trainer, req["id"], None, svc.new_key()).tx, trainer,
+                      "pending_admin_approval", None))
+    assert not any(chat == u["telegram_id"] for chat, _ in n.sent)
+    n.sent.clear()
+    fresh = finance.create(conn, owner, u["id"], "fine", 100, "Мусор", svc.new_key()).tx
+    run(n.tx_forgiven(finance.forgive(conn, admin, fresh["id"], "Убрал сам", svc.new_key()).tx, admin, "active", "Убрал сам"))
+    assert any(chat == u["telegram_id"] and "прощён" in t and "Убрал сам" in t for chat, t in n.sent)

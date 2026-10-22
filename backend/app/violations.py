@@ -250,11 +250,11 @@ def set_norm(conn: sqlite3.Connection, actor: dict, user_id: int, norm: int | No
 # ---------------------------------------------------------------- decisions
 
 
-def _comment(text: str | None) -> str:
+def _comment(text: str | None, required: bool = True) -> str | None:
     text = (text or "").strip()[:MAX_COMMENT]
-    if not text:
+    if not text and required:
         raise ServiceError("Комментарий обязателен", 422, "comment_required")
-    return text
+    return text or None
 
 
 def _media(files: list[str] | None) -> list[str]:
@@ -304,7 +304,8 @@ def fine(conn: sqlite3.Connection, actor: dict, violation_id: int, amount: int, 
 
 def waive(conn: sqlite3.Connection, actor: dict, violation_id: int, comment: str, files: list[str] | None,
           key: str) -> Resolution:
-    comment, files = _comment(comment), _media(files)
+    # «Простить»: the reason is optional (kept as "" — the table wants a comment on every decision)
+    comment, files = _comment(comment, required=False) or "", _media(files)
     _check_key(key)
     with transaction(conn):
         if _seen(conn, key):

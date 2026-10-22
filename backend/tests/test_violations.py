@@ -175,6 +175,15 @@ def test_messages_to_employee_and_archive(conn, make_user):
 
     n.sent.clear()
     n.albums.clear()
+    res = violations.waive(conn, owner, one(conn, b)["id"], "  ", [], svc.new_key())  # «Простить»: no reason is fine
+    run(n.violation_resolved(res.violation, None, owner))
+    [msg] = [t for chat, t in n.sent if chat == b["telegram_id"]]
+    assert "штраф не начислен" in msg and "Комментарий" not in msg
+    [arch] = [t for chat, t in n.sent if chat == -1001]
+    assert "Основание: без указания причины" in arch
+    conn.execute("""UPDATE attendance_violations SET status = 'pending', resolution_admin_id = NULL, resolution_comment = NULL,
+                    resolved_at = NULL WHERE id = ?""", (res.violation["id"],))
+    n.sent.clear()
     res = violations.waive(conn, owner, one(conn, b)["id"], "Больничный лист.", [], svc.new_key())
     run(n.violation_resolved(res.violation, None, owner))
     [msg] = [t for chat, t in n.sent if chat == b["telegram_id"]]

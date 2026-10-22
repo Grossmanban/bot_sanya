@@ -5,11 +5,11 @@ shortfall_penalty only as a display cache for their cards; this module keeps the
 
 Statuses:
     draft                  — a fine created by a final cancellation, waiting for its amount
-    pending_admin_approval — a trainer's fine, waits for an owner; the balance doesn't change
+    pending_admin_approval — a trainer's fine, waits for an owner or an admin; the balance doesn't change
     active                 — counts in the balance
     paid / offset          — settled (by «погасить» or by a payout); history only
-    cancelled              — annulled with a reason
-    rejected               — a trainer's fine the owner declined (the employee never sees it)
+    cancelled              — annulled with a reason, or forgiven («Простить», the reason is optional)
+    rejected               — a trainer's fine an owner or admin declined (the employee never sees it)
 
 Balance = active bonuses − active fines − active deductions.
 """
@@ -355,7 +355,7 @@ def piece_deduction(conn: sqlite3.Connection, actor: dict, user_id: int, day: da
 
 
 def decide(conn: sqlite3.Connection, actor: dict, tx_id: int, approve: bool, comment: str | None, key: str) -> TxResult:
-    """Owner approves or declines a trainer's fine (ТЗ 5.3)."""
+    """An owner or an admin approves or declines a trainer's fine (ТЗ 5.3)."""
     _check_key(key)
     comment = (comment or "").strip()[:MAX_REASON] or None
     with transaction(conn):
@@ -366,14 +366,14 @@ def decide(conn: sqlite3.Connection, actor: dict, tx_id: int, approve: bool, com
             return TxResult(tx, False)
         actor = _fresh_actor(conn, actor)
         if not perms.can(actor, "approve_fines"):
-            raise ServiceError("Согласует штрафы только владелец", 403, "owner_only")
+            raise ServiceError("Согласуют штрафы владелец и администраторы", 403, "forbidden")
         if tx["status"] != "pending_admin_approval":
             return TxResult(tx, False)
         status = "active" if approve else "rejected"
         conn.execute("UPDATE financial_transactions SET status = ?, decided_by = ?, decided_at = ?, decision_comment = ? "
                      "WHERE id = ?", (status, actor["telegram_id"], now_iso(), comment, tx_id))
         if not approve:
-            _sync_shift(conn, tx, f"Штраф отклонён владельцем{': ' + comment if comment else ''}")
+            _sync_shift(conn, tx, f"Штраф отклонён{': ' + comment if comment else ''}")
             if tx["source"] == "attendance":
                 from . import violations
 
@@ -412,6 +412,37 @@ def cancel(conn: sqlite3.Connection, actor: dict, tx_id: int, reason: str, key: 
                   shift_id=tx["shift_id"], old={"status": tx["status"]}, new={"tx": tx_id, "status": "cancelled"},
                   description=reason)
     return TxResult(get(conn, tx_id), True, "TX_CANCELLED")
+
+
+FORGIVEN = "Прощён"
+
+
+def forgive(conn: sqlite3.Connection, actor: dict, tx_id: int, reason: str | None, key: str) -> TxResult:
+    """«Простить» a fine: it stops counting. Owners and admins — anyone's, a trainer — their network's;
+    the reason is optional. A trainer's own request that waits for approval can be withdrawn the same way."""
+    reason = (reason or "").strip()[:MAX_REASON] or None
+    _check_key(key)
+    with transaction(conn):
+        tx = get(conn, tx_id)
+        if tx is None:
+            raise ServiceError("Запись не найдена", 404, "not_found")
+        if _seen(conn, key):
+            return TxResult(tx, False)
+        actor = _fresh_actor(conn, actor)
+        if tx["type"] != "fine":
+            raise ServiceError("Простить можно только штраф", 409, "not_a_fine")
+        if not perms.can(actor, "forgive_fines", svc.get_user(conn, tx["user_id"])):
+            raise ServiceError("Недостаточно прав", 403, "forbidden")
+        if tx["status"] not in ("draft", "active", "pending_admin_approval"):
+            raise ServiceError(f"Штраф уже {STATUS_TITLES[tx['status']]}", 409, "not_cancellable")
+        comment = f"{FORGIVEN}: {reason}" if reason else FORGIVEN
+        conn.execute("UPDATE financial_transactions SET status = 'cancelled', decided_by = ?, decided_at = ?, "
+                     "decision_comment = ? WHERE id = ?", (actor["telegram_id"], now_iso(), comment, tx_id))
+        _sync_shift(conn, tx, f"Штраф прощён{': ' + reason if reason else ''}")
+        log_event(conn, user_id=tx["user_id"], actor_id=actor["telegram_id"], event_type="FINE_FORGIVEN", key=key,
+                  shift_id=tx["shift_id"], old={"status": tx["status"]}, new={"tx": tx_id, "status": "cancelled"},
+                  description=reason)
+    return TxResult(get(conn, tx_id), True, "FINE_FORGIVEN")
 
 
 def fill_draft(conn: sqlite3.Connection, actor: dict, tx_id: int, amount: int, key: str) -> TxResult:
