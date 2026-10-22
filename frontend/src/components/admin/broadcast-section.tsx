@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BellRing, Check, CheckCheck, ChevronDown, Film, FlaskConical, LoaderCircle, MessageSquareReply, Pencil, Plus, Search, Send, Trash2, X } from "lucide-react";
+import { BellRing, Check, CheckCheck, ChevronDown, ChevronRight, Film, FlaskConical, ImageIcon, LoaderCircle, MessageSquareReply, Pencil, Plus, Search, Send, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -14,6 +14,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Broadcast, type BroadcastPerson, type BroadcastTemplate, type User } from "@/lib/api";
@@ -22,7 +23,7 @@ import { useAction, useLoad } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { RichEditor, type RichEditorHandle } from "./rich-editor";
-import { PhotoPicker } from "../report/photo";
+import { PhotoPicker, VideoPicker } from "../report/photo";
 
 const LIMIT = 4000;
 
@@ -312,21 +313,40 @@ function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Reco
   // html is sanitized by the server to Telegram's tag whitelist; spoilers become spans for display
   const html = b.html?.replace(/<tg-spoiler>/g, '<span class="tg-spoiler">').replace(/<\/tg-spoiler>/g, "</span>");
   const [open, setOpen] = useState(false);
+  const [full, setFull] = useState(false);
   const who = [
     ...b.audience.split(",").filter(Boolean).map((a) => (a === "all" ? "все сотрудники" : (audiences[a] ?? a).toLowerCase())),
     ...(b.network_id ? [`сеть «${networks.find((n) => n.id === b.network_id)?.name ?? b.network_id}»`] : []),
   ].join(", ") || "выбранные люди";
   return (
     <li className="px-5 py-3.5 md:px-6">
-      {html ? (
-        <div className="tg-rich line-clamp-4 text-[15px] leading-relaxed whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        <p className="line-clamp-4 text-[15px] whitespace-pre-wrap">{b.text}</p>
-      )}
+      {/* the whole message — text, photo, video — opens on tap */}
+      <button type="button" className="press group block w-full text-left" onClick={() => { tapHaptic(); setFull(true); }}>
+        <span className="flex gap-3">
+          {b.media_url && (
+            <span className="grid size-14 shrink-0 place-items-center overflow-hidden rounded-xl bg-muted text-muted-foreground">
+              {b.media_kind === "video" ? <Film className="size-5" /> : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={b.media_url} alt="" className="size-full object-cover" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+              )}
+            </span>
+          )}
+          {html ? (
+            <span className="tg-rich line-clamp-4 min-w-0 flex-1 text-[15px] leading-relaxed whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: html }} />
+          ) : (
+            <span className="line-clamp-4 min-w-0 flex-1 text-[15px] whitespace-pre-wrap">{b.text}</span>
+          )}
+        </span>
+        <span className="mt-1 inline-flex items-center gap-0.5 text-xs font-semibold text-primary">
+          Открыть целиком <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+        </span>
+      </button>
       <p className="mt-1.5 text-xs text-muted-foreground">
         {b.media_file_id ? (b.media_kind === "video" ? "🎬 " : "📷 ") : ""}{who}, доставлено {b.delivered} из {b.recipients}
         {b.first_name ? `, ${b.first_name}` : ""}, {ddmm(b.created_at.slice(0, 10))} в {b.created_at.slice(11, 16)}
       </p>
+      <SentMessage b={b} html={html} meta={`${who}, ${ddmm(b.created_at.slice(0, 10))} в ${b.created_at.slice(11, 16)}`}
+                   open={full} onOpenChange={setFull} />
       {(!!b.require_ack || !!b.allow_reply) && (
         <button onClick={() => setOpen((v) => !v)} className="press mt-2 inline-flex flex-wrap items-center gap-1.5 text-xs font-semibold">
           {!!b.require_ack && (
@@ -346,6 +366,44 @@ function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Reco
       )}
       {open && <Receipts id={b.id} ack={!!b.require_ack} replies={!!b.allow_reply} />}
     </li>
+  );
+}
+
+/** A sent broadcast in full: the header, the photo or video and all the text — as people got it in the bot. */
+function SentMessage({ b, html, meta, open, onOpenChange }: {
+  b: Broadcast; html: string | undefined; meta: string; open: boolean; onOpenChange: (v: boolean) => void;
+}) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <Drawer open={open} onOpenChange={onOpenChange}>
+      <DrawerContent className="mx-auto max-h-[90dvh] max-w-2xl rounded-t-[1.75rem] border-0 bg-card">
+        <div className="pb-safe space-y-3 overflow-y-auto px-5 pt-2 pb-4">
+          <DrawerTitle className="font-display text-xl font-semibold">Отправленное сообщение</DrawerTitle>
+          <p className="text-xs text-muted-foreground">{meta}</p>
+          {b.media_url && (broken ? (
+            <p className="flex items-center gap-2 rounded-2xl bg-muted px-4 py-3 text-sm text-muted-foreground">
+              {b.media_kind === "video" ? <Film className="size-4 shrink-0" /> : <ImageIcon className="size-4 shrink-0" />}
+              {b.media_kind === "video" ? "Видео не открылось в приложении — оно есть в чате с ботом." : "Фото не открылось — оно есть в чате с ботом."}
+            </p>
+          ) : b.media_kind === "video" ? (
+            <video src={b.media_url} controls playsInline preload="metadata" onError={() => setBroken(true)}
+                   className="max-h-[60dvh] w-full rounded-2xl bg-black" />
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={b.media_url} alt="Фото рассылки" onError={() => setBroken(true)} className="max-h-[60dvh] w-full rounded-2xl bg-muted object-contain" />
+          ))}
+          <div className="rounded-2xl bg-muted/50 p-4">
+            {!!b.signed && <p className="mb-3 font-semibold">📣 Сообщение от администратора</p>}
+            {html ? (
+              <div className="tg-rich text-[15px] leading-relaxed break-words whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: html }} />
+            ) : (
+              <p className="text-[15px] break-words whitespace-pre-wrap">{b.text}</p>
+            )}
+          </div>
+          <Button variant="secondary" className="press h-12 w-full rounded-2xl" onClick={() => onOpenChange(false)}>Закрыть</Button>
+        </div>
+      </DrawerContent>
+    </Drawer>
   );
 }
 
@@ -421,50 +479,6 @@ function Receipts({ id, ack, replies }: { id: number; ack: boolean; replies: boo
       )}
       {ack && read.length > 0 && (
         <p className="text-xs text-muted-foreground">Прочитали: {read.map((r) => r.name).join(", ")}</p>
-      )}
-    </div>
-  );
-}
-
-/** Video for a broadcast: MP4 / MOV up to 50 MB (what Telegram takes from a bot). */
-function VideoPicker({ value, onChange }: { value: File | null; onChange: (f: File | null) => void }) {
-  const input = useRef<HTMLInputElement>(null);
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!value) {
-      setUrl(null);
-      return;
-    }
-    const u = URL.createObjectURL(value);
-    setUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [value]);
-  const pick = (file: File | undefined) => {
-    if (!file) return;
-    if (file.size > 50 * 1024 * 1024) {
-      toast.error("Видео больше 50 МБ — Telegram не примет его от бота. Сожмите или обрежьте");
-      return;
-    }
-    onChange(file);
-  };
-  return (
-    <div>
-      <input ref={input} type="file" accept="video/mp4,video/quicktime,video/*" className="hidden"
-             onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} />
-      {value && url ? (
-        <div className="relative overflow-hidden rounded-2xl bg-black">
-          <video src={url} controls playsInline className="max-h-64 w-full" />
-          <button aria-label="Убрать видео" onClick={() => onChange(null)}
-                  className="absolute top-2 right-2 grid size-9 place-items-center rounded-full bg-black/60 text-white">
-            <X className="size-4" />
-          </button>
-          <p className="bg-card px-3 py-2 text-xs text-muted-foreground">{value.name} · {(value.size / 1024 / 1024).toFixed(1)} МБ</p>
-        </div>
-      ) : (
-        <button type="button" onClick={() => input.current?.click()}
-                className="press flex h-14 w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed text-[15px] font-semibold text-muted-foreground">
-          <Film className="size-5" /> Добавить видео <span className="font-normal">(до 50 МБ)</span>
-        </button>
       )}
     </div>
   );

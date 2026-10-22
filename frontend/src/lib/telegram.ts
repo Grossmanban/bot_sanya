@@ -86,6 +86,18 @@ export function openBotChat(botUsername: string) {
   }
 }
 
+/** A person's Telegram profile: by @username when there is one, otherwise by their Telegram id. */
+export function openProfile(username: string | null | undefined, telegramId?: number | null) {
+  if (username) {
+    const url = `https://t.me/${username}`;
+    const app = webApp();
+    if (app) app.openTelegramLink(url);
+    else window.open(url, "_blank");
+  } else if (telegramId) {
+    window.location.href = `tg://user?id=${telegramId}`;
+  }
+}
+
 export function haptic(type: HapticNotification) {
   try {
     webApp()?.HapticFeedback?.notificationOccurred(type);

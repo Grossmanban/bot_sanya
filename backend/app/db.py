@@ -864,6 +864,13 @@ CREATE INDEX ix_applications_user ON applications (user_id);
 """)
 
 
+# 23: an event's description with formatting (Telegram HTML; `description` keeps the plain text) and a video prize
+MIGRATIONS.append("""
+ALTER TABLE events ADD COLUMN description_html TEXT;
+ALTER TABLE events ADD COLUMN prize_media_kind TEXT NOT NULL DEFAULT 'photo' CHECK (prize_media_kind IN ('photo','video'));
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

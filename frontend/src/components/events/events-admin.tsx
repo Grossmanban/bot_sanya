@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, LoaderCircle, Plus, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -11,8 +11,9 @@ import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import {
   ANNUL_PRESETS, DeleteButton, EditButton, NotifyDialog, PrizeFields, PrizeThumb, ReasonInput, VisibilityButton,
-  prizePhotoValue, prizeState, prizeText,
+  prizeMediaValue, prizeState, prizeText, prizeTouched,
 } from "../lifecycle";
+import { RichEditor, type RichEditorHandle } from "../admin/rich-editor";
 import { PhotoThumb } from "../report/photo";
 import { Leaderboard, RULE } from "./live";
 
@@ -114,7 +115,7 @@ function EventCard({ event, types, days, onDone }: { event: LiveEvent; types: st
             {note && <span className="text-wait"> · {note}</span>}
           </p>
         </div>
-        <PrizeThumb url={event.prize_photo_url} className="size-14" />
+        <PrizeThumb url={event.prize_photo_url} kind={event.prize_media_kind} className="size-14" />
       </div>
       {event.can_manage && (
         <div className="-mx-2 flex flex-wrap items-center gap-0.5">
@@ -230,7 +231,11 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
   const [mode, setMode] = useState<LiveEvent["mode"]>(initial?.mode ?? "accumulative");
   const [title, setTitle] = useState(initial?.title ?? "");
   const [prize, setPrize] = useState(prizeState(initial));
-  const [description, setDescription] = useState(initial?.description ?? "");
+  // the description with formatting: what the editor holds, and what it held when opened (to tell a real change)
+  const editor = useRef<RichEditorHandle>(null);
+  const [description, setDescription] = useState("");
+  const [descLength, setDescLength] = useState(0);
+  const baseline = useRef<string | null>(null);
   const [target, setTarget] = useState(initial?.target ? String(initial.target) : "");
   const [winners, setWinners] = useState(String(initial?.max_winners ?? 3));
   const [attempts, setAttempts] = useState(String(initial?.max_attempts ?? 3));
@@ -242,28 +247,41 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
   const started = !!initial && initial.phase !== "upcoming";
   const raceLocked = !!initial && initial.mode === "first_to_reach" && initial.winners_count > 0;
 
+  useEffect(() => {
+    if (initial?.description_html) editor.current?.setHtml(initial.description_html);
+    else baseline.current = "";
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, when the form opens
+  }, []);
+  const onDescription = (length: number) => {
+    const html = editor.current?.getHtml().html ?? "";
+    if (baseline.current === null) baseline.current = html;
+    setDescription(html);
+    setDescLength(length);
+  };
+
   function changes(): EventChanges {
     const next: EventChanges = {
-      title: title.trim(), description: description.trim() || null, prize: prize.prize.trim() || null,
+      title: title.trim(), prize: prize.prize.trim() || null,
       prize_type: prize.type.trim() || null, starts_at: starts, ends_at: ends,
       max_winners: Number(winners) || 1, max_attempts: Number(attempts) || 3,
       ...(mode === "first_to_reach" ? { target: Number(target) } : {}),
     };
-    if (!initial) return next;
+    if (!initial) return { ...next, description: description || null };
     const was: Record<string, unknown> = { ...initial, starts_at: local(initial.starts_at), ends_at: local(initial.ends_at) };
-    return Object.fromEntries(Object.entries(next).filter(([k, v]) => (was[k] ?? null) !== v)) as EventChanges;
+    const changed = Object.fromEntries(Object.entries(next).filter(([k, v]) => (was[k] ?? null) !== v)) as EventChanges;
+    return description !== (baseline.current ?? "") ? { ...changed, description: description || null } : changed;
   }
 
   async function save(notify: boolean) {
     setAsking(null);
     try {
       const res = await run("save", async (k) => {
-        const photo = await prizePhotoValue(prize);
-        const body = { ...changes(), ...(photo !== undefined ? { prize_photo: photo } : {}) };
+        const media = await prizeMediaValue(prize);
+        const body = { ...changes(), ...media };
         if (!initial) {
           return api.admin.createEvent({
             title: body.title!, mode, starts_at: starts, ends_at: ends, prize: body.prize ?? undefined, prize_type: body.prize_type,
-            prize_photo: photo ?? null, description: body.description ?? undefined,
+            prize_photo: media.prize_photo ?? null, prize_media_kind: media.prize_media_kind, description: body.description ?? undefined,
             target: mode === "first_to_reach" ? Number(target) : null, max_winners: body.max_winners!, max_attempts: body.max_attempts!,
             network_id: network,
           }, k);
@@ -287,7 +305,8 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
     else void save(false);
   }
 
-  const nothing = editing && Object.keys(changes()).length === 0 && !prize.file && !prize.cleared;
+  const nothing = editing && Object.keys(changes()).length === 0 && !prizeTouched(prize);
+  const tooLong = descLength > 1000;
   return (
     <div className="space-y-3">
       {!editing && (
@@ -325,14 +344,19 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
           {nets.data!.items.map((n) => <option key={n.id} value={n.id}>Сеть «{n.name}»</option>)}
         </select>
       )}
-      <PrizeFields types={types} value={prize} onChange={setPrize} currentUrl={initial?.prize_photo_url} />
-      <textarea rows={2} className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25"
-                placeholder="Правила (необязательно)" value={description} onChange={(e) => setDescription(e.target.value.slice(0, 500))} />
+      <PrizeFields types={types} value={prize} onChange={setPrize} currentUrl={initial?.prize_photo_url}
+                   currentKind={initial?.prize_media_kind} allowVideo />
+      <div className="space-y-1">
+        <p className="text-xs text-muted-foreground">Правила и описание — можно выделить жирным, курсивом, добавить ссылку</p>
+        <RichEditor ref={editor} label="Правила события" compact
+                    placeholder="Например: первый, кто сделает 30 отзывов и загрузит скриншот, получает приз" onChange={onDescription} />
+        {descLength > 800 && <p className={cn("text-right text-xs", tooLong ? "text-cancel" : "text-muted-foreground")}>{descLength} / 1000</p>}
+      </div>
       {!editing && <p className="text-xs text-muted-foreground">После финиша ещё 15 минут на проверку последних заявок, затем итоги уходят всем участникам.</p>}
       <div className="flex gap-2">
         {onCancel && <Button variant="secondary" className="press h-12 rounded-2xl px-5" onClick={onCancel}>Отмена</Button>}
         <Button className="press h-12 flex-1 rounded-2xl text-[15px] font-semibold"
-                disabled={!!busy || !title.trim() || (mode === "first_to_reach" && !Number(target)) || nothing} onClick={submit}>
+                disabled={!!busy || !title.trim() || (mode === "first_to_reach" && !Number(target)) || nothing || tooLong} onClick={submit}>
           {busy && <LoaderCircle className="animate-spin" />} {editing ? "Сохранить" : "Запустить"}
         </Button>
       </div>

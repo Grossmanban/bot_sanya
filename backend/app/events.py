@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import lifecycle, networks
+from . import lifecycle, networks, richtext
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -31,6 +31,50 @@ from .timeutil import now_iso, now_local
 
 MAX_TITLE = 80
 CRITICAL = ("starts_at", "ends_at", "target", "max_winners", "max_attempts", "prize", "prize_type")
+
+
+MAX_DESCRIPTION = 1000  # visible characters; the formatting is kept separately
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many
+
+
+def winners_text(n: int) -> str:
+    return f"{n}\u00a0{_plural(n, 'победитель', 'победителя', 'победителей')}"  # the number never parts from its word
+
+
+def rule(event: dict) -> str:
+    """«Гонка до 30 шт., 1 победитель» / «Кто больше сделает, 3 победителя»."""
+    if event["mode"] == "first_to_reach":
+        return f"Гонка до {event['target']}\u00a0шт., {winners_text(event['max_winners'])}"
+    return f"Кто больше сделает, {winners_text(event['max_winners'])}"
+
+
+def how_to_win(event: dict) -> str:
+    n = event["max_winners"]
+    if event["mode"] == "first_to_reach":
+        who = "Побеждает первый, кто" if n == 1 else f"Побеждают первые {n}, кто"
+        return f"{who} сделает {event['target']}\u00a0шт. и подтвердит скриншотом"
+    if n == 1:
+        return "Побеждает тот, кто к финишу сделает больше всех"
+    return f"Побеждают {n} лучших по подтверждённым штукам к финишу"
+
+
+def clean_description(value: str | None) -> tuple[str | None, str | None]:
+    """The editor sends Telegram HTML (bold, italic, links…); returns (html, plain), both None when empty."""
+    html, plain = richtext.sanitize(value or "")
+    if len(plain) > MAX_DESCRIPTION:
+        raise ServiceError(f"Описание длиннее {MAX_DESCRIPTION} символов", 422, "too_long")
+    return (html or None, plain or None) if plain else (None, None)
+
+
+def clean_media_kind(value: str | None) -> str:
+    if value not in (None, "photo", "video"):
+        raise ServiceError("Приз — фото или видео", 422, "bad_media")
+    return value or "photo"
 
 
 @dataclass
@@ -143,8 +187,12 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
                   and event["visibility"] != "hidden"
                   and rejected < event["max_attempts"] and not (event["mode"] == "first_to_reach" and won))
     return {
-        "id": event["id"], "title": event["title"], "description": event["description"], "prize": event["prize"],
+        "id": event["id"], "title": event["title"], "description": event["description"],
+        "description_html": event["description_html"] or (richtext.plain_to_html(event["description"])
+                                                           if event["description"] else None),
+        "rule": rule(event), "how_to_win": how_to_win(event), "prize": event["prize"],
         "prize_type": event["prize_type"], "prize_photo_url": lifecycle.prize_photo_url("event", event),
+        "prize_media_kind": event["prize_media_kind"] if event["prize_photo"] else None,
         "version": event["version"], "visibility": event["visibility"], "hidden_at": event["hidden_at"],
         "finished_at": event["finished_at"], "created_at": event["created_at"],
         "mode": event["mode"], "target": event["target"], "max_winners": event["max_winners"],
@@ -233,8 +281,10 @@ def _check_range(starts_at: datetime, ends_at: datetime) -> None:
 def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, starts_at: datetime, ends_at: datetime,
            key: str, description: str | None = None, prize: str | None = None, target: int | None = None,
            max_winners: int = 1, max_attempts: int = 3, network_id: int | None = None, prize_type: str | None = None,
-           prize_photo: str | None = None) -> dict:
+           prize_photo: str | None = None, prize_media_kind: str | None = None) -> dict:
     title = _clean_title(title)
+    description_html, description = clean_description(description)
+    prize_media_kind = clean_media_kind(prize_media_kind)
     if mode not in ("first_to_reach", "accumulative"):
         raise ServiceError("Выберите тип события", 422, "bad_mode")
     _check_target(mode, target)
@@ -254,11 +304,12 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, star
         if network_id is not None and (networks.get(conn, network_id) or {}).get("status") != "active":
             raise ServiceError("Сеть не найдена", 404, "not_found")
         cur = conn.execute(
-            """INSERT INTO events (title, description, prize, prize_type, prize_photo, mode, target, max_winners,
-                                   max_attempts, starts_at, ends_at, network_id, created_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (title, (description or "").strip()[:500] or None, (prize or "").strip()[:200] or None,
-             lifecycle.clean_prize_type(prize_type), prize_photo, mode,
+            """INSERT INTO events (title, description, description_html, prize, prize_type, prize_photo,
+                                   prize_media_kind, mode, target, max_winners, max_attempts, starts_at, ends_at,
+                                   network_id, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (title, description, description_html, (prize or "").strip()[:200] or None,
+             lifecycle.clean_prize_type(prize_type), prize_photo, prize_media_kind, mode,
              target if mode == "first_to_reach" else None, max_winners, max_attempts,
              starts_at.isoformat(timespec="minutes"), ends_at.isoformat(timespec="minutes"), network_id,
              actor["telegram_id"], now_iso()),
@@ -380,13 +431,14 @@ def update(conn: sqlite3.Connection, actor: dict, event_id: int, version: int, c
         if "title" in changes:
             new["title"] = _clean_title(changes["title"])
         if "description" in changes:
-            new["description"] = (changes["description"] or "").strip()[:500] or None
+            new["description_html"], new["description"] = clean_description(changes["description"])
         if "prize" in changes:
             new["prize"] = (changes["prize"] or "").strip()[:200] or None
         if "prize_type" in changes:
             new["prize_type"] = lifecycle.clean_prize_type(changes["prize_type"])
         if "prize_photo" in changes:
             new["prize_photo"] = lifecycle.clean_file_id(changes["prize_photo"])
+            new["prize_media_kind"] = clean_media_kind(changes.get("prize_media_kind"))
         for k in ("starts_at", "ends_at"):
             if changes.get(k) is not None:
                 new[k] = lifecycle.iso_minutes(changes[k])
@@ -430,7 +482,9 @@ def update(conn: sqlite3.Connection, actor: dict, event_id: int, version: int, c
         lifecycle.save(conn, "event", event_id, new)
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="EVENT_UPDATED", key=key,
                   old={k: old[k] for k in new}, new={"event": event_id, **new}, description=merged["title"])
-    changed = [k for k in new if k not in ("status", "finished_at")]
+    # the formatting and the media kind ride along with the description and the prize file
+    changed = list(dict.fromkeys({"description_html": "description", "prize_media_kind": "prize_photo"}.get(k, k)
+                                 for k in new if k not in ("status", "finished_at")))
     return Update(get(conn, event_id), changed, [k for k in changed if k in CRITICAL], finished, restarted, old)
 
 

@@ -7,7 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type User } from "@/lib/api";
 import { ddmm, dayMonth, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
-import { webApp } from "@/lib/telegram";
+import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 
 type Tab = "new" | "scheduled" | "internship" | "rejected";
@@ -127,11 +127,8 @@ function Candidate({ a, me, trainers, points, onDone }: {
   const [broken, setBroken] = useState(false);
   const { busy, run } = useAction();
   const p = a.progress;
-  const openTg = () => {
-    const url = a.username ? `https://t.me/${a.username}` : `tg://user?id=${a.telegram_id}`;
-    if (a.username) webApp()?.openTelegramLink(url);
-    else window.location.href = url;
-  };
+  const openTg = () => openProfile(a.username, a.telegram_id);
+  const link = "font-semibold text-foreground underline decoration-muted-foreground/40 underline-offset-2 hover:decoration-foreground";
   const act = async (name: string, fn: (k: string) => Promise<unknown>, ok: string) => {
     try {
       if (await run(name, fn, ok)) {
@@ -161,7 +158,17 @@ function Candidate({ a, me, trainers, points, onDone }: {
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             Навыки {a.communication}/10 · от {a.min_days} {plural(a.min_days, "дня", "дней", "дней")} в неделю · анкета {ddmm(a.created_at.slice(0, 10))}
-            {a.referrer ? ` · пригласил(а) ${a.referrer}` : ""}{a.earlier ? ` · анкет раньше: ${a.earlier}` : ""}
+            {a.referrer && (
+              <>
+                {" · пригласил(а) "}
+                {a.referrer_tg ? (
+                  <button type="button" className={link} onClick={() => openProfile(a.referrer_tg!.username, a.referrer_tg!.telegram_id)}>
+                    {a.referrer}
+                  </button>
+                ) : a.referrer}
+              </>
+            )}
+            {a.earlier ? ` · анкет раньше: ${a.earlier}` : ""}
           </p>
           <div className="mt-2 flex flex-wrap gap-1">
             {a.training_days.map((d) => <span key={d} className="rounded-lg bg-muted px-2 py-0.5 text-xs font-semibold">{DAYS[d]}</span>)}
@@ -180,7 +187,9 @@ function Candidate({ a, me, trainers, points, onDone }: {
       )}
       {a.contacted_at && a.status !== "rejected" && (
         <p className="text-xs text-muted-foreground">
-          Написали через @{a.contact_manager} {ddmm(a.contacted_at.slice(0, 10))}:{" "}
+          Написали через{" "}
+          <button type="button" className={link} onClick={() => openProfile(a.contact_manager)}>@{a.contact_manager}</button>{" "}
+          {ddmm(a.contacted_at.slice(0, 10))}:{" "}
           {a.contact_answer === "wrote" ? <b className="text-go">кандидат написал менеджеру</b>
             : a.contact_answer === "cant_write" ? <b className="text-wait">просит написать ему первым</b> : "ответа пока нет"}
         </p>

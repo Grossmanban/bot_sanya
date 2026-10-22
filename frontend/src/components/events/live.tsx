@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, Crown, Flag, LoaderCircle, Timer, Trophy, XCircle } from "lucide-react";
+import { ChevronLeft, Crown, Flag, LoaderCircle, ScrollText, Target, Timer, TrendingUp, Trophy, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type LiveEvent } from "@/lib/api";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { PrizeThumb, prizeText } from "../lifecycle";
 import { PhotoPicker } from "../report/photo";
 import { ArchiveList } from "../archive";
+import { displayHtml } from "../admin/rich-editor";
 
 /** Countdown to a moment, ticking every second. */
 export function useCountdown(iso: string) {
@@ -25,13 +26,17 @@ export function useCountdown(iso: string) {
   const m = Math.floor((left % 3_600_000) / 60_000);
   const s = Math.floor((left % 60_000) / 1000);
   const d = Math.floor(h / 24);
-  return { left, text: d > 0 ? `${d} д ${h % 24} ч` : `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` };
+  const hms = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return {
+    left, days: d, hours: h % 24,
+    text: d > 0 ? `${d} д ${h % 24} ч` : hms,
+    /** for a badge: «2 д 5 ч», «3 ч 12 мин», «12 мин» */
+    short: d > 0 ? `${d} д ${h % 24} ч` : h > 0 ? `${h} ч ${m} мин` : m > 0 ? `${m} мин` : `${s} с`,
+  };
 }
 
-export const RULE = (e: LiveEvent) =>
-  e.mode === "first_to_reach"
-    ? `Гонка до ${e.target} шт.: первые ${e.max_winners} ${plural(e.max_winners, "победитель", "победителя", "победителей")}`
-    : `Кто больше сделает: топ-${e.max_winners}`;
+/** «Гонка до 30 шт., 1 победитель» — worded by the server, with the right case endings. */
+export const RULE = (e: LiveEvent) => e.rule;
 
 const PHASE: Record<LiveEvent["phase"], string> = {
   upcoming: "скоро",
@@ -40,6 +45,25 @@ const PHASE: Record<LiveEvent["phase"], string> = {
   finished: "завершено",
   cancelled: "отменено",
 };
+
+/** The event's kind as an icon and a short name. */
+function ModeIcon({ mode, className }: { mode: LiveEvent["mode"]; className?: string }) {
+  return mode === "first_to_reach" ? <Flag className={className} /> : <TrendingUp className={className} />;
+}
+
+/** The phase as a pill: a pulsing dot while it runs, the time left next to it. */
+function PhaseBadge({ event, dark }: { event: LiveEvent; dark?: boolean }) {
+  const until = useCountdown(event.phase === "upcoming" ? event.starts_at : event.ends_at);
+  const live = event.phase === "live";
+  const tail = event.phase === "upcoming" ? ` · через ${until.short}` : live ? ` · ещё ${until.short}` : "";
+  return (
+    <span className={cn("inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold",
+      dark ? "bg-white/10 text-hero-foreground" : live ? "bg-go-soft text-go" : "bg-muted text-muted-foreground")}>
+      <span className={cn("size-1.5 rounded-full", live ? "animate-pulse bg-[#22c55e]" : dark ? "bg-white/50" : "bg-muted-foreground/60")} />
+      {PHASE[event.phase]}{tail}
+    </span>
+  );
+}
 
 /** The employee's events: a list, or straight into the only one. Polls the board every 5 s. */
 export function EventsScreen() {
@@ -83,14 +107,18 @@ export function EventsScreen() {
       {items.map((e) => (
         <li key={e.id}>
           <button onClick={() => { tapHaptic(); setOpenId(e.id); }}
-                  className="press flex w-full items-center gap-4 rounded-3xl bg-card p-5 text-left shadow-lift">
-            <span className="grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground"><Flag className="size-5" /></span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-semibold">{e.title}</span>
-              <span className="block text-sm text-muted-foreground">{RULE(e)} · {PHASE[e.phase]}</span>
-              {prizeText(e) && <span className="block truncate text-sm">🏆 {prizeText(e)}</span>}
+                  className="press flex w-full items-start gap-4 rounded-3xl bg-card p-5 text-left shadow-lift">
+            <span className={cn("grid size-12 shrink-0 place-items-center rounded-2xl",
+              e.phase === "live" ? "bg-hero text-hero-foreground" : "bg-muted text-muted-foreground")}>
+              <ModeIcon mode={e.mode} className="size-5" />
             </span>
-            {e.prize_photo_url && <PrizeThumb url={e.prize_photo_url} className="size-12" />}
+            <span className="min-w-0 flex-1 space-y-1">
+              <span className="block font-semibold">{e.title}</span>
+              <span className="block text-sm text-muted-foreground">{e.rule}</span>
+              {prizeText(e) && <span className="block truncate text-sm">🏆 {prizeText(e)}</span>}
+              <PhaseBadge event={e} />
+            </span>
+            {e.prize_photo_url && <PrizeThumb url={e.prize_photo_url} kind={e.prize_media_kind} className="size-14" />}
           </button>
         </li>
       ))}
@@ -100,49 +128,85 @@ export function EventsScreen() {
   );
 }
 
+/** HH:MM:SS as three tiles; days when it's far. */
+function Clock({ iso, stopped }: { iso: string; stopped?: boolean }) {
+  const c = useCountdown(iso);
+  if (!stopped && c.days > 0) {
+    return <p className="font-display text-3xl font-semibold tabular">{c.days} {plural(c.days, "день", "дня", "дней")} {c.hours} ч</p>;
+  }
+  const parts = stopped ? ["00", "00", "00"] : c.text.split(":");
+  return (
+    <div className="flex items-start gap-1.5">
+      {parts.map((p, i) => (
+        <div key={i} className="flex items-start gap-1.5">
+          {i > 0 && <span className="pt-1.5 font-display text-2xl font-semibold text-hero-muted">:</span>}
+          <span className="grid min-w-14 place-items-center rounded-2xl bg-white/10 px-2 py-1.5">
+            <span className="font-display text-3xl leading-none font-semibold tabular">{p}</span>
+            <span className="mt-1 text-[10px] tracking-wide text-hero-muted uppercase">{["час", "мин", "сек"][i]}</span>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function EventView({ event, onBack, onChanged }: { event: LiveEvent; onBack?: () => void; onChanged: () => void }) {
-  const ends = useCountdown(event.ends_at);
-  const starts = useCountdown(event.starts_at);
   const leader = event.leaderboard[0]?.score ?? 0;
   const goal = event.mode === "first_to_reach" ? event.target ?? 1 : Math.max(leader, 1);
   const pct = Math.min(100, Math.round((event.my.score / goal) * 100));
   const lastRejected = event.my.entries.find((e) => e.status === "rejected");
   const prize = prizeText(event);
   const showRejected = lastRejected && !event.my.pending && event.my.entries[0]?.status === "rejected";
+  const chip = "inline-flex h-8 items-center gap-1.5 rounded-full bg-white/10 px-3 text-sm font-medium";
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 lg:grid lg:max-w-6xl lg:grid-cols-[minmax(0,1fr)_24rem] lg:items-start lg:gap-6 lg:space-y-0">
       <div className="space-y-4">
         {onBack && <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={onBack}><ChevronLeft /> Все события</Button>}
         <section className="relative overflow-hidden rounded-3xl bg-hero p-6 text-hero-foreground shadow-lift-strong">
-          <span className="absolute -top-10 -right-10 size-40 rounded-full bg-white/5" aria-hidden />
-          <p className="flex items-center gap-2 text-sm text-hero-muted">
-            <span className={cn("size-2 rounded-full", event.phase === "live" ? "animate-pulse bg-[#6ee7a8]" : "bg-white/40")} />
-            {PHASE[event.phase]}{event.network ? ` · сеть «${event.network}»` : ""}
-          </p>
-          <div className="mt-2 flex items-start gap-4">
-            <div className="min-w-0 flex-1">
-              <h1 className="font-display text-2xl font-semibold">{event.title}</h1>
-              <p className="mt-1 text-[15px] text-hero-muted">{RULE(event)}</p>
-            </div>
-            {/* ТЗ №20: the prize photo on the right, full screen on tap; 🎁 when there is none */}
-            {(prize || event.prize_photo_url) && <PrizeThumb url={event.prize_photo_url} className="size-20 bg-white/10" />}
+          <span className="absolute -top-16 -right-16 size-56 rounded-full bg-white/5" aria-hidden />
+          <span className="absolute -bottom-20 -left-10 size-44 rounded-full bg-white/[0.03]" aria-hidden />
+          <div className="relative flex flex-wrap items-center gap-2">
+            <PhaseBadge event={event} dark />
+            {event.network && <span className="text-xs text-hero-muted">сеть «{event.network}»</span>}
           </div>
-          <div className="mt-5 flex flex-wrap items-end gap-6">
-            <div>
-              <p className="flex items-center gap-1.5 text-xs text-hero-muted"><Timer className="size-3.5" />
-                {event.phase === "upcoming" ? "до старта" : event.phase === "live" ? "до конца" : "время вышло"}</p>
-              <p className="font-display text-3xl font-semibold tabular">{event.phase === "upcoming" ? starts.text : event.phase === "live" ? ends.text : "00:00:00"}</p>
-            </div>
-            {prize && (
+          <h1 className="relative mt-3 font-display text-[1.75rem] leading-tight font-semibold break-words">{event.title}</h1>
+          {/* the conditions as chips: the kind with its target, winners, attempts */}
+          <div className="relative mt-3 flex flex-wrap gap-1.5">
+            <span className={chip}>
+              <ModeIcon mode={event.mode} className="size-3.5" />
+              {event.mode === "first_to_reach" ? `Гонка до ${event.target} шт.` : "Кто больше сделает"}
+            </span>
+            <span className={chip}><Crown className="size-3.5" />{event.max_winners} {plural(event.max_winners, "победитель", "победителя", "победителей")}</span>
+            <span className={chip}><Target className="size-3.5" />{event.max_attempts} {plural(event.max_attempts, "попытка", "попытки", "попыток")}</span>
+          </div>
+          <p className="relative mt-3 text-[15px] text-hero-muted">{event.how_to_win}</p>
+
+          <div className="relative mt-5">
+            <p className="mb-1.5 flex items-center gap-1.5 text-xs text-hero-muted"><Timer className="size-3.5" />
+              {event.phase === "upcoming" ? "до старта" : event.phase === "live" ? "до финиша" : "время вышло"}</p>
+            <Clock iso={event.phase === "upcoming" ? event.starts_at : event.ends_at} stopped={event.phase !== "upcoming" && event.phase !== "live"} />
+          </div>
+
+          {(prize || event.prize_photo_url) && (
+            <div className="relative mt-5 flex items-center gap-4 rounded-2xl bg-white/10 p-3">
+              {/* ТЗ №20: the prize photo or video opens full screen; 🎁 when there is none */}
+              <PrizeThumb url={event.prize_photo_url} kind={event.prize_media_kind} className="size-16 bg-white/10" />
               <div className="min-w-0">
-                <p className="flex items-center gap-1.5 text-xs text-hero-muted"><Trophy className="size-3.5" /> приз</p>
-                <p className="truncate text-lg font-semibold">{prize}</p>
+                <p className="flex items-center gap-1.5 text-xs text-hero-muted"><Trophy className="size-3.5" /> Приз</p>
+                <p className="text-lg leading-snug font-semibold break-words">{prize || "Сюрприз"}</p>
               </div>
-            )}
-          </div>
-          {event.description && <p className="mt-4 text-sm text-hero-muted">{event.description}</p>}
+            </div>
+          )}
         </section>
+
+        {event.description_html && (
+          <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+            <h2 className="mb-2 flex items-center gap-2 font-semibold"><ScrollText className="size-4" /> Правила</h2>
+            <div className="tg-rich text-[15px] leading-relaxed break-words whitespace-pre-wrap"
+                 dangerouslySetInnerHTML={{ __html: displayHtml(event.description_html) }} />
+          </section>
+        )}
 
         <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
           <div className="flex items-baseline justify-between">

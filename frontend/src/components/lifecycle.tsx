@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { api, type Lifecycle } from "@/lib/api";
 import { useAction } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
-import { PhotoPicker, PhotoThumb } from "./report/photo";
+import { PhotoPicker, PhotoThumb, VideoPicker, VideoThumb } from "./report/photo";
 
 /** Shared by goals and events once they run (ТЗ №20, №22). */
 
@@ -27,8 +27,9 @@ export const CHANGE_LABELS: Record<string, string> = {
   max_winners: "число победителей", max_attempts: "попытки", prize: "приз", prize_type: "тип приза",
 };
 
-/** The prize on the right of a card: a photo that opens full screen, or a grey square with 🎁. */
-export function PrizeThumb({ url, className }: { url: string | null | undefined; className?: string }) {
+/** The prize on the right of a card: a photo or a video that opens full screen, or a grey square with 🎁. */
+export function PrizeThumb({ url, kind, className }: { url: string | null | undefined; kind?: "photo" | "video" | null; className?: string }) {
+  if (url && kind === "video") return <VideoThumb src={url} label="приз" className={cn("size-16 rounded-2xl", className)} />;
   if (url) return <PhotoThumb src={url} label="приз" className={cn("size-16 rounded-2xl", className)} />;
   return (
     <span aria-hidden className={cn("grid size-16 shrink-0 place-items-center rounded-2xl bg-muted text-2xl", className)}>🎁</span>
@@ -44,12 +45,14 @@ export interface PrizeState {
   prize: string;
   /** a new photo picked on the device (uploaded on save) */
   file: Blob | null;
+  /** or a new video (events) */
+  video: File | null;
   /** the current photo was removed */
   cleared: boolean;
 }
 
 export const prizeState = (item?: Partial<Lifecycle>): PrizeState => ({
-  type: item?.prize_type ?? "", prize: item?.prize ?? "", file: null, cleared: false,
+  type: item?.prize_type ?? "", prize: item?.prize ?? "", file: null, video: null, cleared: false,
 });
 
 /** Uploads a new photo; returns the value for `prize_photo` (undefined — unchanged, null — removed). */
@@ -58,19 +61,31 @@ export async function prizePhotoValue(state: PrizeState): Promise<string | null 
   return state.cleared ? null : undefined;
 }
 
-/** Prize type: one of the list or the creator's own (answer 3), the prize itself and its photo. */
-export function PrizeFields({ types, value, onChange, currentUrl }: {
+/** The same with a video: the fields to send, or {} when the prize's file didn't change. */
+export async function prizeMediaValue(state: PrizeState): Promise<{ prize_photo?: string | null; prize_media_kind?: "photo" | "video" }> {
+  if (state.video) return { prize_photo: (await api.admin.uploadVideo(state.video)).file_id, prize_media_kind: "video" };
+  const photo = await prizePhotoValue(state);
+  if (photo === undefined) return {};
+  return photo ? { prize_photo: photo, prize_media_kind: "photo" } : { prize_photo: null };
+}
+
+export const prizeTouched = (state: PrizeState) => !!state.file || !!state.video || state.cleared;
+
+/** Prize type: one of the list or the creator's own (answer 3), the prize itself and its photo (or a video). */
+export function PrizeFields({ types, value, onChange, currentUrl, currentKind, allowVideo }: {
   types: string[];
   value: PrizeState;
   onChange: (v: PrizeState) => void;
   currentUrl?: string | null;
+  currentKind?: "photo" | "video" | null;
+  allowVideo?: boolean;
 }) {
   const own = value.type !== "" && !types.includes(value.type);
   const [custom, setCustom] = useState(own);
   const set = (patch: Partial<PrizeState>) => onChange({ ...value, ...patch });
   const chip = (active: boolean) =>
     cn("press h-9 rounded-full px-3.5 text-sm font-medium", active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground");
-  const showCurrent = currentUrl && !value.cleared && !value.file;
+  const showCurrent = currentUrl && !value.cleared && !value.file && !value.video;
   return (
     <div className="space-y-2.5">
       <p className="text-xs text-muted-foreground">Приз</p>
@@ -89,13 +104,16 @@ export function PrizeFields({ types, value, onChange, currentUrl }: {
              onChange={(e) => set({ prize: e.target.value.slice(0, 200) })} />
       {showCurrent ? (
         <div className="flex items-center gap-3">
-          <PrizeThumb url={currentUrl} />
+          <PrizeThumb url={currentUrl} kind={currentKind} />
           <Button type="button" variant="ghost" size="sm" className="rounded-lg text-muted-foreground" onClick={() => set({ cleared: true })}>
-            Убрать фото
+            {currentKind === "video" ? "Убрать видео" : "Убрать фото"}
           </Button>
         </div>
       ) : (
-        <PhotoPicker value={value.file} onChange={(file) => set({ file })} label="Фото приза" optional />
+        <>
+          {!value.video && <PhotoPicker value={value.file} onChange={(file) => set({ file, video: null })} label="Фото приза" optional />}
+          {allowVideo && !value.file && <VideoPicker value={value.video} onChange={(video) => set({ video, file: null })} label="Видео приза" />}
+        </>
       )}
     </div>
   );
