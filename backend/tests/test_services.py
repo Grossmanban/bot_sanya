@@ -95,42 +95,86 @@ def test_today_is_urgent_until_admin_decides(conn, make_user):
     assert svc.day_totals(conn, TODAY) == (1, 25)
 
 
-def test_cancel_restore_final_cancel_cycle(conn, make_user):
+def test_day_off_and_back_before_the_deadline(conn, make_user):
+    """ТЗ 27.10 §16: before 22:00 the day before — «Беру выходной» and back as often as needed, no penalties."""
     user = make_user()
-    shift = create(conn, user).shift
-    sid = shift["id"]
-
-    # restored shift cannot be first-cancelled; active shift cannot be final-cancelled
-    with pytest.raises(svc.ServiceError):
-        svc.final_cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)
-
+    sid = create(conn, user).shift["id"]
     key = svc.new_key()
     res = svc.cancel_shift(conn, user, sid, key, today=TODAY)
     assert res.shift["status"] == "cancelled"
     assert not svc.cancel_shift(conn, user, sid, key, today=TODAY).changed  # duplicate click
     assert svc.day_totals(conn, SAT) == (0, 0)
     view = svc.serialize_shift(res.shift, TODAY)
-    assert view["can_restore"] and not view["can_cancel"]
+    assert view["can_restore"] and not view["can_cancel"] and view["phase"] == "open"
+    for volume in (30, 35):
+        res = svc.restore_shift(conn, user, sid, {**PAYLOAD, "volume": volume}, svc.new_key(), today=TODAY)
+        assert res.shift["status"] == "active" and res.shift["volume"] == volume
+        if volume == 30:
+            svc.cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)  # no «final» cancellation any more
+    assert svc.day_totals(conn, SAT) == (1, 35)
 
-    new_payload = {**PAYLOAD, "volume": 30}
-    res = svc.restore_shift(conn, user, sid, new_payload, svc.new_key(), today=TODAY)
-    assert res.shift["status"] == "restored" and res.shift["volume"] == 30
-    assert svc.day_totals(conn, SAT) == (1, 30)
 
+def test_deadline_22_then_only_time_and_point_then_nothing(conn, make_user):
+    """22:00 the day before: the volume, the status and booking are fixed, the time and the point change until
+    00:00 (as often as needed); from 00:00 — nothing, only an urgent request for today."""
+    from datetime import datetime, time
+
+    user, other = make_user(), make_user(first="Мария", username="maria")
+    sid = create(conn, user).shift["id"]
+    fri = SAT - timedelta(days=1)
+    at = lambda d, hhmm: datetime.combine(d, time(*map(int, hhmm.split(":"))), tzinfo=settings.tz)
+    assert svc.mark_deadline(SAT) == at(fri, "22:00")
+    assert [svc.phase(SAT, at(fri, t)) for t in ("21:59", "22:00", "23:59")] == ["open", "late", "late"]
+    assert svc.phase(SAT, at(SAT, "00:00")) == "started" and svc.phase(SAT, at(SAT + timedelta(days=1), "09:00")) == "past"
+
+    late = at(fri, "22:30")
+    view = svc.serialize_shift(svc.get_shift(conn, sid), fri, now=late)
+    assert view["can_edit"] and not view["volume_open"] and not view["can_cancel"] and view["can_contact_admin"]
     with pytest.raises(svc.ServiceError) as e:
-        svc.cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)
-    assert e.value.code == "final_confirm_required"
+        svc.edit_shift(conn, user, sid, {**PAYLOAD, "volume": 40}, svc.new_key(), now=late)
+    assert e.value.code == "volume_locked"
+    for start in ("15:00", "14:00"):  # as often as needed
+        res = svc.edit_shift(conn, user, sid, {**PAYLOAD, "start_time": start, "location": "Центр"}, svc.new_key(), now=late)
+    assert (res.shift["start_time"], res.shift["location"]) == ("14:00", "Центр")
+    for action in (lambda: svc.cancel_shift(conn, user, sid, svc.new_key(), now=late),
+                   lambda: svc.create_shift(conn, other, SAT, dict(PAYLOAD), svc.new_key(), now=late),
+                   lambda: svc.pre_declare_off(conn, other, SAT, svc.new_key(), now=late)):
+        with pytest.raises(svc.ServiceError) as e:
+            action()
+        assert e.value.code == "after_deadline"
 
-    res = svc.final_cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)
-    assert res.shift["status"] == "finally_cancelled"
-    assert svc.day_totals(conn, SAT) == (0, 0)
-    view = svc.serialize_shift(res.shift, TODAY)
-    assert not any(view[k] for k in ("can_edit", "can_cancel", "can_restore", "can_final_cancel"))
+    night = at(SAT, "00:10")
+    with pytest.raises(svc.ServiceError) as e:
+        svc.edit_shift(conn, user, sid, {**PAYLOAD, "start_time": "13:00", "location": "Центр"}, svc.new_key(), now=night)
+    assert e.value.code == "day_started"
+    urgent = svc.create_shift(conn, other, SAT, dict(PAYLOAD), svc.new_key(), now=night)  # from 00:00 — urgent
+    assert urgent.shift["status"] == "awaiting_approval"
+
+    # «Связаться с администратором»: the shift stays as it is
+    with pytest.raises(svc.ServiceError) as e:
+        svc.contact_admin(conn, user, sid, "Заболел", svc.new_key(), now=at(fri, "10:00"))
+    assert e.value.code == "still_open"
     with pytest.raises(svc.ServiceError):
-        svc.restore_shift(conn, user, sid, PAYLOAD, svc.new_key(), today=TODAY)
+        svc.contact_admin(conn, user, sid, " ", svc.new_key(), now=night)
+    shift = svc.contact_admin(conn, user, sid, "Заболел, температура", svc.new_key(), now=night)
+    assert svc.get_shift(conn, sid)["status"] == "active"
+    from .test_features import FakeNotifier, run
 
-    events = [r[0] for r in conn.execute("SELECT event_type FROM event_logs WHERE shift_id = ? ORDER BY id", (sid,))]
-    assert events == ["SHIFT_CREATED", "SHIFT_CANCELLED", "SHIFT_RESTORED", "SHIFT_FINAL_CANCELLED"]
+    svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    n = FakeNotifier(conn)
+    run(n.admin_contacted(shift, "Заболел, температура"))
+    [text] = [t for chat, t in n.sent if chat == 999]
+    assert "просит изменить смену" in text and "14:00–19:00, Центр, 25 шт." in text and "Заболел" in text
+    assert conn.execute("SELECT description FROM event_logs WHERE event_type = 'SHIFT_ADMIN_CONTACTED'").fetchone()[0] \
+        == "Заболел, температура"
+
+
+def _legacy_final_cancel(conn, user, sid):
+    """Shifts finally cancelled before 27.10 still carry their penalty."""
+    from app import finance
+
+    conn.execute("UPDATE shifts SET status = 'finally_cancelled', finally_cancelled_at = updated_at WHERE id = ?", (sid,))
+    finance.final_cancel_draft(conn, svc.get_shift(conn, sid), user["telegram_id"])
 
 
 def test_penalty_applied_once(conn, make_user):
@@ -138,99 +182,13 @@ def test_penalty_applied_once(conn, make_user):
     sid = create(conn, user).shift["id"]
     with pytest.raises(svc.ServiceError):
         svc.set_penalty(conn, sid, 1000, 999)
-    svc.cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)
-    svc.restore_shift(conn, user, sid, PAYLOAD, svc.new_key(), today=TODAY)
-    svc.final_cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)
+    _legacy_final_cancel(conn, user, sid)
     assert svc.set_penalty(conn, sid, 1000, 999).changed
     second = svc.set_penalty(conn, sid, 2000, 998)
     assert not second.changed and second.shift["penalty_amount"] == 1000
     assert svc.user_penalties(conn, user["id"])[0]["penalty_amount"] == 1000
     log = svc.penalty_log(conn, None, None, None)
     assert len(log) == 1 and log[0]["amount"] == 1000
-
-
-def test_volume_until_midnight_then_one_change_then_a_request(conn, make_user):
-    """Until 00:00 after booking — anything, as often as needed; then the volume is fixed, the time or the point
-    change once, and the next change waits for an admin or the network's trainer."""
-    from datetime import datetime, time
-
-    user = make_user()
-    sid = create(conn, user).shift["id"]
-    conn.execute("UPDATE shifts SET created_at = ? WHERE id = ?", (f"{TODAY.isoformat()}T19:30:00+03:00", sid))
-    evening = datetime.combine(TODAY, time(23, 50), tzinfo=settings.tz)
-    night = datetime.combine(TODAY + timedelta(days=1), time(0, 0), tzinfo=settings.tz)
-    shift = svc.get_shift(conn, sid)
-    assert svc.volume_until(shift) == night
-    view = svc.serialize_shift(shift, TODAY, conn, now=evening)
-    assert view["volume_open"] and view["can_edit"] and not view["can_request_change"]
-    for volume in (40, 45):  # free while the schedule is being set — not counted
-        res = svc.edit_shift(conn, user, sid, {**PAYLOAD, "volume": volume}, svc.new_key(), today=TODAY, now=evening)
-    assert res.shift["volume"] == 45 and res.shift["edit_count"] == 0
-
-    view = svc.serialize_shift(res.shift, TODAY, conn, now=night)
-    assert not view["volume_open"] and view["can_edit"] and view["volume_until"].startswith(f"{(TODAY + timedelta(days=1)).isoformat()}T00:00")
-    with pytest.raises(svc.ServiceError) as e:  # 00:00 — the volume is fixed
-        svc.edit_shift(conn, user, sid, {**PAYLOAD, "volume": 60}, svc.new_key(), today=TODAY, now=night)
-    assert e.value.code == "volume_locked"
-    res = svc.edit_shift(conn, user, sid, {**PAYLOAD, "volume": 45, "start_time": "11:00"}, svc.new_key(),
-                         today=TODAY, now=night)
-    assert res.shift["start_time"] == "11:00" and res.shift["edit_count"] == 1
-    view = svc.serialize_shift(res.shift, TODAY, conn, now=night)
-    assert not view["can_edit"] and view["can_request_change"]
-    with pytest.raises(svc.ServiceError) as e:
-        svc.edit_shift(conn, user, sid, {**PAYLOAD, "volume": 45, "start_time": "12:00"}, svc.new_key(), today=TODAY, now=night)
-    assert e.value.code == "edit_limit"
-
-    # the second change is a request; the volume in it stays as it is
-    req = svc.request_change(conn, user, sid, {**PAYLOAD, "volume": 999, "start_time": "12:00", "location": "Центр"},
-                             svc.new_key(), today=TODAY, now=night)
-    assert req.request["status"] == "pending" and req.shift["start_time"] == "11:00"
-    view = svc.serialize_shift(req.shift, TODAY, conn, now=night)
-    assert view["change_request"]["location"] == "Центр" and not view["can_request_change"]
-    with pytest.raises(svc.ServiceError) as e:
-        svc.request_change(conn, user, sid, {**PAYLOAD, "start_time": "13:00"}, svc.new_key(), today=TODAY, now=night)
-    assert e.value.code == "already_requested"
-    stranger = make_user(first="Мария", username="maria")
-    with pytest.raises(svc.ServiceError) as e:  # an employee can't decide
-        svc.decide_change(conn, stranger, req.request["id"], True, None, svc.new_key(), today=TODAY)
-    assert e.value.status == 403
-    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
-    done = svc.decide_change(conn, owner, req.request["id"], True, None, svc.new_key(), today=TODAY)
-    assert done.request["status"] == "approved"
-    assert (done.shift["start_time"], done.shift["location"], done.shift["volume"], done.shift["edit_count"]) == ("12:00", "Центр", 45, 2)
-
-    # a declined one changes nothing; a withdrawn one too; cancelling the shift closes a waiting one
-    no = svc.request_change(conn, user, sid, {**PAYLOAD, "start_time": "14:00"}, svc.new_key(), today=TODAY, now=night)
-    svc.decide_change(conn, owner, no.request["id"], False, "Точка занята", svc.new_key(), today=TODAY)
-    assert svc.get_shift(conn, sid)["start_time"] == "12:00"
-    back = svc.request_change(conn, user, sid, {**PAYLOAD, "start_time": "15:00"}, svc.new_key(), today=TODAY, now=night)
-    assert svc.withdraw_change(conn, user, back.request["id"], svc.new_key()).request["status"] == "withdrawn"
-    last = svc.request_change(conn, user, sid, {**PAYLOAD, "start_time": "16:00"}, svc.new_key(), today=TODAY, now=night)
-    svc.cancel_shift(conn, user, sid, svc.new_key(), today=TODAY)
-    assert svc._change(conn, last.request["id"])["status"] == "withdrawn"
-
-
-def test_change_request_goes_to_the_network_trainer(conn, make_user):
-    from datetime import datetime, time
-
-    from app import networks
-
-    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
-    north = networks.create(conn, owner, "Север", svc.new_key())
-    south = networks.create(conn, owner, "Юг", svc.new_key())
-    user, trainer, other = make_user(), make_user(first="Тренер", username="tr"), make_user(first="Чужой", username="ch")
-    conn.execute("UPDATE users SET network_id = ? WHERE id IN (?, ?)", (north["id"], user["id"], trainer["id"]))
-    conn.execute("UPDATE users SET role = 'trainer', network_id = ? WHERE id = ?", (south["id"], other["id"]))
-    conn.execute("UPDATE users SET role = 'trainer' WHERE id = ?", (trainer["id"],))
-    sid = create(conn, user).shift["id"]
-    conn.execute("UPDATE shifts SET created_at = ?, edit_count = 1 WHERE id = ?", (f"{TODAY.isoformat()}T10:00:00+03:00", sid))
-    night = datetime.combine(TODAY + timedelta(days=1), time(1, 0), tzinfo=settings.tz)
-    req = svc.request_change(conn, user, sid, {**PAYLOAD, "end_time": "20:00"}, svc.new_key(), today=TODAY, now=night)
-    with pytest.raises(svc.ServiceError) as e:  # another network's trainer
-        svc.decide_change(conn, svc.get_user(conn, other["id"]), req.request["id"], True, None, svc.new_key(), today=TODAY)
-    assert e.value.status == 403
-    done = svc.decide_change(conn, svc.get_user(conn, trainer["id"]), req.request["id"], True, None, svc.new_key(), today=TODAY)
-    assert done.shift["end_time"] == "20:00"
 
 
 def test_other_users_shift_is_not_found(conn, make_user):
@@ -280,8 +238,7 @@ def test_admin_edit_locks_user_edit_and_force_cancel_blocks_restore(conn, make_u
         svc.admin_edit_shift(conn, admin, sid, {"volume": 50}, svc.new_key())
     assert e.value.code == "reason_required"
     res = svc.admin_edit_shift(conn, admin, sid, {"volume": 50, "reason": "договорились"}, svc.new_key())
-    view = svc.serialize_shift(res.shift, TODAY)  # the admin's change closes the free window: next — a request
-    assert res.shift["volume"] == 50 and not view["can_edit"] and not view["volume_open"] and view["can_request_change"]
+    assert res.shift["volume"] == 50
     res = svc.admin_edit_shift(conn, admin, sid, {"action": "force_cancel", "reason": "заболел"}, svc.new_key())
     assert res.shift["status"] == "cancelled" and not svc.serialize_shift(res.shift, TODAY)["can_restore"]
     res = svc.admin_edit_shift(conn, admin, sid, {"action": "force_restore", "reason": "выздоровел"}, svc.new_key())
@@ -418,39 +375,3 @@ def test_pending_request_decided_from_team(conn):
     user, changed = svc.set_access(conn, owner, newbie["id"], True, svc.new_key())
     assert changed and user["status"] == "approved"
     assert svc.claim_welcome(conn, user["id"])
-
-
-def test_change_request_over_http_and_the_bot_message(conn, make_user):
-    """The app sends the request; managers get it with buttons; an admin decides in the app."""
-    from fastapi.testclient import TestClient
-
-    from app.api import create_app
-    from app.auth import sign_init_data
-
-    from .test_features import FakeNotifier, run
-
-    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
-    user = make_user()
-    day = today_local() + timedelta(days=1)
-    sid = svc.create_shift(conn, user, day, PAYLOAD, svc.new_key()).shift["id"]
-    conn.execute("UPDATE shifts SET created_at = '2020-01-01T10:00:00+03:00', edit_count = 1 WHERE id = ?", (sid,))
-    n = FakeNotifier(conn)
-    client = TestClient(create_app(conn, n))
-    h = lambda tg: {"X-Telegram-Init-Data": sign_init_data({"id": tg, "first_name": "X"}, settings.bot_token)}
-    body = {**PAYLOAD, "start_time": "12:00", "idempotency_key": svc.new_key()}
-    r = client.patch(f"/api/shifts/{sid}", json=body, headers=h(user["telegram_id"]))
-    assert r.status_code == 409 and r.json()["code"] == "edit_limit"
-    r = client.post(f"/api/shifts/{sid}/change-request", json=body, headers=h(user["telegram_id"]))
-    assert r.status_code == 200, r.text
-    req = r.json()["shift"]["change_request"]
-    assert req["start_time"] == "12:00"
-    n.sent.clear()
-    run(n.change_requested(svc._change(conn, req["id"])))
-    [text] = [t for c, t in n.sent if c == 999]
-    assert "Запрос на изменение смены" in text and "Стало: <b>12:00–" in text
-    r = client.post(f"/api/admin/change-requests/{req['id']}/decide",
-                    json={"approve": True, "idempotency_key": svc.new_key()}, headers=h(999))
-    assert r.status_code == 200 and r.json()["shift"]["start_time"] == "12:00"
-    r = client.post(f"/api/admin/change-requests/{req['id']}/decide",
-                    json={"approve": False, "idempotency_key": svc.new_key()}, headers=h(999))
-    assert r.status_code == 409

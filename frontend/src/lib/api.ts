@@ -327,15 +327,16 @@ export interface Shift {
   admin_locked: boolean;
   can_edit: boolean;
   can_cancel: boolean;
-  can_final_cancel: boolean;
   can_restore: boolean;
   can_clear_off: boolean;
-  /** the volume can still be changed (until 00:00 after booking — `volume_until`) */
+  /** ТЗ 27.10 §16: open — change anything; late (22:00–00:00) — the time and the point; started — nothing */
+  phase?: "open" | "late" | "started" | "past";
+  /** 22:00 the day before, ISO */
+  deadline?: string;
+  /** the volume can still be changed (before the deadline) */
   volume_open?: boolean;
-  volume_until?: string;
-  /** the self-change is used up: the next change of the time or the point is a request */
-  can_request_change?: boolean;
-  change_request?: { id: number; start_time: string; end_time: string; location: string; created_at: string } | null;
+  /** after the deadline: «Связаться с администратором» */
+  can_contact_admin?: boolean;
   rate?: number;
   expected_pay?: number;
   lazy?: boolean;
@@ -455,6 +456,9 @@ export interface Violation {
   absent_dates: string[];
   status: "pending" | "penalized" | "waived";
   default_comment: string;
+  /** an unmarked day (ТЗ 27.10 §17): N fine units × the person's rate */
+  suggested_units?: number | null;
+  suggested_amount?: number | null;
   resolution_comment: string | null;
   resolved_by: string | null;
   resolved_at: string | null;
@@ -527,6 +531,10 @@ export interface Colleague {
 
 export interface Day {
   date: string;
+  /** ТЗ 27.10 §16: what can still be done for this date */
+  phase: "open" | "late" | "started" | "past";
+  /** 22:00 the day before, ISO without seconds */
+  deadline: string;
   weekday: number;
   is_past: boolean;
   is_today: boolean;
@@ -900,16 +908,12 @@ export const api = {
   cancel: (id: number, key: string) => post<ShiftResponse>(`/api/shifts/${id}/cancel`, { idempotency_key: key }),
   restore: (id: number, p: ShiftPayload, key: string) =>
     post<ShiftResponse>(`/api/shifts/${id}/restore`, { ...p, idempotency_key: key }),
-  finalCancel: (id: number, key: string) =>
-    post<ShiftResponse>(`/api/shifts/${id}/final-cancel-confirm`, { idempotency_key: key }),
   preDeclareOff: (shift_date: string, key: string) =>
     post<ShiftResponse>("/api/shifts/pre-declare-off", { shift_date, idempotency_key: key }),
   clearOff: (id: number, key: string) => post<ShiftResponse>(`/api/shifts/${id}/clear-off`, { idempotency_key: key }),
-  /** the second change of the time or the point: an admin or the network's trainer decides */
-  requestChange: (id: number, p: ShiftPayload, key: string) =>
-    post<ShiftResponse>(`/api/shifts/${id}/change-request`, { ...p, idempotency_key: key }),
-  withdrawChange: (requestId: number, key: string) =>
-    post<ShiftResponse>(`/api/change-requests/${requestId}/withdraw`, { idempotency_key: key }),
+  /** after the deadline: a message to the admins about this shift (the shift itself doesn't change) */
+  contactAdmin: (id: number, text: string, key: string) =>
+    post<{ ok: boolean }>(`/api/shifts/${id}/contact-admin`, { text, idempotency_key: key }),
 
   admin: {
     users: () => request<{ items: User[] }>("/api/admin/users"),
@@ -978,8 +982,6 @@ export const api = {
     createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, amount: number, reason: string, key: string,
                media_file_id: string | null = null) =>
       post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, amount, reason, media_file_id, idempotency_key: key }),
-    decideChange: (requestId: number, approve: boolean, comment: string | null, key: string) =>
-      post<ShiftResponse>(`/api/admin/change-requests/${requestId}/decide`, { approve, comment, idempotency_key: key }),
     decideTx: (id: number, approve: boolean, comment: string | null, key: string) =>
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/decide`, { approve, comment, idempotency_key: key }),
     /** «Простить» a fine: the reason is optional */

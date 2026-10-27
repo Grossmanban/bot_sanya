@@ -12,6 +12,18 @@ from app import services as svc  # noqa: E402
 from app.db import connect  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def schedule_noon(monkeypatch):
+    """The schedule rules depend on the clock (22:00 the day before a shift): tests run at noon of the real day,
+    so booking «tomorrow» works whenever the suite runs. Tests about the deadline pass `now` themselves."""
+    from datetime import datetime, time
+
+    from app.config import settings
+    from app.timeutil import now_local
+
+    monkeypatch.setattr(svc, "now_local", lambda: datetime.combine(now_local().date(), time(12), tzinfo=settings.tz))
+
+
 @pytest.fixture
 def conn():
     c = connect(":memory:")

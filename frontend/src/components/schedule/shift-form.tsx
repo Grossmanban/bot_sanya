@@ -66,7 +66,7 @@ export function ShiftForm({
   /** my own booking on this day already counts in `load` */
   ownLocation?: string | null;
   disabled?: boolean;
-  /** 00:00 after booking has passed: the volume stays as it is */
+  /** 22:00 the day before has passed: the volume stays as it is */
   volumeLocked?: boolean;
 }) {
   const set = (patch: Partial<FormState>) => onChange({ ...form, ...patch });
@@ -158,7 +158,7 @@ export function ShiftForm({
           <span className="text-sm text-muted-foreground">Объём, шт.</span>
           <p className="flex items-center gap-3 rounded-2xl bg-muted px-4 py-3">
             <span className="font-display text-2xl font-semibold tabular">{form.volume}</span>
-            <span className="text-sm text-muted-foreground">зафиксирован в 00:00 после записи — изменить может администратор</span>
+            <span className="text-sm text-muted-foreground">после 22:00 накануне не меняется — изменить может администратор</span>
           </p>
         </div>
       ) : (

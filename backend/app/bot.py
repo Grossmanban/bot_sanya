@@ -246,29 +246,6 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         await call.answer(verdict_text)
         await notifier.urgent_decided(result.shift, approve)
 
-    # ------------------------------------------------------------ the second change of a shift
-
-    @router.callback_query(F.data.startswith("chg:"))
-    async def change_decide(call: CallbackQuery):
-        _, verdict, request_id = call.data.split(":")
-        actor = svc.get_user_by_tg(conn, call.from_user.id)
-        if actor is None:
-            return await deny(call)
-        try:
-            result = svc.decide_change(conn, actor, int(request_id), verdict == "ok", None, svc.new_key())
-        except svc.ServiceError as exc:
-            await call.answer(exc.message, show_alert=True)
-            return
-        if not result.changed:
-            titles = {"approved": "разрешено", "rejected": "отклонено", "withdrawn": "сотрудник отозвал запрос",
-                      "expired": "запрос закрыт"}
-            await call.answer(f"Уже решено: {titles.get(result.request['status'], result.request['status'])}", show_alert=True)
-            return
-        text = "✅ Разрешено" if verdict == "ok" else "⛔ Отклонено"
-        await mark_done(call, text)
-        await call.answer(text)
-        await notifier.change_decided(result.request, actor)
-
     # ------------------------------------------------------------ penalties
 
     async def apply_penalty(admin_tg: int, admin_name: str, shift_id: int, amount: int) -> tuple[bool, str]:

@@ -578,9 +578,9 @@ def test_final_cancel_creates_a_draft_fine(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     u = make_user()
     s = shift(conn, u)
-    svc.cancel_shift(conn, u, s["id"], svc.new_key(), today=TODAY)
-    svc.restore_shift(conn, u, s["id"], dict(P), svc.new_key(), today=TODAY)
-    svc.final_cancel_shift(conn, u, s["id"], svc.new_key(), today=TODAY)
+    # shifts finally cancelled before 27.10 (no such action any more) keep their draft fine
+    conn.execute("UPDATE shifts SET status = 'finally_cancelled' WHERE id = ?", (s["id"],))
+    finance.final_cancel_draft(conn, svc.get_shift(conn, s["id"]), u["telegram_id"])
     [draft] = finance.linked(conn, s["id"], ("final_cancel",))
     assert draft["status"] == "draft" and draft["amount"] is None
     assert finance.balance(conn, u["id"])["drafts"] == 1 and finance.balance(conn, u["id"])["balance"] == 0

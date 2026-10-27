@@ -94,6 +94,18 @@ def media_ids(v: dict) -> list[str]:
     return json.loads(v["resolution_media_ids"] or "[]")
 
 
+def _units(conn: sqlite3.Connection) -> int:
+    from . import app_settings
+
+    return app_settings.get_all(conn)["unmarked_fine_units"]
+
+
+def _rate(conn: sqlite3.Connection, user_id: int) -> int:
+    from . import rates
+
+    return rates.for_user(conn, user_id)["rate_base"]
+
+
 def public(conn: sqlite3.Connection, v: dict, nets: dict[int, str] | None = None) -> dict:
     user = svc.get_user(conn, v["user_id"])
     resolver = svc.get_user(conn, v["resolution_admin_id"]) if v["resolution_admin_id"] else None
@@ -115,6 +127,9 @@ def public(conn: sqlite3.Connection, v: dict, nets: dict[int, str] | None = None
         "absent_dates": json.loads(v["absent_dates"] or "[]"),
         "status": v["status"],
         "default_comment": default_comment(v),
+        # ТЗ 27.10 §17: an unmarked day — N fine units at the person's own rate (the settings say N)
+        "suggested_units": _units(conn) if v["kind"] == "unmarked" else None,
+        "suggested_amount": _units(conn) * _rate(conn, v["user_id"]) if v["kind"] == "unmarked" else None,
         "resolution_comment": v["resolution_comment"],
         "resolved_by": svc.full_name(resolver) if resolver else None,
         "resolved_at": v["resolved_at"],

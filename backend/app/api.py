@@ -35,6 +35,11 @@ class KeyOnly(BaseModel):
     idempotency_key: str
 
 
+class ContactAdminBody(BaseModel):
+    text: str
+    idempotency_key: str
+
+
 class DateKey(BaseModel):
     shift_date: str
     idempotency_key: str
@@ -688,18 +693,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         before = svc.get_shift(conn, shift_id)
         return respond(svc.edit_shift(conn, user, shift_id, _payload(body), body.idempotency_key), before)
 
-    @api.post("/shifts/{shift_id}/change-request")
-    async def change_request(shift_id: int, body: ShiftPayload, user: dict = Depends(current_user)):
-        """The second change of the time or the point: an admin or the network's trainer decides."""
-        result = svc.request_change(conn, user, shift_id, _payload(body), body.idempotency_key)
-        if result.changed:
-            notifier.spawn(notifier.change_requested(result.request))
-        return {"shift": svc.serialize_shift(result.shift, today_local(), conn), "changed": result.changed}
-
-    @api.post("/change-requests/{request_id}/withdraw")
-    async def change_withdraw(request_id: int, body: KeyOnly, user: dict = Depends(current_user)):
-        result = svc.withdraw_change(conn, user, request_id, body.idempotency_key)
-        return {"shift": svc.serialize_shift(result.shift, today_local(), conn), "changed": result.changed}
+    @api.post("/shifts/{shift_id}/contact-admin")
+    async def contact_admin(shift_id: int, body: ContactAdminBody, user: dict = Depends(current_user)):
+        """After the deadline: the person explains, the admins (and the network's trainer) decide."""
+        shift = svc.contact_admin(conn, user, shift_id, body.text, body.idempotency_key)
+        notifier.spawn(notifier.admin_contacted(shift, " ".join(body.text.split())[:svc.MAX_CONTACT]))
+        return {"ok": True}
 
     @api.post("/shifts/{shift_id}/cancel")
     async def cancel(shift_id: int, body: KeyOnly, user: dict = Depends(current_user)):
@@ -708,10 +707,6 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/shifts/{shift_id}/restore")
     async def restore(shift_id: int, body: ShiftPayload, user: dict = Depends(current_user)):
         return respond(svc.restore_shift(conn, user, shift_id, _payload(body), body.idempotency_key))
-
-    @api.post("/shifts/{shift_id}/final-cancel-confirm")
-    async def final_cancel(shift_id: int, body: KeyOnly, user: dict = Depends(current_user)):
-        return respond(svc.final_cancel_shift(conn, user, shift_id, body.idempotency_key))
 
     @api.post("/shifts/{shift_id}/report")
     async def submit_report(shift_id: int, request: Request, fact_volume: int = Query(...),
@@ -966,15 +961,6 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             counted = [i for i in items if i["status"] in svc.ACTIVE]
             count, volume = len(counted), sum(i["volume"] or 0 for i in counted)
         return {"date": d.isoformat(), "items": items, "total_count": count, "total_volume": volume}
-
-    @api.post("/admin/change-requests/{request_id}/decide")
-    async def admin_change_decide(request_id: int, body: TxDecision, admin: dict = Depends(staff("schedule"))):
-        result = svc.decide_change(conn, admin, request_id, body.approve, body.comment, body.idempotency_key)
-        if result.changed:
-            notifier.spawn(notifier.change_decided(result.request, admin))
-        elif result.request["status"] != "pending":
-            raise svc.ServiceError("Запрос уже рассмотрен", 409, "already_decided")
-        return {"shift": svc.serialize_shift(result.shift, today_local(), conn), "changed": result.changed}
 
     @api.get("/admin/stats")
     async def admin_stats(user_id: int, date_from: str = Query(..., alias="from"), date_to: str = Query(..., alias="to"),

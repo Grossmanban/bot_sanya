@@ -871,7 +871,7 @@ ALTER TABLE events ADD COLUMN prize_media_kind TEXT NOT NULL DEFAULT 'photo' CHE
 """)
 
 
-# 24: the second change of a shift's time or point waits for an admin or the network's trainer
+# 24: change requests for a shift (replaced on 27.10 by the 22:00 deadline; the table stays as history)
 MIGRATIONS.append("""
 CREATE TABLE shift_change_requests (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

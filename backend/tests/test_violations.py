@@ -308,6 +308,8 @@ def test_unmarked_tomorrow_reminder_then_violation(conn, make_user):
     assert any("Не отметили график" in t for chat, t in n.sent if chat == 999)
     run(jobs.tick(conn, n, at(today, "22:01")))  # once a day
     assert len(violations.listing(conn, owner)) == 1
+    # ТЗ 27.10 §17: the suggested fine — 3 units at the person's own rate (120 ₽ common → 360 ₽)
+    assert (pending[0]["suggested_units"], pending[0]["suggested_amount"]) == (3, 360)
     # decided like any violation: «простить»
     res = violations.waive(conn, owner, pending[0]["id"], "Предупредила тренера заранее", [], svc.new_key())
     assert res.changed and res.violation["status"] == "waived"

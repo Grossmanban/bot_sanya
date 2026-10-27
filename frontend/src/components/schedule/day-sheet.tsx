@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { LoaderCircle, MapPin } from "lucide-react";
+import { Clock3, LoaderCircle, MapPin } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -23,7 +23,7 @@ import { DayLanes, type Lane } from "../day-line";
 import { initialForm, prefillFrom, ShiftForm, validateForm, type FormState } from "./shift-form";
 import { ReportBlock } from "../report/report-block";
 
-type Mode = "view" | "create" | "edit" | "restore" | "request";
+type Mode = "view" | "create" | "edit" | "restore" | "contact";
 
 export interface DetailProps {
   user: User;
@@ -34,9 +34,54 @@ export interface DetailProps {
   onOpenProfile: () => void;
 }
 
-/** «00:00, в ночь на 24 октября» — the end of the free editing window. */
-function untilText(iso: string) {
-  return `00:00, в ночь на ${dayMonth(iso.slice(0, 10))}`;
+/** «22:00» out of the deadline's ISO. */
+function deadlineTime(iso: string | undefined) {
+  return iso ? iso.slice(11, 16) : "22:00";
+}
+
+/** How long until a moment, ticking every 30 s: «3 ч 12 мин», «12 мин». */
+function useLeft(iso: string | undefined) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  if (!iso) return null;
+  const left = Date.parse(iso) - now;
+  if (left <= 0) return null;
+  const h = Math.floor(left / 3_600_000);
+  const m = Math.max(1, Math.floor((left % 3_600_000) / 60_000));
+  const d = Math.floor(h / 24);
+  return d > 0 ? `${d} д ${h % 24} ч` : h > 0 ? `${h} ч ${m} мин` : `${m} мин`;
+}
+
+/** ТЗ 27.10 §16: what can still be changed and the timer to the next limit. */
+function DeadlineNote({ day, shift }: { day: Day; shift: Shift | null }) {
+  const midnight = `${day.date}T00:00:00+03:00`;
+  const toDeadline = useLeft(day.deadline);  // the server sends it with the Moscow offset
+  const toMidnight = useLeft(midnight);
+  if (day.is_past || !shift || !["active", "restored", "cancelled", "pre_declared_off"].includes(shift.status)) return null;
+  if (shift.report_state) return null;
+  if (day.phase === "open" && toDeadline) {
+    return (
+      <p className="flex items-center gap-2 rounded-2xl bg-muted/60 px-4 py-3 text-sm">
+        <Clock3 className="size-4 shrink-0 text-muted-foreground" />
+        <span>Менять всё и брать выходной можно до {deadlineTime(day.deadline)} накануне — осталось <b className="tabular">{toDeadline}</b>.</span>
+      </p>
+    );
+  }
+  if (day.phase === "late" && toMidnight) {
+    return (
+      <p className="flex items-center gap-2 rounded-2xl bg-wait-soft px-4 py-3 text-sm">
+        <Clock3 className="size-4 shrink-0 text-wait" />
+        <span>Объём и статус зафиксированы. Время и точку можно менять до 00:00 — осталось <b className="tabular">{toMidnight}</b>.</span>
+      </p>
+    );
+  }
+  if (day.phase === "started") {
+    return <p className="rounded-2xl bg-muted/60 px-4 py-3 text-sm text-muted-foreground">День смены наступил — изменить смену можно только через администратора.</p>;
+  }
+  return null;
 }
 
 /** Phones and iPad portrait: the day opens in a bottom sheet. */
@@ -63,7 +108,8 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
   const shift = day.my_shift;
   const [mode, setMode] = useState<Mode>(shift ? "view" : "create");
   const [form, setForm] = useState<FormState>(() => initialForm(null, readLocal("last-location") ?? undefined));
-  const [confirm, setConfirm] = useState<null | "cancel" | "final">(null);
+  const [confirm, setConfirm] = useState<null | "cancel">(null);
+  const [message, setMessage] = useState("");
   const { busy, run } = useAction();
 
   // reset when the shift changes state underneath (after an action or a poll)
@@ -77,10 +123,13 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
   const working = user.work_status === "working";
   const state = dayState(shift);
   const meta = STATUS_META[state];
-  const formMode = mode !== "view";
-  const blocked = !working && mode !== "edit" && mode !== "request";
-  // 00:00 after booking has passed: the volume stays, only the time and the point change
-  const volumeLocked = (mode === "edit" || mode === "request") && !!shift && !shift.volume_open;
+  // after 22:00 the day before there's no booking for tomorrow (from 00:00 — an urgent one for today)
+  const closed = !shift && day.phase === "late";
+  const formMode = mode !== "view" && mode !== "contact" && !(mode === "create" && closed);
+  const blocked = !working && mode !== "edit";
+  // 22:00 the day before has passed: the volume stays, only the time and the point change
+  const volumeLocked = mode === "edit" && !!shift && !shift.volume_open;
+
   const { weekday } = parseDay(day.date);
 
   async function submit() {
@@ -97,10 +146,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
         else toast.success("Ты в графике");
       } else if (mode === "edit" && shift) {
         if (await run("edit", (k) => api.edit(shift.id, payload, k), "Смена изменена")) setMode("view");
-      } else if (mode === "request" && shift) {
-        if (await run("request", (k) => api.requestChange(shift.id, payload, k), "Запрос отправлен — ответ придёт в бот")) {
-          setMode("view");
-        }
+
       } else if (mode === "restore" && shift) {
         await run("restore", (k) => api.restore(shift.id, payload, k), "Смена восстановлена");
       }
@@ -114,8 +160,8 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
     try {
       await run(name, fn, success);
       await onChanged();
-    } catch (e) {
-      if (e instanceof ApiError && e.code === "final_confirm_required") setConfirm("final");
+    } catch {
+      /* toast shown */
     }
   }
 
@@ -134,7 +180,6 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
   const submitLabel = () => {
     const range = form.start_time && form.end_time ? ` ${form.start_time}–${form.end_time}` : "";
     if (mode === "edit") return "Сохранить изменения";
-    if (mode === "request") return "Отправить запрос";
     if (mode === "restore") return `Вернуться в график${range}`;
     return day.is_today ? `Попроситься на сегодня${range}` : `Выйду${range}`;
   };
@@ -165,14 +210,8 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
 
       {formMode ? (
         <div className="space-y-4">
-          {mode === "restore" && (
-            <Notice tone="wait">Вернуться можно один раз. Если потом снова отменишь, это будет окончательно и со штрафом.</Notice>
-          )}
-          {mode === "request" && (
-            <Notice tone="wait">Сам ты уже менял эту смену. Второе изменение времени или точки подтверждает администратор или тренер сети — ответ придёт в бот.</Notice>
-          )}
           {mode === "edit" && shift && !shift.volume_open && (
-            <Notice tone="muted">Время или точку сам можно изменить один раз. Дальше — запросом администратору.</Notice>
+            <Notice tone="muted">После {deadlineTime(shift.deadline)} накануне меняются только время и точка — до 00:00, сколько угодно раз.</Notice>
           )}
           {mode === "create" && day.is_today && (
             <Notice tone="wait">Запись на сегодня срочная: администратор подтвердит её в боте.</Notice>
@@ -192,7 +231,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
             locations={locations}
             points={points}
             load={day.points_load}
-            ownLocation={mode === "edit" || mode === "request" ? shift?.location : null}
+            ownLocation={mode === "edit" ? shift?.location : null}
             disabled={blocked}
             volumeLocked={volumeLocked}
           />
@@ -201,24 +240,39 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
         shift && <ShiftView shift={shift} />
       )}
 
-      {!formMode && shift?.change_request && (
-        <div className="row-in flex items-start gap-3 rounded-2xl bg-wait-soft p-4 text-sm">
-          <div className="min-w-0 flex-1">
-            <p className="font-semibold text-wait">Запрос на изменение ждёт решения</p>
-            <p className="mt-0.5">
-              {shift.change_request.start_time}–{shift.change_request.end_time}, {shift.change_request.location}. Ответ придёт в бот.
-            </p>
-          </div>
-          <Button size="sm" variant="ghost" className="h-8 shrink-0 rounded-lg" disabled={!!busy}
-                  onClick={() => act("withdraw", (k) => api.withdrawChange(shift.change_request!.id, k), "Запрос отозван")}>
-            {busy === "withdraw" && <LoaderCircle className="animate-spin" />} Отозвать
-          </Button>
-        </div>
+      {mode === "create" && closed && (
+        <Notice tone="muted">
+          Отметить завтрашний день можно было до {deadlineTime(day.deadline)}. С 00:00 можно попроситься на сегодня — срочной записью,
+          её подтвердит администратор.
+        </Notice>
       )}
-      {!formMode && shift?.volume_open && shift.volume_until && (
-        <p className="text-sm text-muted-foreground">
-          Объём, время и точку можно менять до {untilText(shift.volume_until)}. Потом объём фиксируется.
-        </p>
+      {!formMode && mode !== "contact" && <DeadlineNote day={day} shift={shift} />}
+
+      {mode === "contact" && shift && (
+        <div className="row-in space-y-3 rounded-2xl bg-muted/60 p-4">
+          <p className="text-sm">
+            Смена не изменится сама — администратор получит сообщение со сменой и вашим объяснением и решит.
+          </p>
+          <textarea rows={3} autoFocus value={message} onChange={(e) => setMessage(e.target.value.slice(0, 500))}
+                    placeholder="Что случилось и что нужно поменять"
+                    className="w-full resize-none rounded-xl border-0 bg-card px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
+          <div className="flex gap-2">
+            <Button variant="ghost" className="h-11 rounded-xl" onClick={() => setMode("view")}>Назад</Button>
+            <Button className="press h-11 flex-1 rounded-xl font-semibold" disabled={!!busy || message.trim().length < 3}
+                    onClick={async () => {
+                      try {
+                        if (await run("contact", (k) => api.contactAdmin(shift.id, message.trim(), k), "Сообщение отправлено администратору")) {
+                          setMessage("");
+                          setMode("view");
+                        }
+                      } catch {
+                        /* toast shown */
+                      }
+                    }}>
+              {busy === "contact" && <LoaderCircle className="animate-spin" />} Отправить
+            </Button>
+          </div>
+        </div>
       )}
 
       {!formMode && shift && <ReportBlock shift={shift} pricing={pricing} onChanged={onChanged} />}
@@ -242,7 +296,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
                 Отметить выходной
               </Button>
             )}
-            {(mode === "edit" || mode === "restore" || mode === "request") && (
+            {(mode === "edit" || mode === "restore") && (
               <Button variant="ghost" className="h-11 w-full rounded-2xl" onClick={() => setMode("view")}>
                 Назад
               </Button>
@@ -250,7 +304,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
           </>
         )}
 
-        {!formMode && shift && (
+        {!formMode && mode !== "contact" && shift && (
           <>
             {shift.can_restore && (
               <Button
@@ -288,29 +342,26 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
                 {shift.volume_open ? "Изменить время, точку или объём" : "Изменить время или точку"}
               </Button>
             )}
-            {shift.can_request_change && (
-              <Button
-                size="lg"
-                variant="secondary"
-                className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
-                onClick={() => {
-                  setForm(initialForm(prefillFrom(shift)));
-                  setMode("request");
-                }}
-              >
-                Попросить изменить время или точку
-              </Button>
-            )}
-            {(shift.can_cancel || shift.can_final_cancel) && (
+            {shift.can_cancel && (
               <Button
                 size="lg"
                 variant="ghost"
                 disabled={!!busy}
-                onClick={() => setConfirm(shift.can_final_cancel ? "final" : "cancel")}
+                onClick={() => setConfirm("cancel")}
                 className="press h-12 w-full rounded-2xl text-[15px] font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
               >
-                {(busy === "cancel" || busy === "final") && <LoaderCircle className="animate-spin" />}
+                {busy === "cancel" && <LoaderCircle className="animate-spin" />}
                 Беру выходной
+              </Button>
+            )}
+            {shift.can_contact_admin && (
+              <Button
+                size="lg"
+                variant="secondary"
+                className="press h-12 w-full rounded-2xl text-[15px] font-semibold"
+                onClick={() => setMode("contact")}
+              >
+                Связаться с администратором
               </Button>
             )}
           </>
@@ -323,7 +374,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
             <AlertDialogTitle className="font-display">Взять выходной?</AlertDialogTitle>
             <AlertDialogDescription>
               Смена отменится, а день станет выходным — коллеги это увидят, администраторы получат уведомление.
-              Передумаешь — один раз можно вернуться в график на этот день.
+              До {shift ? deadlineTime(shift.deadline) : "22:00"} накануне можно передумать и вернуться в график.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -339,27 +390,6 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={confirm === "final"} onOpenChange={(o) => !o && setConfirm(null)}>
-        <AlertDialogContent className="rounded-3xl">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="font-display">Выходной со штрафом?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Эту смену ты уже отменял и восстанавливал, поэтому отмена будет окончательной: вернуться на этот день
-              будет нельзя, и начислится штраф. Сумму назначит администратор.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel className="rounded-xl">Оставить смену</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              className="rounded-xl"
-              onClick={() => shift && act("final", (k) => api.finalCancel(shift.id, k), "Выходной отмечен, смена отменена окончательно")}
-            >
-              Беру выходной со штрафом
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }
@@ -400,9 +430,8 @@ function ShiftView({ shift }: { shift: Shift }) {
       {status === "awaiting_approval" && (
         <Notice tone="wait">Администратор ещё не ответил на срочную заявку. Статус обновится сам.</Notice>
       )}
-      {status === "restored" && <Notice tone="wait">Смена восстановлена. Следующая отмена будет окончательной и со штрафом.</Notice>}
       {status === "cancelled" && shift.can_restore && (
-        <Notice tone="muted">Ты взял выходной — смена отменена. Передумаешь — нажми «Передумал, выйду» (это можно один раз).</Notice>
+        <Notice tone="muted">Ты взял выходной — смена отменена. Передумаешь до {shift.deadline?.slice(11, 16) ?? "22:00"} накануне — нажми «Передумал, выйду».</Notice>
       )}
       {status === "cancelled" && !shift.can_restore && (
         <Notice tone="cancel">Ты взял выходной — смена отменена. Вернуться на этот день можно только через администратора.</Notice>
@@ -414,10 +443,6 @@ function ShiftView({ shift }: { shift: Shift }) {
         </Notice>
       )}
       {status === "rejected_by_admin" && <Notice tone="muted">Администратор не подтвердил выход на этот день.</Notice>}
-      {(status === "active" || status === "restored") && !shift.can_edit && !shift.can_request_change && !shift.change_request
-        && shift.edit_count > 0 && !shift.report?.started && !shift.report_state && (
-        <p className="text-sm text-muted-foreground">Изменение уже использовано. Дальше через администратора.</p>
-      )}
     </div>
   );
 }

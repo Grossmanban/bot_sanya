@@ -84,19 +84,18 @@ def test_full_flow_over_http(client, conn):
     raspred = client.get("/api/admin/raspred/tomorrow", headers=headers(999)).json()
     assert raspred["total_count"] == 1 and raspred["total_volume"] == 25
 
-    assert client.post(f"/api/shifts/{sid}/cancel", json={"idempotency_key": key()}, headers=h).json()["shift"]["status"] == "cancelled"
+    # «Беру выходной» and back, as often as needed before 22:00 the day before
     restore = {k_: body[k_] for k_ in ("start_time", "end_time", "volume", "location")}
-    r = client.post(f"/api/shifts/{sid}/restore", json={**restore, "idempotency_key": key()}, headers=h)
-    assert r.json()["shift"]["status"] == "restored"
-    r = client.post(f"/api/shifts/{sid}/cancel", json={"idempotency_key": key()}, headers=h)
-    assert r.status_code == 409 and r.json()["code"] == "final_confirm_required"
-    r = client.post(f"/api/shifts/{sid}/final-cancel-confirm", json={"idempotency_key": key()}, headers=h)
-    assert r.json()["shift"]["status"] == "finally_cancelled"
-
-    r = client.patch(f"/api/admin/shifts/{sid}", json={"penalty_amount": 1000, "reason": "финальная отмена",
-                                                       "idempotency_key": key()}, headers=headers(999))
-    assert r.status_code == 200 and r.json()["shift"]["penalty_amount"] == 1000
-    assert client.get("/api/me/penalties", headers=h).json()["items"][0]["penalty_amount"] == 1000
+    for _ in range(2):
+        r = client.post(f"/api/shifts/{sid}/cancel", json={"idempotency_key": key()}, headers=h)
+        assert r.json()["shift"]["status"] == "cancelled" and r.json()["shift"]["can_restore"]
+        r = client.post(f"/api/shifts/{sid}/restore", json={**restore, "idempotency_key": key()}, headers=h)
+        assert r.json()["shift"]["status"] == "active"
+    assert client.post(f"/api/shifts/{sid}/final-cancel-confirm", json={"idempotency_key": key()}, headers=h).status_code in (404, 405)
+    # before the deadline there is nothing to ask the admins about
+    r = client.post(f"/api/shifts/{sid}/contact-admin", json={"text": "Заболел", "idempotency_key": key()}, headers=h)
+    assert r.status_code == 409 and r.json()["code"] == "still_open"
+    client.post(f"/api/shifts/{sid}/cancel", json={"idempotency_key": key()}, headers=h)
     assert client.get("/api/admin/raspred/tomorrow", headers=headers(999)).json()["total_count"] == 0
 
 

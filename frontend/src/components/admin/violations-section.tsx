@@ -230,7 +230,7 @@ function DecisionDrawer({ open, onClose, onDone }: {
 function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive"; onDone: () => void }) {
   const fine = mode === "fine";
   const direct = useCan("fine_direct");
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState(fine && v.suggested_amount ? String(v.suggested_amount) : "");
   const [comment, setComment] = useState(fine ? v.default_comment : "");
   const [files, setFiles] = useState<string[]>([]);
   const [sent, setSent] = useState(false);
@@ -263,6 +263,11 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
                    placeholder="Например, 500" value={amount} onChange={(e) => setAmount(e.target.value.replace(/\D/g, "").slice(0, 7))} />
             <span className="absolute top-1/2 right-4 -translate-y-1/2 text-muted-foreground">₽</span>
           </div>
+          {v.suggested_units && v.suggested_amount ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              За неотмеченный день — {v.suggested_units} штрафные единицы × ставка сотрудника = {rub(v.suggested_amount)}
+            </p>
+          ) : null}
           <div className="mt-2 flex gap-2">
             {PRESETS.map((p) => (
               <button key={p} onClick={() => { tapHaptic(); setAmount(String(p)); }}

@@ -196,7 +196,7 @@ const ROWS: Row[] = [
   { title: "Общий факт: утром", text: "Владельцам, если общий факт за вчера так и не введён.", enabled: "global_actual_morning_enabled", time: "global_actual_morning_time" },
   { title: "Итоги недели", text: "Админам: план и факт по каждому и файл Excel за прошлую неделю.", enabled: "weekly_report_enabled", time: "weekly_report_time", fixedDay: "по понедельникам" },
   { title: "Общая норма выходов", text: "Кто за прошлую неделю вышел меньше нормы — заявка в «Дисциплину». Личная норма задаётся в карточке сотрудника («Команда») и проверяется, даже если общая выключена.", enabled: "attendance_check_enabled", time: "attendance_check_time", fixedDay: "по понедельникам", days: "weekly_attendance_quota" },
-  { title: "Отметка графика на завтра", text: "Тем, у кого «Работаю», а на завтра нет ни смены, ни выходного: напоминание. Кто не отметит к сроку — нарушение в «Дисциплину» (штраф или простить). «Не работаю» не проверяется.", enabled: "daily_mark_enabled", time: "daily_mark_reminder_time", deadline: "daily_mark_deadline" },
+  { title: "Отметка графика на завтра", text: "Тем, у кого «Работаю», а на завтра нет ни смены, ни выходного: напоминание. Кто не отметит к сроку — нарушение в «Дисциплину» (по умолчанию 3 штрафные единицы × ставка или «Простить»). «Не работаю» не проверяется. В тот же срок фиксируется смена на завтра: объём и статус больше не меняются, время и точка — до 00:00.", enabled: "daily_mark_enabled", time: "daily_mark_reminder_time", deadline: "daily_mark_deadline" },
   { title: "Резервная копия базы", text: "Владельцам: файл базы данных каждый день.", enabled: "backup_enabled", time: "backup_time" },
 ];
 

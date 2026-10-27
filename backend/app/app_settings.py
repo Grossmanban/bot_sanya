@@ -47,6 +47,7 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "daily_mark_enabled": ("1", "bool"),
     "daily_mark_reminder_time": ("20:00", "time"),
     "daily_mark_deadline": ("22:00", "time"),
+    "unmarked_fine_units": ("3", "count"),  # ТЗ 27.10 §17: the fine for an unmarked day, in the person's pieces
     # the customer's module 3: unpaid internship units, then work units for the referrer's second bonus
     "internship_units": ("20", "count"),
     "second_stage_units": ("50", "count"),
@@ -118,12 +119,20 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
             "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", rows
         )
     values = get_all(conn)
-    pricing.apply(values)
+    _apply(values)
     return values
 
 
+def _apply(values: dict) -> None:
+    """Rules other modules read without a database at hand: the rates and the schedule deadline."""
+    from . import services
+
+    pricing.apply(values)
+    services.SCHEDULE["deadline"] = values["daily_mark_deadline"]
+
+
 def load_pricing(conn: sqlite3.Connection) -> None:
-    pricing.apply(get_all(conn))
+    _apply(get_all(conn))
 
 
 # internal values that are not edited from the settings screen (e.g. the archive group set by /archive_here)
