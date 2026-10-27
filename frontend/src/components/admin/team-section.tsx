@@ -381,6 +381,7 @@ function MemberSheet({
               {approved && caps.includes("money") && (
                 <PersonalRates key={user.id} user={user} onUpdated={onUpdated} />
               )}
+              {approved && caps.includes("products") && <ProductAccess key={`p-${user.id}`} user={user} />}
 
               {canRole && (
                 <div className="mt-6">
@@ -571,6 +572,49 @@ function NormPicker({ user, onUpdated }: { user: User; onUpdated: (u: User) => v
 }
 
 /** Owner only (customer round B): a personal rate over the network's/common one and «не применять налог на лень». */
+/** ТЗ 27.10 §28: access to «Работа» products — give, take back, the log of changes. */
+function ProductAccess({ user }: { user: User }) {
+  const { data, setData } = useLoad(() => api.admin.userProducts(user.id), [user.id]);
+  const { busy, run } = useAction();
+  const [log, setLog] = useState(false);
+  if (!data) return null;
+  return (
+    <div className="mt-4 space-y-3 rounded-2xl bg-muted/50 px-4 py-3">
+      <span className="block text-[15px] font-semibold">Работа: продукты</span>
+      {data.items.map((p) => (
+        <label key={p.product} className="flex cursor-pointer items-center gap-3">
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px]">{p.title}</span>
+            <span className="block text-xs text-muted-foreground">{p.active ? "Доступ открыт" : "Нет доступа"}</span>
+          </span>
+          <Switch checked={p.active} disabled={!!busy} onCheckedChange={async (v) => {
+            try {
+              const res = await run("product", (k) => api.admin.setUserProduct(user.id, p.product, v, k),
+                v ? `Доступ к «${p.title}» выдан` : `Доступ к «${p.title}» закрыт`);
+              if (res) setData(res);
+            } catch {
+              /* toast shown */
+            }
+          }} />
+        </label>
+      ))}
+      {data.history.length > 0 && (
+        <button className="text-xs font-semibold text-primary" onClick={() => setLog((x) => !x)}>{log ? "Скрыть журнал" : "Журнал изменений"}</button>
+      )}
+      {log && (
+        <ul className="space-y-1 text-xs text-muted-foreground">
+          {data.history.map((h, i) => (
+            <li key={i}>
+              {h.title}: выдан {h.granted_at.slice(8, 10)}.{h.granted_at.slice(5, 7)}{h.granted_by ? ` (${h.granted_by})` : ""}
+              {h.revoked_at ? `, закрыт ${h.revoked_at.slice(8, 10)}.${h.revoked_at.slice(5, 7)}${h.revoked_by ? ` (${h.revoked_by})` : ""}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** ТЗ 27.10 §24: a trainer's or an instructor's own rate per piece of their people (over the ladder and the common one). */
 function OwnCommission({ user, save, busy }: {
   user: User; busy: boolean;

@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { api, type Goal, type GoalChanges, type User } from "@/lib/api";
+import { api, ApiError, PRODUCT_TITLES, type Goal, type GoalChanges, type Product, type User } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { addDays, dayMonth, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
@@ -78,6 +78,7 @@ export function MyGoals() {
                 <p className="font-semibold">{g.done && <CircleCheck className="mr-1 inline size-4 text-go" />}{g.title}</p>
                 <p className="text-xs text-muted-foreground">
                   {subtitle(g)}
+                  {g.product ? ` · ${PRODUCT_TITLES[g.product]}, принятые выполнения` : ""}
                   {g.kind === "point" ? ` · сегодня на точке ${g.participants.length}`
                     : g.mode === "shared" && g.kind !== "personal" ? ` · общая норма, ${g.participants.length} ${plural(g.participants.length, "участник", "участника", "участников")}` : ""}
                 </p>
@@ -287,6 +288,9 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
   const [userId, setUserId] = useState<number | null>(null);
   const [networkId, setNetworkId] = useState<number | null>(me.network_id);
   const [asking, setAsking] = useState<string[] | null>(null);
+  // ТЗ 27.10 §29: a product's goal; people without access → the server asks, the admin may grant it here
+  const [product, setProduct] = useState<Product | "">(initial?.product ?? "");
+  const [grantAsk, setGrantAsk] = useState<string | null>(null);
   const { busy, run } = useAction();
   const kinds: Goal["kind"][] = everyone ? ["team", "network", "group", "point", "personal"] : ["network", "group", "personal"];
   const people = (users.data?.items ?? []).filter((u) => u.id !== me.id);
@@ -308,8 +312,9 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
     return out;
   }
 
-  async function save(notify: boolean) {
+  async function save(notify: boolean, grant = false) {
     setAsking(null);
+    setGrantAsk(null);
     try {
       const res = await run("save", async (k) => {
         const photo = await prizePhotoValue(prize);
@@ -321,6 +326,7 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
             network_id: kind === "network" ? networkId : null, prize: prize.prize.trim() || null, prize_type: prize.type.trim() || null,
             prize_photo: photo ?? null, user_ids: kind === "group" ? picked : undefined,
             location: kind === "point" ? location : undefined, reset_time: kind === "point" ? reset : undefined,
+            product: kind === "point" ? null : product || null, grant_access: grant,
           }, k);
         }
         return api.admin.updateGoal(initial.id, { ...changes(), ...(photo !== undefined ? { prize_photo: photo } : {}), version: initial.version, notify }, k);
@@ -328,8 +334,8 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
       if (!res) return;
       toast.success(!initial ? "Цель создана, люди получат уведомление" : notify ? "Сохранено, участники уведомлены" : "Сохранено");
       onDone();
-    } catch {
-      /* toast shown */
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "no_product_access") setGrantAsk(e.message);
     }
   }
 
@@ -349,6 +355,23 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
               {KIND[k]}
             </button>
           ))}
+        </div>
+      )}
+      {!editing && kind !== "point" && (
+        <select aria-label="Что считаем" className={field} value={product} onChange={(e) => setProduct(e.target.value as Product | "")}>
+          <option value="">Считаем штуки смен</option>
+          {(Object.keys(PRODUCT_TITLES) as Product[]).map((p) => (
+            <option key={p} value={p}>Считаем принятые выполнения «{PRODUCT_TITLES[p]}»</option>
+          ))}
+        </select>
+      )}
+      {grantAsk && (
+        <div className="space-y-2 rounded-2xl bg-wait-soft p-3 text-sm text-wait">
+          <p>{grantAsk}</p>
+          <div className="flex gap-2">
+            <Button size="sm" className="press h-9 rounded-xl" disabled={!!busy} onClick={() => save(false, true)}>Выдать доступ и создать</Button>
+            <Button size="sm" variant="ghost" className="h-9 rounded-xl" onClick={() => setGrantAsk(null)}>Отмена</Button>
+          </div>
         </div>
       )}
       <input className={field} placeholder="Название, например «Неделя рекордов»" value={title} onChange={(e) => setTitle(e.target.value.slice(0, 80))} />

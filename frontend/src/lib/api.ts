@@ -55,7 +55,86 @@ export const ROLE_TITLES: Record<Role, string> = {
 export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
-  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups";
+  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups"
+  | "products" | "alice";
+
+/** ТЗ 27.10 §28: «Работа» — products a person has access to */
+export type Product = "alice";
+export const PRODUCT_TITLES: Record<Product, string> = { alice: "Яндекс Алиса" };
+
+export type AliceStatus = "in_progress" | "sending" | "send_failed" | "moderation" | "rejected" | "accepted" | "paid" | "abandoned";
+
+export interface AliceStage {
+  stage: 1 | 2 | 3;
+  title: string;
+  hint: string;
+  fixed_at: string | null;
+  photo_url: string | null;
+}
+
+/** ТЗ 27.10 §31: one execution; step 0 — the QR on screen, 1..3 — the photo stage, 4 — ready to finish */
+export interface AliceTask {
+  id: number;
+  number: string;
+  status: AliceStatus;
+  status_title: string;
+  step: number;
+  query: string;
+  qr_number: string | null;
+  qr_url: string | null;
+  started_at: string;
+  scanned_at: string | null;
+  completed_at: string | null;
+  stages: AliceStage[];
+  send_error: string | null;
+  reject_reason: string | null;
+  moderated_at: string | null;
+  paid_at: string | null;
+  // staff only
+  user_id?: number;
+  name?: string;
+  username?: string | null;
+  telegram_id?: number;
+  qr_id?: number;
+  duplicates?: number[];
+  moderated_by?: string | null;
+  payout_id?: number | null;
+  message_link?: string | null;
+}
+
+export interface AliceCounts {
+  completed: number;
+  moderation: number;
+  rejected: number;
+  accepted: number;
+  paid: number;
+}
+
+export interface AliceStats {
+  today: AliceCounts;
+  week: AliceCounts;
+  period: AliceCounts | null;
+  all: AliceCounts;
+}
+
+export interface AliceQr {
+  id: number;
+  number: string | null;
+  created_at: string;
+  archived_at: string | null;
+  image_url: string;
+  people: { user_id: number; name: string; since: string }[];
+  used: { submitted: number; accepted: number; paid: number; rejected: number };
+}
+
+/** ТЗ 27.10 §43: the grid by QR codes for Yandex's report */
+export interface AliceReconcile {
+  rate: number;
+  rows: { qr_id: number; number: string | null; accepted: number; paid: number; waiting: number; confirmed: number;
+    amount: number; left: number; people: { user_id: number; name: string }[] }[];
+  pay: { user_id: number; name: string; count: number; amount: number; task_ids: number[] }[];
+  total: number;
+}
 
 export type GroupKind = "pre" | "main";
 export type GroupMember = "member" | "out" | "unknown" | null;
@@ -144,6 +223,8 @@ export interface Me {
     training_location: string | null } } | null;
   /** a trainee: the internship's progress */
   internship?: StageProgress | null;
+  /** ТЗ 27.10 §28: products in «Работа» */
+  products?: Product[];
 }
 
 export type ApplicationStatus = "new" | "scheduled" | "internship" | "done" | "rejected" | "returned";
@@ -316,6 +397,8 @@ export interface Goal extends Lifecycle {
   kind: "personal" | "team" | "network" | "group" | "point";
   mode: "shared" | "each";
   target: number;
+  /** ТЗ 27.10 §29: «alice» — counts accepted executions, only for people with access */
+  product?: Product | null;
   date_from: string;
   date_to: string;
   status: "active" | "completed" | "archived";
@@ -772,6 +855,8 @@ export interface ScheduleSettings {
   instructor_commission: number;
   /** ТЗ 27.10 §25: a piece costs at most this, the trainer and the instructor share what's above the common rate */
   piece_cap: number;
+  /** ТЗ 27.10 §42: rubles per paid «Яндекс Алиса» execution (owners only) */
+  alice_rate?: number;
   /** owners only: what the business gets per piece (the owner's earnings in payouts) */
   revenue_per_piece?: number;
 }
@@ -1015,6 +1100,20 @@ export const api = {
   referrals: () => request<{ link: string | null; expires_at: string; seconds_left: number; ttl_minutes: number;
     items: Referral[]; targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
   referralQr: () => request<{ svg: string; link: string; expires_at: string; seconds_left: number }>("/api/me/referrals/qr"),
+  work: () => request<{ items: { product: Product; title: string }[] }>("/api/work"),
+  alice: () => request<{ task: AliceTask | null; has_qr: boolean; stats: AliceStats; history: AliceTask[] }>("/api/work/alice"),
+  aliceStart: (key: string) => post<{ task: AliceTask; stats: AliceStats }>("/api/work/alice/start", { idempotency_key: key }),
+  aliceScanned: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/scanned`, {}),
+  alicePhoto: (id: number, stage: number, photo: Blob) =>
+    request<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/photo/${stage}`,
+      { method: "PUT", body: photo, headers: { "Content-Type": photo.type || "image/jpeg" } }),
+  aliceDropPhoto: (id: number, stage: number) =>
+    request<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/photo/${stage}`, { method: "DELETE" }),
+  aliceNext: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/next`, {}),
+  aliceFinish: (id: number, key: string) =>
+    post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/finish`, { idempotency_key: key }),
+  aliceRetry: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/retry`, {}),
+  aliceAbandon: (id: number) => post<{ task: AliceTask | null }>(`/api/work/alice/${id}/abandon`, {}),
   myFinances: () => request<{ summary: MoneySummary; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -1037,6 +1136,42 @@ export const api = {
     post<{ ok: boolean }>(`/api/shifts/${id}/contact-admin`, { text, idempotency_key: key }),
 
   admin: {
+    alice: () => request<{ forum: { chat_id: number; title: string | null } | null; counts: Partial<Record<AliceStatus, number>>;
+      people: { id: number; name: string }[]; rate: number }>("/api/admin/alice"),
+    aliceQueue: (q: { status?: string; user_id?: number; qr_id?: number; from?: string; to?: string }) =>
+      request<{ items: AliceTask[] }>(`/api/admin/alice/queue?${new URLSearchParams(
+        Object.entries(q).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]))}`),
+    aliceDecide: (id: number, approve: boolean, reason: string | null, key: string) =>
+      post<{ task: AliceTask }>(`/api/admin/alice/${id}/decide`, { approve, reason, idempotency_key: key }),
+    aliceQrs: (archived = false) => request<{ items: AliceQr[] }>(`/api/admin/alice/qr?archived=${archived}`),
+    aliceQrCreate: (image: Blob, number: string, key: string) =>
+      upload<{ items: AliceQr[] }>(`/api/admin/alice/qr?idempotency_key=${encodeURIComponent(key)}&number=${encodeURIComponent(number)}`, image),
+    aliceQrImage: (id: number, image: Blob, key: string) =>
+      request<{ items: AliceQr[] }>(`/api/admin/alice/qr/${id}/image?idempotency_key=${encodeURIComponent(key)}`,
+        { method: "PUT", body: image, headers: { "Content-Type": image.type || "image/jpeg" } }),
+    aliceQrPatch: (id: number, body: { number?: string; archive?: boolean }, key: string) =>
+      patch<{ items: AliceQr[] }>(`/api/admin/alice/qr/${id}`, { ...body, idempotency_key: key }),
+    aliceAssign: (id: number, user_id: number, on: boolean, key: string) =>
+      post<{ items: AliceQr[] }>(`/api/admin/alice/qr/${id}/assign`, { user_id, on, idempotency_key: key }),
+    aliceQrHistory: (id: number) => request<{ items: { at: string; what: string; by: string | null }[] }>(`/api/admin/alice/qr/${id}/history`),
+    aliceQueries: () => request<{ items: string[] }>("/api/admin/alice/queries"),
+    aliceSetQueries: (text: string, key: string) =>
+      request<{ items: string[] }>("/api/admin/alice/queries", { method: "PUT", body: JSON.stringify({ text, idempotency_key: key }) }),
+    aliceStats: (from: string, to: string) => request<{ total: AliceCounts; people: ({ user_id: number; name: string } & AliceCounts)[];
+      qrs: ({ qr_id: number; number: string | null } & AliceCounts)[]; days: ({ date: string } & AliceCounts)[] }>(
+      `/api/admin/alice/stats?from=${from}&to=${to}`),
+    alicePayoutPreview: (body: { date_from: string; date_to: string; confirmed: Record<number, number> }) =>
+      post<AliceReconcile>("/api/admin/alice/payout/preview", body),
+    alicePayoutCommit: (body: { title: string; date_from: string; date_to: string; confirmed: Record<number, number>;
+      proof_media: string[] }, key: string) =>
+      post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/alice/payout/commit", { ...body, idempotency_key: key }),
+    userProducts: (userId: number) => request<{ items: { product: Product; title: string; active: boolean }[];
+      history: { product: Product; title: string; granted_at: string; granted_by: string | null; revoked_at: string | null;
+        revoked_by: string | null }[] }>(`/api/admin/team/${userId}/products`),
+    setUserProduct: (userId: number, product: Product, allow: boolean, key: string) =>
+      post<{ items: { product: Product; title: string; active: boolean }[]; history: { product: Product; title: string;
+        granted_at: string; granted_by: string | null; revoked_at: string | null; revoked_by: string | null }[] }>(
+        `/api/admin/team/${userId}/products`, { product, allow, idempotency_key: key }),
     groups: () => request<GroupsBoard>("/api/admin/groups"),
     checkGroups: () => post<GroupsBoard & { checked: number }>("/api/admin/groups/check", {}),
     groupInvite: (user_id: number, kind: GroupKind) => post<GroupsBoard>("/api/admin/groups/invite", { user_id, kind }),
@@ -1133,7 +1268,7 @@ export const api = {
     createEvent: (
       body: { title: string; mode: LiveEvent["mode"]; starts_at: string; ends_at: string; description?: string; prize?: string;
         target?: number | null; max_winners: number; max_attempts: number; network_id?: number | null; prize_type?: string | null;
-        prize_photo?: string | null; prize_media_kind?: "photo" | "video" },
+        prize_photo?: string | null; prize_media_kind?: "photo" | "video"; product?: Product | null },
       key: string,
     ) => post<{ event: LiveEvent }>("/api/admin/events", { ...body, idempotency_key: key }),
     updateEvent: (id: number, body: EventChanges & { version: number; notify: boolean }, key: string) =>
@@ -1151,7 +1286,8 @@ export const api = {
     createGoal: (
       body: { title: string; kind: Goal["kind"]; mode: Goal["mode"]; target: number; date_from: string; date_to: string;
         description?: string; user_id?: number | null; network_id?: number | null; prize?: string | null; prize_type?: string | null;
-        prize_photo?: string | null; user_ids?: number[]; location?: string; reset_time?: string; forever?: boolean },
+        prize_photo?: string | null; user_ids?: number[]; location?: string; reset_time?: string; forever?: boolean;
+        product?: Product | null; grant_access?: boolean },
       key: string,
     ) => post<{ goal: Goal }>("/api/admin/goals", { ...body, idempotency_key: key }),
     updateGoal: (id: number, body: GoalChanges & { version: number; notify: boolean }, key: string) =>
@@ -1176,7 +1312,8 @@ export const api = {
     userPaymentProfile: (userId: number) =>
       request<{ profile: PaymentProfile | null; full: boolean; banks: string[] }>(`/api/admin/users/${userId}/payment-profile`),
     uploadMedia: (file: Blob) => upload<{ file_id: string }>("/api/admin/media", file),
-    payouts: () => request<{ items: { id: number; title: string; period_from: string; period_to: string; total: number; people: number; created_at: string }[]; rates: PayoutRates }>("/api/admin/payouts"),
+    payouts: () => request<{ items: { id: number; title: string; period_from: string; period_to: string; total: number; people: number;
+      created_at: string; product?: Product | null }[]; rates: PayoutRates }>("/api/admin/payouts"),
     payout: (id: number) => request<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}`),
     payoutExcel: (id: number) => post<{ ok: boolean }>(`/api/admin/payouts/${id}/excel`, {}),
     previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates }) =>

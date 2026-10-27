@@ -12,17 +12,19 @@ import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { haptic, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { TxForm } from "./money";
+import { AlicePayout } from "./alice-payout";
 
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 
 /** Payout registry (ТЗ модуль 10): history and the three-step wizard. Owners only. */
 export function PayoutsSection() {
   const list = useLoad(() => api.admin.payouts(), []);
-  const [mode, setMode] = useState<"list" | "new" | number>("list");
+  const [mode, setMode] = useState<"list" | "new" | "alice" | number>("list");
 
   if (mode === "new" && list.data) {
     return <Wizard defaults={list.data.rates} onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
   }
+  if (mode === "alice") return <AlicePayout onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
   if (typeof mode === "number") return <BatchView id={mode} onBack={() => setMode("list")} />;
 
   return (
@@ -37,6 +39,10 @@ export function PayoutsSection() {
                 disabled={!list.data} onClick={() => { tapHaptic(); setMode("new"); }}>
           <Plus /> Новая выплата
         </Button>
+        <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
+                disabled={!list.data} onClick={() => { tapHaptic(); setMode("alice"); }}>
+          По «Яндекс Алисе»
+        </Button>
       </section>
       {!list.data ? <Skeleton className="h-40 rounded-3xl" /> : list.data.items.length === 0 ? (
         <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">Выплат ещё не было.</p>
@@ -47,7 +53,9 @@ export function PayoutsSection() {
               <li key={b.id}>
                 <button onClick={() => setMode(b.id)} className="press flex w-full items-center gap-3 px-5 py-3.5 text-left hover:bg-muted/60 md:px-6">
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">{b.title}</span>
+                    <span className="block truncate font-medium">
+                      {b.title}{b.product === "alice" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· Яндекс Алиса</span>}
+                    </span>
                     <span className="block text-xs text-muted-foreground">
                       {dayMonth(b.period_from)} – {dayMonth(b.period_to)} · {b.people} {plural(b.people, "человек", "человека", "человек")}
                     </span>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CalendarDays, ShieldCheck, Trophy, UserRound } from "lucide-react";
+import { Briefcase, CalendarDays, ShieldCheck, Trophy, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
 import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
@@ -14,13 +14,15 @@ import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
 import { EventsScreen } from "./events/live";
+import { WorkScreen } from "./work/work-screen";
 import { Avatar } from "./avatar";
 import { ThemeButton, ThemeChoice } from "./theme-toggle";
 
-type Tab = "schedule" | "events" | "profile" | "admin";
+type Tab = "schedule" | "work" | "events" | "profile" | "admin";
 
 const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
   { id: "schedule", label: "График", icon: CalendarDays },
+  { id: "work", label: "Работа", icon: Briefcase },
   { id: "events", label: "События", icon: Trophy },
   { id: "profile", label: "Профиль", icon: UserRound },
   { id: "admin", label: "Админ", icon: ShieldCheck },
@@ -112,7 +114,9 @@ export function MiniApp() {
     const user = me.user;
     const staff = isStaff(user);
     // the events tab appears while there is an active (or just finished) event for this person
-    const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0));
+    // «Работа» appears with access to at least one product (ТЗ 27.10 §28)
+    const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0)
+      && (t.id !== "work" || (me.products?.length ?? 0) > 0));
     const working = user.work_status === "working";
     // a remembered tab that is gone now (no events any more, no admin rights) falls back to the schedule
     const tab = tabs.some((t) => t.id === shown) ? shown : "schedule";
@@ -189,6 +193,7 @@ export function MiniApp() {
                               internship={me.internship} />
             )}
             {tab === "events" && <EventsScreen />}
+            {tab === "work" && <WorkScreen products={me.products ?? []} />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} botUsername={me.bot_username} />}
             {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} />}
           </main>

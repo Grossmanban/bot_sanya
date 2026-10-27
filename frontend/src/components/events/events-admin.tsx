@@ -5,7 +5,7 @@ import { Check, LoaderCircle, Plus, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type EventChanges, type LiveEvent, type PendingEntry, type User } from "@/lib/api";
+import { api, PRODUCT_TITLES, type EventChanges, type LiveEvent, type PendingEntry, type Product, type User } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -242,6 +242,7 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
   const [starts, setStarts] = useState(initial ? local(initial.starts_at) : `${today}T10:00`);
   const [ends, setEnds] = useState(initial ? local(initial.ends_at) : `${today}T20:00`);
   const [network, setNetwork] = useState<number | null>(everyone ? null : myNetwork);
+  const [product, setProduct] = useState<Product | "">("");  // ТЗ 27.10 §29: only those with access take part
   const [asking, setAsking] = useState<string[] | null>(null);
   const { busy, run } = useAction();
   const started = !!initial && initial.phase !== "upcoming";
@@ -283,7 +284,7 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
             title: body.title!, mode, starts_at: starts, ends_at: ends, prize: body.prize ?? undefined, prize_type: body.prize_type,
             prize_photo: media.prize_photo ?? null, prize_media_kind: media.prize_media_kind, description: body.description ?? undefined,
             target: mode === "first_to_reach" ? Number(target) : null, max_winners: body.max_winners!, max_attempts: body.max_attempts!,
-            network_id: network,
+            network_id: network, product: product || null,
           }, k);
         }
         return api.admin.updateEvent(initial.id, { ...body, version: initial.version, notify }, k);
@@ -342,6 +343,14 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
         <select className={field} value={network ?? ""} onChange={(e) => setNetwork(e.target.value ? Number(e.target.value) : null)}>
           <option value="">Для всех</option>
           {nets.data!.items.map((n) => <option key={n.id} value={n.id}>Сеть «{n.name}»</option>)}
+        </select>
+      )}
+      {!editing && (
+        <select aria-label="Продукт" className={field} value={product} onChange={(e) => setProduct(e.target.value as Product | "")}>
+          <option value="">Для всех продуктов</option>
+          {(Object.keys(PRODUCT_TITLES) as Product[]).map((p) => (
+            <option key={p} value={p}>Только с доступом к «{PRODUCT_TITLES[p]}»</option>
+          ))}
         </select>
       )}
       <PrizeFields types={types} value={prize} onChange={setPrize} currentUrl={initial?.prize_photo_url}

@@ -39,8 +39,9 @@ import { ViolationsSection } from "./violations-section";
 import { OnboardingSection } from "./onboarding-section";
 import { AccessSection } from "./access-section";
 import { GroupsSection } from "./groups-section";
+import { AliceAdmin } from "./alice-admin";
 
-type Section = "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "alice" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
@@ -57,6 +58,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "events", label: "События", need: "review" },
   { id: "networks", label: "Сети", need: "registrations" },
   { id: "points", label: "Точки", need: "points" },
+  { id: "alice", label: "Алиса", need: "alice" },
   { id: "groups", label: "Группы", need: "groups" },
   { id: "access", label: "Доступ", need: "access_log" },
   { id: "broadcast", label: "Рассылка", need: "broadcast_network" },
@@ -151,6 +153,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
         {section === "points" && <PointsSection />}
         {section === "access" && <AccessSection />}
         {section === "groups" && <GroupsSection />}
+        {section === "alice" && <AliceAdmin />}
         {section === "broadcast" && <BroadcastSection me={me} />}
         {section === "settings" && <SettingsSection />}
       </div>
