@@ -14,6 +14,7 @@ import { MyGoals } from "../goals/goals";
 import { DayTrack, HourAxis } from "../day-line";
 import { DayDetail, DaySheet } from "./day-sheet";
 import { deadlineText } from "../report/report-block";
+import { fineShort } from "../finance/money";
 
 const HINT_KEY = "hint-dismissed";
 
@@ -371,7 +372,7 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
               mine.shortfall > 0 ? (
                 <span className="font-semibold text-cancel">
                   {mine.fact_volume} из {mine.volume} шт. (−{mine.shortfall})
-                  {mine.shortfall_status === "fined" ? `, штраф ${rub(mine.shortfall_penalty ?? 0)}` : ""}
+                  {mine.shortfall_status === "fined" ? `, штраф ${fineShort(mine.shortfall_units, mine.shortfall_penalty)}` : ""}
                 </span>
               ) : mine.volume != null && mine.fact_volume > mine.volume ? (
                 <span className="font-semibold text-go">

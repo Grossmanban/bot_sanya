@@ -12,6 +12,10 @@ Statuses:
     rejected               — a trainer's fine an owner or admin declined (the employee never sees it)
 
 Balance = active bonuses − active fines − active deductions.
+
+Fines are counted in fine units (ТЗ 27.10 §19): units × the person's own rate at that moment (personal, else the
+common one), kept in `pieces` and `rate`; `amount` holds the rubles for the payouts. The employee sees units only;
+staff see both. Fines from before the change have no units and keep their rubles (nothing is guessed).
 """
 
 import sqlite3
@@ -39,6 +43,8 @@ STATUS_TITLES = {
     "rejected": "отклонён",
 }
 MAX_REASON = 500
+MAX_UNITS = 1000
+UNIT_PRESETS = (1, 3, 5)
 
 
 @dataclass
@@ -70,6 +76,19 @@ def balance(conn: sqlite3.Connection, user_id: int) -> dict:
         "balance": bonuses - fines - deductions,
         "pending": get_("fine", "pending_admin_approval"),
         "drafts": count("fine", "draft"),
+    }
+
+
+def employee_summary(conn: sqlite3.Connection, user_id: int) -> dict:
+    """What the employee sees instead of a rubles balance (ТЗ 27.10 §19): fine units, bonuses and deductions."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT type, amount, pieces FROM financial_transactions WHERE user_id = ? AND status = 'active'", (user_id,))]
+    fines = [r for r in rows if r["type"] == "fine"]
+    return {
+        "fine_units": sum(r["pieces"] or 0 for r in fines),
+        "old_fines": sum(1 for r in fines if not r["pieces"]),  # from before units: their rubles stay with the staff
+        "bonuses": sum(r["amount"] or 0 for r in rows if r["type"] == "bonus"),
+        "deductions": sum(r["amount"] or 0 for r in rows if r["type"] == "deduction"),
     }
 
 
@@ -207,12 +226,57 @@ def fine_status(actor: dict, target: dict) -> str:
     raise ServiceError("Недостаточно прав на штраф", 403, "forbidden")
 
 
-def link_fine(conn: sqlite3.Connection, shift: dict, source: str, amount: int, reason: str, actor_tg: int,
+def units_of(units) -> int:
+    if isinstance(units, bool) or not isinstance(units, int) or not 0 < units <= MAX_UNITS:
+        raise ServiceError(f"Штраф — целое число единиц от 1 до {MAX_UNITS}", 422, "bad_units")
+    return units
+
+
+def unit_rate(conn: sqlite3.Connection, user_id: int) -> int:
+    """One fine unit in rubles: the person's own rate now (personal, else the common one)."""
+    from .rates import for_user
+
+    return for_user(conn, user_id)["rate_base"]
+
+
+def record_fine(conn: sqlite3.Connection, *, user_id: int, units: int, reason: str, actor_tg: int,
+                status: str = "active", source: str = "manual", shift_id: int | None = None,
+                event_date: str | None = None, media: str | None = None) -> dict:
+    """A fine in units; the rate is fixed now, so a later rate change doesn't move it."""
+    rate = unit_rate(conn, user_id)
+    return record(conn, user_id=user_id, type="fine", amount=units * rate, reason=reason, actor_tg=actor_tg,
+                  status=status, source=source, shift_id=shift_id, event_date=event_date, media=media,
+                  pieces=units, rate=rate)
+
+
+def units_text(tx: dict | None) -> str:
+    """«3 ед.» for the employee; an old fine without units — no number (its rubles are the staff's)."""
+    if not tx or not tx.get("pieces") or tx["type"] != "fine":
+        return ""
+    n = tx["pieces"]
+    word = "единица" if n % 10 == 1 and n % 100 != 11 else "единицы" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "единиц"
+    return f"{n} штрафн{'ая' if word == 'единица' else 'ые' if word == 'единицы' else 'ых'} {word}"
+
+
+def staff_text(tx: dict) -> str:
+    """«360 ₽ (3 ед. × 120 ₽)» for the staff and the archive."""
+    amount = f"{tx['amount']} ₽" if tx.get("amount") is not None else "—"
+    if tx["type"] == "fine" and tx.get("pieces"):
+        return f"{amount} ({tx['pieces']} ед. × {tx['rate']} ₽)"
+    return amount
+
+
+def for_employee(tx: dict) -> dict:
+    """The employee's own journal: fines without rubles (ТЗ 27.10 §19), bonuses and deductions as they are."""
+    return {**tx, "amount": None, "rate": None} if tx["type"] == "fine" else tx
+
+
+def link_fine(conn: sqlite3.Connection, shift: dict, source: str, units: int, reason: str, actor_tg: int,
               status: str = "active") -> dict:
     """The one live fine of this kind for a shift: replaces an earlier one (e.g. a decision changed)."""
     cancel_linked(conn, shift["id"], (source,), actor_tg, "Заменён новым решением")
-    return record(conn, user_id=shift["user_id"], type="fine", amount=amount, reason=reason, actor_tg=actor_tg,
-                  status=status, source=source, shift_id=shift["id"], event_date=shift["shift_date"])
+    return record_fine(conn, user_id=shift["user_id"], units=units, reason=reason, actor_tg=actor_tg,
+                       status=status, source=source, shift_id=shift["id"], event_date=shift["shift_date"])
 
 
 def final_cancel_draft(conn: sqlite3.Connection, shift: dict, actor_tg: int) -> dict:
@@ -271,12 +335,16 @@ def _target(conn, user_id: int) -> dict:
     return user
 
 
-def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amount: int, reason: str, key: str,
-           event_date: date | None = None, media: str | None = None) -> TxResult:
-    """Manual fine (trainer: needs an owner's approval), bonus (any staff for their people), deduction (owner)."""
+def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amount: int | None, reason: str, key: str,
+           event_date: date | None = None, media: str | None = None, units: int | None = None) -> TxResult:
+    """Manual fine in units (trainer: needs an approval), bonus (any staff for their people), deduction (owner)."""
     if type not in TYPES:
         raise ServiceError("Неизвестный тип", 422, "bad_type")
-    amount, reason = _amount(amount), _reason(reason)
+    if type == "fine":
+        units = units_of(units)
+    else:
+        amount = _amount(amount)
+    reason = _reason(reason)
     _check_key(key)
     with transaction(conn):
         if _seen(conn, key):
@@ -299,11 +367,16 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
             status = "active"
         if event_date and event_date > today_local():
             raise ServiceError("Дата не может быть в будущем", 422, "bad_date")
-        tx = record(conn, user_id=user_id, type=type, amount=amount, reason=reason, actor_tg=actor["telegram_id"],
-                    status=status, event_date=(event_date or today_local()).isoformat(), media=media)
+        day = (event_date or today_local()).isoformat()
+        if type == "fine":
+            tx = record_fine(conn, user_id=user_id, units=units, reason=reason, actor_tg=actor["telegram_id"],
+                             status=status, event_date=day, media=media)
+        else:
+            tx = record(conn, user_id=user_id, type=type, amount=amount, reason=reason, actor_tg=actor["telegram_id"],
+                        status=status, event_date=day, media=media)
         event = f"{type.upper()}_{'REQUESTED' if status == 'pending_admin_approval' else 'CREATED'}"
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
-                  new={"tx": tx["id"], "amount": amount, "status": status}, description=reason)
+                  new={"tx": tx["id"], "amount": tx["amount"], "units": tx["pieces"], "status": status}, description=reason)
     return TxResult(tx, True, event)
 
 

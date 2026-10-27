@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
-import { api, ApiError, type Day, type Point, type Pricing, type Shift, type User } from "@/lib/api";
+import { api, type Day, type Point, type Pricing, type Shift, type User } from "@/lib/api";
 import { STATUS_META, WEEKDAYS, dayMonth, dayState, parseDay, rub, timeRange } from "@/lib/format";
 import { readLocal, useAction, writeLocal } from "@/lib/hooks";
 import { cn } from "@/lib/utils";

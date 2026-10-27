@@ -397,8 +397,8 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             return False, exc.message
         if not result.changed:
             return False, "Уже решено"
-        return True, {"approve": "✅ Принят", "return": "🔄 Возвращён на исправление", "fine": f"⚠️ Штраф {amount} ₽",
-                      "ns_fine": f"💸 Штраф {amount} ₽", "ns_excuse": "🤝 Без штрафа"}[kind]
+        return True, {"approve": "✅ Принят", "return": "🔄 Возвращён на исправление", "fine": f"⚠️ Штраф {amount} ед.",
+                      "ns_fine": f"💸 Штраф {amount} ед.", "ns_excuse": "🤝 Без штрафа"}[kind]
 
     async def ask_reason(message: Message, state: FSMContext, kind: str) -> None:
         presets = REASONS[kind]
@@ -426,7 +426,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         if kind in ("fine", "ns_fine"):
             if parts[3] == "c":
                 await state.set_state(DecisionInput.amount)
-                await call.message.answer("Сумма штрафа в рублях (целое число):")
+                await call.message.answer("Сколько штрафных единиц? (целое число; единица = ставка сотрудника за штуку)")
                 await call.answer()
                 return
             await state.update_data(amount=int(parts[3]))
@@ -435,9 +435,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
 
     @router.message(StateFilter(DecisionInput.amount), F.text)
     async def decision_amount(message: Message, state: FSMContext):
-        raw = message.text.strip().replace(" ", "").replace("₽", "")
-        if not raw.isdigit() or not 0 < int(raw) <= svc.MAX_PENALTY:
-            await message.answer("Нужно целое число больше нуля, например 700.")
+        raw = message.text.strip().replace(" ", "")
+        if not raw.isdigit() or not 0 < int(raw) <= finance.MAX_UNITS:
+            await message.answer("Нужно целое число единиц больше нуля, например 3.")
             return
         await state.update_data(amount=int(raw))
         await ask_reason(message, state, (await state.get_data())["kind"])

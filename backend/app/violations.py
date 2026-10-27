@@ -130,11 +130,12 @@ def public(conn: sqlite3.Connection, v: dict, nets: dict[int, str] | None = None
         # ТЗ 27.10 §17: an unmarked day — N fine units at the person's own rate (the settings say N)
         "suggested_units": _units(conn) if v["kind"] == "unmarked" else None,
         "suggested_amount": _units(conn) * _rate(conn, v["user_id"]) if v["kind"] == "unmarked" else None,
+        "unit_rate": _rate(conn, v["user_id"]),  # one fine unit in rubles, for the staff's form
         "resolution_comment": v["resolution_comment"],
         "resolved_by": svc.full_name(resolver) if resolver else None,
         "resolved_at": v["resolved_at"],
         "media_count": len(media_ids(v)),
-        "fine": {"id": tx["id"], "amount": tx["amount"], "status": tx["status"]} if tx else None,
+        "fine": {"id": tx["id"], "amount": tx["amount"], "units": tx["pieces"], "status": tx["status"]} if tx else None,
         "created_at": v["created_at"],
     }
 
@@ -295,9 +296,10 @@ def _open(conn, actor: dict, violation_id: int) -> tuple[dict, dict, dict]:
     return v, actor, target
 
 
-def fine(conn: sqlite3.Connection, actor: dict, violation_id: int, amount: int, comment: str,
+def fine(conn: sqlite3.Connection, actor: dict, violation_id: int, units: int, comment: str,
          files: list[str] | None, key: str) -> Resolution:
-    amount, comment, files = finance._amount(amount), _comment(comment), _media(files)
+    """A fine in units at the person's own rate (ТЗ 27.10 §17, §19)."""
+    units, comment, files = finance.units_of(units), _comment(comment), _media(files)
     _check_key(key)
     with transaction(conn):
         if _seen(conn, key):
@@ -305,15 +307,16 @@ def fine(conn: sqlite3.Connection, actor: dict, violation_id: int, amount: int, 
             return Resolution(v, False, finance.get(conn, v["linked_fine_transaction_id"]) if v else None)
         v, actor, target = _open(conn, actor, violation_id)
         status = finance.fine_status(actor, target)
-        tx = finance.record(conn, user_id=v["user_id"], type="fine", amount=amount, reason=comment,
-                            actor_tg=actor["telegram_id"], status=status, source="attendance",
-                            event_date=v["week_end_date"], media=files[0] if files else None)
+        tx = finance.record_fine(conn, user_id=v["user_id"], units=units, reason=comment,
+                                 actor_tg=actor["telegram_id"], status=status, source="attendance",
+                                 event_date=v["week_end_date"], media=files[0] if files else None)
         conn.execute(
             """UPDATE attendance_violations SET status = 'penalized', resolution_admin_id = ?, resolution_comment = ?,
                    resolution_media_ids = ?, linked_fine_transaction_id = ?, resolved_at = ? WHERE id = ?""",
             (actor["id"], comment, json.dumps(files), tx["id"], now_iso(), violation_id))
         log_event(conn, user_id=v["user_id"], actor_id=actor["telegram_id"], event_type="VIOLATION_PENALIZED", key=key,
-                  new={"violation": violation_id, "tx": tx["id"], "amount": amount, "status": status}, description=comment)
+                  new={"violation": violation_id, "tx": tx["id"], "units": units, "amount": tx["amount"], "status": status},
+                  description=comment)
     return Resolution(get(conn, violation_id), True, tx)
 
 

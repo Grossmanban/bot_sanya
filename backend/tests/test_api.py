@@ -287,7 +287,7 @@ def test_finance_endpoints(client, conn):
         conn.execute("UPDATE users SET role = ?, network_id = 1 WHERE id = ?", (role, u["id"]))
         ids[name] = u["id"]
     th, eh = headers(90, "Тренер", "Тест"), headers(91, "Иван", "Тест")
-    body = {"user_id": ids["Иван"], "type": "fine", "amount": 400, "reason": "Опоздание", "idempotency_key": key()}
+    body = {"user_id": ids["Иван"], "type": "fine", "units": 3, "reason": "Опоздание", "idempotency_key": key()}
     r = client.post("/api/admin/finances", json=body, headers=th)
     assert r.status_code == 200 and r.json()["tx"]["status"] == "pending_admin_approval"
     tx_id = r.json()["tx"]["id"]
@@ -300,11 +300,12 @@ def test_finance_endpoints(client, conn):
     r = client.post(f"/api/admin/finances/{tx_id}/decide", json={"approve": True, "idempotency_key": key()}, headers=owner)
     assert r.json()["tx"]["status"] == "active"
     mine = client.get("/api/me/finances", headers=eh).json()
-    assert mine["balance"]["balance"] == -400 and mine["items"][0]["amount"] == 400
+    # the employee sees units, not rubles (ТЗ 27.10 §19); one unit = the common rate 120 ₽
+    assert mine["summary"]["fine_units"] == 3 and mine["items"][0]["pieces"] == 3 and mine["items"][0]["amount"] is None
     r = client.post("/api/admin/finances/pay-all", json={"user_id": ids["Иван"], "idempotency_key": key()}, headers=th)
     assert r.status_code == 403
     r = client.post("/api/admin/finances/pay-all", json={"user_id": ids["Иван"], "idempotency_key": key()}, headers=owner)
-    assert r.json() == {"paid": 1, "total": 400}
+    assert r.json() == {"paid": 1, "total": 360}
 
 
 def test_network_endpoints(client, conn):

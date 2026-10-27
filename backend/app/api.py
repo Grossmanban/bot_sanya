@@ -222,9 +222,7 @@ class NetworkPatch(BaseModel):
     trainer_id: int | None = None
     clear_trainer: bool = False
     archive: bool = False
-    # owner: rates of the network (customer round B); rate_base None with clear_rate = the common rate
-    rate_base: int | None = None
-    clear_rate: bool = False
+    # owner: the trainer's ladder (customer round B)
     ladder: list[LadderStep] | None = None
     ladder_period: str | None = None
     ladder_counts_trainer: bool | None = None
@@ -255,7 +253,8 @@ class MemberNetwork(BaseModel):
 class TxBody(BaseModel):
     user_id: int
     type: str
-    amount: int
+    amount: int | None = None  # bonuses and deductions, rubles
+    units: int | None = None  # fines, fine units (ТЗ 27.10 §19)
     reason: str
     event_date: str | None = None
     media_file_id: str | None = None
@@ -304,7 +303,7 @@ class NormBody(BaseModel):
 
 
 class ViolationFine(BaseModel):
-    amount: int
+    units: int
     comment: str
     media_files: list[str] = []
     idempotency_key: str
@@ -318,7 +317,7 @@ class ViolationWaive(BaseModel):
 
 class ReviewBody(BaseModel):
     action: str  # approve | return | fine  (no-show: fine | excuse)
-    amount: int | None = None
+    units: int | None = None  # a fine in fine units
     comment: str | None = None
     idempotency_key: str
 
@@ -670,7 +669,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         # a trainer's fine is invisible to the employee until an owner approves it (ТЗ 5.3)
         items = finance.journal(conn, user_id=user["id"],
                                 statuses=("draft", "active", "paid", "offset", "cancelled"), limit=200)
-        return {"balance": {k: v for k, v in finance.balance(conn, user["id"]).items() if k != "pending"}, "items": items}
+        # ТЗ 27.10 §19: fines in units, no rubles balance — the employee's own summary
+        return {"summary": finance.employee_summary(conn, user["id"]), "items": [finance.for_employee(t) for t in items]}
 
     # ------------------------------------------------------------ schedule
 
@@ -953,7 +953,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         for s in svc.shifts_on(conn, d):
             if only is not None and s["user_id"] not in only:
                 continue
-            item = svc.serialize_shift(s, today, conn)
+            item = svc.serialize_shift(s, today, conn, staff=True)
             item.update(user_id=s["user_id"], name=f"{s['first_name']} {s['last_name']}", username=s["username"])
             items.append(item)
         count, volume = svc.day_totals(conn, d)
@@ -1060,7 +1060,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/violations/{violation_id}/fine")
     async def admin_violation_fine(violation_id: int, body: ViolationFine, admin: dict = Depends(staff("review"))):
-        result = violations.fine(conn, admin, violation_id, body.amount, body.comment, body.media_files,
+        result = violations.fine(conn, admin, violation_id, body.units, body.comment, body.media_files,
                                  body.idempotency_key)
         if result.changed:
             notifier.spawn(notifier.violation_resolved(result.violation, result.tx, admin))
@@ -1271,8 +1271,6 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             if previous:
                 notifier.spawn(notifier.role_changed(svc.get_user(conn, previous["id"]), owner, "trainer"))
         money = {}
-        if body.rate_base is not None or body.clear_rate:
-            money["rate_base"] = None if body.clear_rate else body.rate_base
         if body.ladder is not None:
             money["ladder"] = [{"from": s.from_, "rate": s.rate} for s in body.ladder]
         if body.ladder_period is not None:
@@ -1344,7 +1342,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if body.media_file_id and len(body.media_file_id) > 300:
             raise svc.ServiceError("Некорректный файл", 422, "bad_media")
         result = finance.create(conn, admin, body.user_id, body.type, body.amount, body.reason, body.idempotency_key,
-                                svc.parse_date(body.event_date) if body.event_date else None, body.media_file_id or None)
+                                svc.parse_date(body.event_date) if body.event_date else None, body.media_file_id or None,
+                                units=body.units)
         if result.changed:
             notifier.spawn(notifier.tx_created(result.tx, admin))
         return {"tx": finance.public(result.tx), "changed": result.changed}
@@ -1592,14 +1591,14 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/shifts/{shift_id}/review")
     async def admin_review(shift_id: int, body: ReviewBody, admin: dict = Depends(staff("review"))):
-        result = reports.review(conn, admin, shift_id, body.action, body.idempotency_key, body.amount, body.comment)
+        result = reports.review(conn, admin, shift_id, body.action, body.idempotency_key, body.units, body.comment)
         if result.changed:
             notifier.spawn(notifier.report_reviewed(result.shift, result.report, admin))
         return {"shift": shift_out(result.shift), "changed": result.changed}
 
     @api.post("/admin/shifts/{shift_id}/no-show")
     async def admin_no_show(shift_id: int, body: ReviewBody, admin: dict = Depends(staff("review"))):
-        result = reports.resolve_no_show(conn, admin, shift_id, body.action, body.idempotency_key, body.amount,
+        result = reports.resolve_no_show(conn, admin, shift_id, body.action, body.idempotency_key, body.units,
                                          body.comment)
         if result.changed:
             notifier.spawn(notifier.no_show_resolved(result.shift, admin))

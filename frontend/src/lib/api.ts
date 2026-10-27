@@ -294,8 +294,7 @@ export interface Network {
   status: "active" | "archived";
   trainer: { id: number; name: string; username: string | null; telegram_id: number; is_owner?: boolean } | null;
   members: NetworkMember[];
-  /** owners only (customer round B): null — the common rate / the common commission */
-  rate_base?: number | null;
+  /** owners only (customer round B): the trainer's ladder; null — the common commission */
   ladder?: LadderStep[];
   ladder_period?: "day" | "week";
   ladder_counts_trainer?: boolean;
@@ -350,6 +349,8 @@ export interface Shift {
   shortfall: number;
   shortfall_status: "fined" | "waived" | null;
   shortfall_penalty: number | null;
+  /** the employee's own card: the shortfall fine in units */
+  shortfall_units?: number | null;
 }
 
 export type ReportState = "pending_review" | "approved" | "needs_fix" | "rejected" | "no_show";
@@ -380,6 +381,8 @@ export interface ReportView {
   fine_block: string | null;
   /** a trainer's fine waiting for an owner */
   fine_pending?: number | null;
+  fine_units?: number | null;
+  fine_pending_units?: number | null;
 }
 
 export interface TeamDay {
@@ -427,6 +430,10 @@ export interface QueueItem {
   team: TeamDay | null;
   fine_block: string | null;
   fine_pending?: number | null;
+  fine_units?: number | null;
+  fine_pending_units?: number | null;
+  /** one fine unit in rubles — the person's own rate */
+  unit_rate?: number | null;
 }
 
 export type ReportCounts = {
@@ -459,12 +466,14 @@ export interface Violation {
   /** an unmarked day (ТЗ 27.10 §17): N fine units × the person's rate */
   suggested_units?: number | null;
   suggested_amount?: number | null;
+  /** one fine unit in rubles — the person's own rate */
+  unit_rate?: number | null;
   resolution_comment: string | null;
   resolved_by: string | null;
   resolved_at: string | null;
   media_count: number;
   media: string[];
-  fine: { id: number; amount: number; status: TxStatus } | null;
+  fine: { id: number; amount: number; units?: number | null; status: TxStatus } | null;
   created_at: string;
 }
 
@@ -496,6 +505,15 @@ export interface Tx {
   name?: string;
   username?: string | null;
   telegram_id?: number;
+}
+
+/** What the employee sees (ТЗ 27.10 §19): fines in units, bonuses and deductions in rubles. */
+export interface MoneySummary {
+  fine_units: number;
+  /** fines from before units: counted without a number of units */
+  old_fines: number;
+  bonuses: number;
+  deductions: number;
 }
 
 export interface Balance {
@@ -894,7 +912,7 @@ export const api = {
   register: (form: ApplicationForm) => post<{ application: { status: ApplicationStatus } }>("/api/register", form),
   referrals: () => request<{ code: string; link: string | null; items: Referral[];
     targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
-  myFinances: () => request<{ balance: Balance; items: Tx[] }>("/api/me/finances"),
+  myFinances: () => request<{ summary: MoneySummary; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
     request<{ weeks: { start: string; end: string; shifts: Shift[] }[] }>(`/api/history?weeks_back=${weeksBack}`),
@@ -979,9 +997,10 @@ export const api = {
       return request<{ items: Tx[]; balance: Balance | null }>(`/api/admin/finances?${q}`);
     },
     financeSummary: () => request<{ people: MoneyPerson[]; pending: Tx[]; drafts: Tx[] }>("/api/admin/finances/summary"),
-    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, amount: number, reason: string, key: string,
-               media_file_id: string | null = null) =>
-      post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, amount, reason, media_file_id, idempotency_key: key }),
+    /** fines in units (ТЗ 27.10 §19), bonuses and deductions in rubles */
+    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, value: { amount?: number; units?: number }, reason: string,
+               key: string, media_file_id: string | null = null) =>
+      post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, ...value, reason, media_file_id, idempotency_key: key }),
     decideTx: (id: number, approve: boolean, comment: string | null, key: string) =>
       post<{ tx: Tx; changed: boolean }>(`/api/admin/finances/${id}/decide`, { approve, comment, idempotency_key: key }),
     /** «Простить» a fine: the reason is optional */
@@ -1030,7 +1049,7 @@ export const api = {
     createNetwork: (name: string, key: string) => post<{ network: Network }>("/api/admin/networks", { name, idempotency_key: key }),
     updateNetwork: (id: number, body: {
       name?: string; trainer_id?: number; clear_trainer?: boolean; archive?: boolean;
-      rate_base?: number | null; clear_rate?: boolean; ladder?: LadderStep[]; ladder_period?: "day" | "week";
+      ladder?: LadderStep[]; ladder_period?: "day" | "week";
       ladder_counts_trainer?: boolean;
     }, key: string) =>
       patch<{ network: Network }>(`/api/admin/networks/${id}`, { ...body, idempotency_key: key }),
@@ -1065,13 +1084,13 @@ export const api = {
     violations: (status: "pending" | "resolved") =>
       request<{ items: Violation[]; pending: number; quota: number; personal: boolean }>(`/api/admin/violations?status=${status}`),
     scanViolations: () => post<{ created: number }>("/api/admin/violations/scan", {}),
-    fineViolation: (id: number, body: { amount: number; comment: string; media_files: string[] }, key: string) =>
+    fineViolation: (id: number, body: { units: number; comment: string; media_files: string[] }, key: string) =>
       post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/fine`, { ...body, idempotency_key: key }),
     waiveViolation: (id: number, body: { comment: string; media_files: string[] }, key: string) =>
       post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/waive`, { ...body, idempotency_key: key }),
-    review: (shiftId: number, action: "approve" | "return" | "fine", extra: { amount?: number; comment?: string }, key: string) =>
+    review: (shiftId: number, action: "approve" | "return" | "fine", extra: { units?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/review`, { action, ...extra, idempotency_key: key }),
-    noShow: (shiftId: number, action: "fine" | "excuse", extra: { amount?: number; comment?: string }, key: string) =>
+    noShow: (shiftId: number, action: "fine" | "excuse", extra: { units?: number; comment?: string }, key: string) =>
       post<ShiftResponse>(`/api/admin/shifts/${shiftId}/no-show`, { action, ...extra, idempotency_key: key }),
     manualResult: (shiftId: number, fact_volume: number, comment: string, photo: Blob | null, key: string) =>
       upload<ShiftResponse>(

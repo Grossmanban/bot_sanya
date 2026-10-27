@@ -8,6 +8,7 @@ import { rub } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { PlanFactBar } from "../admin/shortfall";
+import { fineShort } from "../finance/money";
 import { PhotoPicker, PhotoThumb } from "./photo";
 
 /** "до 00:00" or "до 01:30 (17.10)" when the deadline falls on another day. */
@@ -82,7 +83,7 @@ export function ReportBlock({ shift, pricing, onChanged }: { shift: Shift; prici
   }
   if (state === "rejected") {
     return (
-      <Status tone="cancel" icon={ShieldAlert} title={`Отчёт отклонён · штраф ${rub(report.fine ?? 0)}`} photo={last?.photo_url}
+      <Status tone="cancel" icon={ShieldAlert} title={`Отчёт отклонён · штраф ${fineShort(report.fine_units, report.fine)}`} photo={last?.photo_url}
               text={report.note ?? "Решение администратора."}>
         {plan > 0 && <PlanFactBar plan={plan} fact={fact} />}
       </Status>
@@ -92,7 +93,7 @@ export function ReportBlock({ shift, pricing, onChanged }: { shift: Shift; prici
   return (
     <Status tone="cancel" icon={ShieldAlert} title="Неявка: отчёт не сдан вовремя"
             text={report.decided === "fined"
-              ? `Штраф ${rub(report.fine ?? 0)}.${report.note ? ` ${report.note}` : ""}`
+              ? `Штраф: ${fineShort(report.fine_units, report.fine)}.${report.note ? ` ${report.note}` : ""}`
               : report.decided === "waived"
                 ? `Закрыто без штрафа.${report.note ? ` ${report.note}` : ""}`
                 : "Решение примет администратор."} />

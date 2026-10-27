@@ -11,7 +11,7 @@ import { useAction, useLoad } from "@/lib/hooks";
 import { bindBackButton } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { DayTrack } from "../day-line";
-import { BalanceCard, TxRow } from "../finance/money";
+import { SummaryCard, TxRow, fineShort } from "../finance/money";
 import { Avatar } from "../avatar";
 import { ThemeChoice } from "../theme-toggle";
 import { QuickAccess } from "./quick-access";
@@ -59,7 +59,7 @@ export function ProfileScreen({
   }
 
   const working = user.work_status === "working";
-  const bal = money.data?.balance.balance ?? 0;
+  const units = money.data?.summary.fine_units ?? 0;
 
   async function setStatus(next: User["work_status"]) {
     if (next === user.work_status || busy) return;
@@ -160,7 +160,7 @@ export function ProfileScreen({
           <MenuRow
             icon={Wallet}
             label="Штрафы и бонусы"
-            value={money.data ? (bal ? `${bal > 0 ? "+" : "−"}${rub(Math.abs(bal))}` : "0 ₽") : undefined}
+            value={money.data ? (units ? `${units} ед.` : "нет штрафов") : undefined}
             onClick={() => setView("penalties")}
           />
           <MenuRow icon={Archive} label="Архив целей и событий" onClick={() => setView("archive")} />
@@ -263,7 +263,7 @@ function HistoryView({ onBack }: { onBack: () => void }) {
                         {s.fact_volume != null && s.volume != null && s.fact_volume > s.volume && (
                           <span className="font-semibold text-go">, перевыполнение +{s.fact_volume - s.volume}</span>
                         )}
-                        {s.shortfall_status === "fined" && <span className="text-final">, штраф {rub(s.shortfall_penalty ?? 0)}</span>}
+                        {s.shortfall_status === "fined" && <span className="text-final">, штраф {fineShort(s.shortfall_units, s.shortfall_penalty)}</span>}
                         {s.lazy ? ", налог на лень" : ""}
                         {s.status === "finally_cancelled" &&
                           (s.penalty_amount != null ? `, штраф ${rub(s.penalty_amount)}` : ", штраф ещё не назначен")}
@@ -286,7 +286,7 @@ function PenaltiesView({ onBack }: { onBack: () => void }) {
     <div className="mx-auto max-w-2xl space-y-4">
       <SubHeader title="Штрафы и бонусы" onBack={onBack} />
       {loading && !data && <Skeleton className="h-40 rounded-3xl" />}
-      {data && <BalanceCard balance={data.balance} />}
+      {data && <SummaryCard summary={data.summary} />}
       {data && data.items.length === 0 && (
         <div className="rounded-3xl bg-card p-6 shadow-lift">
           <p className="font-semibold">Пока пусто</p>

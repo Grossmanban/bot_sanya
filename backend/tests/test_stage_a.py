@@ -42,7 +42,7 @@ def test_money_with_a_proof_photo(client, conn, make_user):
     oh = owner_h(client)
     u = person(conn, make_user, "Иван")
     fid = media.save_local(b"\xff\xd8\xff" + b"1" * 50, "jpg")
-    r = client.post("/api/admin/finances", json={"user_id": u["id"], "type": "fine", "amount": 300, "reason": "Опоздание",
+    r = client.post("/api/admin/finances", json={"user_id": u["id"], "type": "fine", "units": 3, "reason": "Опоздание",
                                                   "media_file_id": fid, "idempotency_key": key()}, headers=oh)
     tx = r.json()["tx"]
     assert tx["has_media"] and tx["media_url"].startswith(f"/api/media/tx/{tx['id']}?")

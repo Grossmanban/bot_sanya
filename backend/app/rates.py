@@ -2,7 +2,7 @@
 
 Employee, per day (agreed with the customer):
     fewer pieces than lazy_threshold and no «не применять налог на лень» → rate_lazy («налог на лень»)
-    otherwise: the personal rate → the network's base rate → the common rate_base
+    otherwise: the personal rate → the common rate_base (networks' own rates were dropped on 27.10; the column stays)
 
 Trainer, per network: a ladder of steps «from N pieces → R ₽ per piece». The step reached by the team's
 volume (per day or per week, set per network) pays ALL its pieces at that rate. The trainer's own
@@ -86,10 +86,7 @@ class Book:
     def user_rates(self, user_id: int) -> dict:
         """Rates in pricing's shape for this person: pricing.expected_pay(volume, book.user_rates(id))."""
         u = self.users.get(user_id) or {}
-        net = self.nets.get(u.get("network_id"))
         base = self.common["rate_base"]
-        if net and net["rate_base"] is not None:
-            base = net["rate_base"]
         if u.get("personal_rate") is not None:
             base = u["personal_rate"]
         return {"rate_base": base, "rate_lazy": self.common["rate_lazy"],

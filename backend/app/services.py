@@ -501,8 +501,9 @@ def _after_deadline(what: str) -> ServiceError:
 
 
 def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | None = None,
-                    now: datetime | None = None) -> dict | None:
-    """conn adds the report block (state, deadline, last attempt); `now` — see clock()."""
+                    now: datetime | None = None, staff: bool = False) -> dict | None:
+    """conn adds the report block (state, deadline, last attempt); `now` — see clock().
+    Without `staff` a fine counted in units shows no rubles (ТЗ 27.10 §19); an old fine keeps them."""
     if shift is None:
         return None
     day = date.fromisoformat(shift["shift_date"])
@@ -563,6 +564,18 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
         from . import reports  # reports builds on this module
 
         data["report"] = reports.view(conn, shift)
+        if shift.get("shortfall_status") == "fined":  # the employee sees units, not rubles (ТЗ 27.10 §19)
+            fine = (data["report"] or {}).get("fine_units")
+            data["shortfall_units"] = fine if fine is not None else next(
+                (t["pieces"] for t in _shift_fines(conn, shift["id"])), None)
+        if not staff:
+            report = data["report"]
+            if report and report.get("fine_units"):
+                report["fine"] = None
+            if report and report.get("fine_pending_units"):
+                report["fine_pending"] = None
+            if data.get("shortfall_units"):
+                data["shortfall_penalty"] = None
     return data
 
 
@@ -701,6 +714,12 @@ def _own_shift(conn, user: dict, shift_id: int, today: date) -> dict:
     if date.fromisoformat(shift["shift_date"]) < today:
         raise ServiceError("Эта дата уже прошла", 409, "past_date")
     return shift
+
+
+def _shift_fines(conn, shift_id: int) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        """SELECT * FROM financial_transactions WHERE shift_id = ? AND type = 'fine' AND source IN ('report','no_show')
+           AND status NOT IN ('cancelled','rejected') ORDER BY id DESC""", (shift_id,))]
 
 
 def _require_no_report(shift: dict) -> None:

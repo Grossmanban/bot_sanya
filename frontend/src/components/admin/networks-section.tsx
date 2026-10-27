@@ -246,29 +246,24 @@ function MoveTo({ user, nets, onDone }: { user: User; nets: Network[]; onDone: (
   );
 }
 
-/** Owner only (customer round B): the network's base rate and the trainer's ladder. */
+/** Owner only (customer round B): the trainer's ladder. Employees' rates are personal or common (27.10). */
 function NetworkRates({ net, onChanged }: { net: Network; onChanged: () => void }) {
   const [open, setOpen] = useState(false);
-  const [rate, setRate] = useState(net.rate_base != null ? String(net.rate_base) : "");
   const [steps, setSteps] = useState<{ from: string; rate: string }[]>(
     (net.ladder ?? []).map((s) => ({ from: String(s.from), rate: String(s.rate) })));
   const [period, setPeriod] = useState<"day" | "week">(net.ladder_period ?? "day");
   const [withTrainer, setWithTrainer] = useState(!!net.ladder_counts_trainer);
   const { busy, run } = useAction();
   const ownerLed = !!net.trainer?.is_owner;
-  const summary = [
-    net.rate_base != null ? `ставка ${net.rate_base} ₽` : "общая ставка",
-    ownerLed ? "без тренерских" : (net.ladder?.length ? `лестница: ${net.ladder.map((s) => `от ${s.from} — ${s.rate} ₽`).join(", ")}`
-      : "тренеру — общая комиссия"),
-  ].join(" · ");
+  const summary = ownerLed ? "без тренерских" : (net.ladder?.length ? `лестница: ${net.ladder.map((s) => `от ${s.from} — ${s.rate} ₽`).join(", ")}`
+    : "тренеру — общая комиссия");
 
   async function save() {
     const ladder = steps.filter((s) => s.from !== "" && s.rate !== "").map((s) => ({ from: Number(s.from), rate: Number(s.rate) }));
     try {
       await run("rates", (k) => api.admin.updateNetwork(net.id, {
-        ...(rate ? { rate_base: Number(rate) } : { clear_rate: true }),
         ladder, ladder_period: period, ladder_counts_trainer: withTrainer,
-      }, k), "Ставки сети сохранены");
+      }, k), "Тренерские сети сохранены");
       setOpen(false);
       onChanged();
     } catch {
@@ -281,22 +276,13 @@ function NetworkRates({ net, onChanged }: { net: Network; onChanged: () => void 
       <button className="press flex w-full items-center gap-3 text-left" onClick={() => setOpen((v) => !v)}>
         <span className="grid size-9 place-items-center rounded-xl bg-muted"><Coins className="size-4" /></span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[15px] font-medium">Ставки сети</span>
+          <span className="block text-[15px] font-medium">Тренерские сети</span>
           <span className="block truncate text-xs text-muted-foreground">{summary}</span>
         </span>
         <span className="text-xs font-semibold text-muted-foreground">{open ? "Скрыть" : "Изменить"}</span>
       </button>
       {open && (
         <div className="row-in mt-4 space-y-4">
-          <label className="flex items-center gap-3">
-            <span className="min-w-0 flex-1 text-sm">
-              Ставка сотрудникам сети
-              <span className="block text-xs text-muted-foreground">Пусто — общая; личная ставка сотрудника важнее</span>
-            </span>
-            <input inputMode="numeric" placeholder="общая" value={rate} onChange={(e) => setRate(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                   className="h-10 w-24 rounded-xl border-0 bg-muted px-3 text-sm font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
-          </label>
-
           {ownerLed ? (
             <p className="rounded-xl bg-muted/60 px-3 py-2.5 text-sm text-muted-foreground">Сетью руководит владелец: тренерские не начисляются.</p>
           ) : (

@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
 import { deadlineText } from "../report/report-block";
 import { PhotoPicker, PhotoThumb } from "../report/photo";
 import { PlanFactBar } from "./shortfall";
+import { FineUnits, unitsText } from "../finance/money";
 
-const PRESETS = [500, 1000, 2000];
 const REASONS = {
   fine: ["Не выполнена норма", "Скриншот не подтверждает результат"],
   no_show: ["Не сдан отчёт о смене", "Не вышел на смену"],
@@ -42,6 +42,8 @@ export interface ReportSubject {
   team: TeamDay | null;
   fine_block: string | null;
   fine_pending?: number | null;
+  /** one fine unit in rubles (the person's own rate); absent where the card doesn't know it */
+  unit_rate?: number | null;
 }
 
 export function ReportsSection({ onChanged }: { onChanged: () => void }) {
@@ -343,31 +345,21 @@ function FineForm({ subject, onDone }: { subject: ReportSubject; onDone: () => v
   const n = Number(amount);
   return (
     <Panel>
-      <div className="flex flex-wrap items-center gap-2">
-        {PRESETS.map((p) => (
-          <button key={p} type="button" onClick={() => setAmount(String(p))}
-                  className={cn("press rounded-full px-3.5 py-1.5 text-sm font-semibold", n === p ? "bg-cancel text-white" : "bg-cancel-soft text-cancel")}>
-            {p} ₽
-          </button>
-        ))}
-        <input inputMode="numeric" placeholder="своя сумма" value={amount}
-               onChange={(e) => setAmount(e.target.value.replace(/\D/g, "").slice(0, 7))}
-               className="h-9 w-28 rounded-full border-0 bg-muted px-3 text-sm tabular outline-none focus:ring-2 focus:ring-ring/25" />
-      </div>
+      <FineUnits value={amount} onChange={setAmount} rate={subject.unit_rate} tone="soft" />
       <Reasons list={noShow ? REASONS.no_show : REASONS.fine} value={reason} onPick={setReason} />
       <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 500))} placeholder="Причина штрафа" className={area} />
       <Button className="press h-11 w-full rounded-xl bg-cancel font-semibold text-white hover:bg-cancel/90" disabled={!!busy || !n || !reason.trim()}
               onClick={async () => {
-                const extra = { amount: n, comment: reason.trim() };
+                const extra = { units: n, comment: reason.trim() };
                 try {
                   await run("fine", (k) => noShow ? api.admin.noShow(subject.shift_id, "fine", extra, k)
-                    : api.admin.review(subject.shift_id, "fine", extra, k), `Штраф ${rub(n)} назначен`);
+                    : api.admin.review(subject.shift_id, "fine", extra, k), `Штраф назначен: ${unitsText(n)}`);
                   onDone();
                 } catch {
                   /* toast shown */
                 }
               }}>
-        {busy && <LoaderCircle className="animate-spin" />} {n ? `Штраф ${rub(n)}` : "Выберите сумму"}
+        {busy && <LoaderCircle className="animate-spin" />} {n ? `Штраф: ${n} ед.${subject.unit_rate ? ` = ${rub(n * subject.unit_rate)}` : ""}` : "Сколько единиц"}
       </Button>
     </Panel>
   );

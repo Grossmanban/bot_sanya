@@ -82,23 +82,23 @@ def test_fine_and_waive_are_final_and_validated(conn, make_user):
     violations.scan(conn, 3, MON)
     va, vb = one(conn, a)["id"], one(conn, b)["id"]
 
-    for bad, code in (({"amount": 0}, "bad_amount"), ({"comment": "  "}, "comment_required"),
+    for bad, code in (({"units": 0}, "bad_units"), ({"comment": "  "}, "comment_required"),
                       ({"files": ["f"] * 6}, "too_many_files")):
-        args = {"amount": 500, "comment": "Неявка", "files": [], **bad}
+        args = {"units": 4, "comment": "Неявка", "files": [], **bad}
         with pytest.raises(svc.ServiceError) as e:
-            violations.fine(conn, admin, va, args["amount"], args["comment"], args["files"], svc.new_key())
+            violations.fine(conn, admin, va, args["units"], args["comment"], args["files"], svc.new_key())
         assert e.value.code == code
 
     k = svc.new_key()
-    res = violations.fine(conn, admin, va, 500, "Неявка без предупреждения во вторник.", ["p1", "p2"], k)
+    res = violations.fine(conn, admin, va, 4, "Неявка без предупреждения во вторник.", ["p1", "p2"], k)
     assert res.changed and res.violation["status"] == "penalized"
     tx = res.tx
     assert (tx["type"], tx["status"], tx["source"], tx["amount"], tx["event_date"]) == \
-        ("fine", "active", "attendance", 500, "2026-10-18")
+        ("fine", "active", "attendance", 480, "2026-10-18")  # 4 units × 120 ₽
     assert res.violation["linked_fine_transaction_id"] == tx["id"] and res.violation["resolution_admin_id"] == admin["id"]
     assert violations.media_ids(res.violation) == ["p1", "p2"]
-    assert finance.balance(conn, a["id"])["balance"] == -500
-    assert not violations.fine(conn, admin, va, 500, "x", [], k).changed  # the same click again
+    assert finance.balance(conn, a["id"])["balance"] == -480
+    assert not violations.fine(conn, admin, va, 4, "x", [], k).changed  # the same click again
     with pytest.raises(svc.ServiceError) as e:                              # a second decision
         violations.waive(conn, owner, va, "Передумали", [], svc.new_key())
     assert (e.value.status, e.value.code) == (409, "already_resolved")
@@ -107,7 +107,7 @@ def test_fine_and_waive_are_final_and_validated(conn, make_user):
     assert res.violation["status"] == "waived" and res.violation["linked_fine_transaction_id"] is None
     assert finance.balance(conn, b["id"])["balance"] == 0 and finance.journal(conn, user_id=b["id"]) == []
     with pytest.raises(svc.ServiceError) as e:
-        violations.fine(conn, owner, vb, 500, "Всё-таки штраф", [], svc.new_key())
+        violations.fine(conn, owner, vb, 4, "Всё-таки штраф", [], svc.new_key())
     assert e.value.code == "already_resolved"
     assert [v["id"] for v in violations.listing(conn, owner, "pending")] == []
     assert {v["id"] for v in violations.listing(conn, owner, "resolved")} == {va, vb}
@@ -143,14 +143,14 @@ def test_trainer_scope_and_owner_approval(conn, make_user):
     assert back["status"] == "pending" and back["linked_fine_transaction_id"] is None
     violations.waive(conn, trainer, va, "Согласовано с руководителем", [], svc.new_key())
 
-    res = violations.fine(conn, trainer, vb, 500, "Пропуск", ["proof"], svc.new_key())
+    res = violations.fine(conn, trainer, vb, 4, "Пропуск", ["proof"], svc.new_key())
     ok = finance.decide(conn, owner, res.tx["id"], True, None, svc.new_key())
     n.sent.clear()
     run(n.tx_decided(ok.tx, owner))
     [text] = [t for chat, t in n.sent if chat == b["telegram_id"]]
-    assert "ШТРАФ НАЗНАЧЕН" in text and "-500 ₽" in text
+    assert "ШТРАФ НАЗНАЧЕН" in text and "4 штрафные единицы" in text and "₽" not in text
     assert (b["telegram_id"], ["proof"]) in n.albums
-    assert finance.balance(conn, b["id"])["balance"] == -500
+    assert finance.balance(conn, b["id"])["balance"] == -480
 
 
 def test_messages_to_employee_and_archive(conn, make_user):
@@ -162,11 +162,11 @@ def test_messages_to_employee_and_archive(conn, make_user):
     app_settings.set_raw(conn, "archive_chat_id", "-1001")
     n = Recorder(conn)
 
-    res = violations.fine(conn, owner, one(conn, a)["id"], 500, "Неявка во вторник.", ["s1", "s2"], svc.new_key())
+    res = violations.fine(conn, owner, one(conn, a)["id"], 4, "Неявка во вторник.", ["s1", "s2"], svc.new_key())
     run(n.violation_resolved(res.violation, res.tx, owner))
     [msg] = [t for chat, t in n.sent if chat == a["telegram_id"]]
     for part in ("НАРУШЕНИЕ ГРАФИКА | ШТРАФ НАЗНАЧЕН", "Неделя 42 (12.10 – 18.10)", "Требование: 3 дня",
-                 "Факт: 1 день", "Пропущено: 2 дня", "-500 ₽", "«Неявка во вторник.»", "2 файла — ниже"):
+                 "Факт: 1 день", "Пропущено: 2 дня", "4 штрафные единицы", "«Неявка во вторник.»", "2 файла — ниже"):
         assert part in msg, part
     [arch] = [t for chat, t in n.sent if chat == -1001]
     for part in ("#нарушение #штраф", "ШТРАФ ЗА ПРОПУСК ГРАФИКА", "Назначил: Владелец", "1/3", "МСК"):
@@ -264,11 +264,11 @@ def test_http_endpoints(conn, make_user):
     va, vb = one(conn, a)["id"], one(conn, b)["id"]
 
     file_id = media.save_local(b"\xff\xd8\xff" + b"0" * 100, "jpg")
-    body = {"amount": 500, "comment": "Неявка", "media_files": [file_id], "idempotency_key": key()}
+    body = {"units": 4, "comment": "Неявка", "media_files": [file_id], "idempotency_key": key()}
     assert client.post(f"/api/admin/violations/{va}/fine", json={**body, "comment": ""}, headers=owner_h).status_code == 422
     r = client.post(f"/api/admin/violations/{va}/fine", json=body, headers=owner_h)
     assert r.status_code == 200 and r.json()["violation"]["status"] == "penalized"
-    assert r.json()["violation"]["fine"]["amount"] == 500
+    assert r.json()["violation"]["fine"]["amount"] == 480
     again = client.post(f"/api/admin/violations/{va}/fine", json={**body, "idempotency_key": key()}, headers=owner_h)
     assert again.status_code == 409 and again.json()["code"] == "already_resolved"
     photo = r.json()["violation"]["media"][0]

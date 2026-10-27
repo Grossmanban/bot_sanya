@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Gift, HeartHandshake, LoaderCircle, MinusCircle, Receipt, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { api, type Balance, type Tx, type TxType } from "@/lib/api";
+import { api, type Balance, type MoneySummary, type Tx, type TxType } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction } from "@/lib/hooks";
@@ -88,8 +88,13 @@ export function TxRow({ tx, showName, actions, onChanged }: { tx: Tx; showName?:
           </p>
         </div>
         {tx.media_url && <PhotoThumb src={tx.media_url} className="size-10 rounded-lg" />}
-        <span className={cn("shrink-0 font-display font-semibold tabular", dead ? "text-muted-foreground line-through" : meta.tone)}>
-          {tx.amount != null ? `${meta.sign}${rub(tx.amount)}` : "—"}
+        <span className={cn("shrink-0 text-right font-display font-semibold tabular", dead ? "text-muted-foreground line-through" : meta.tone)}>
+          {tx.type === "fine" && tx.pieces ? (
+            <>
+              {tx.pieces} ед.
+              {tx.amount != null && <span className="block text-xs font-normal text-muted-foreground">{rub(tx.amount)}</span>}
+            </>
+          ) : tx.amount != null ? `${meta.sign}${rub(tx.amount)}` : "—"}
         </span>
       </div>
       {(canCancel || canFill || canForgive) && !mode && (
@@ -164,6 +169,67 @@ function ForgiveForm({ tx, onClose, onDone }: { tx: Tx; onClose: () => void; onD
 }
 
 const PRESETS = [500, 1000, 2000];
+export const UNIT_PRESETS = [1, 3, 5];
+
+/** «3 штрафные единицы» (ТЗ 27.10 §19: fines are counted in units of the person's own rate). */
+export function unitsText(n: number) {
+  const a = n % 10;
+  const b = n % 100;
+  if (a === 1 && b !== 11) return `${n} штрафная единица`;
+  if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return `${n} штрафные единицы`;
+  return `${n} штрафных единиц`;
+}
+
+/** A fine as the employee sees it: units; an old fine from before units — its rubles. */
+export function fineShort(units?: number | null, amount?: number | null) {
+  return units ? unitsText(units) : rub(amount ?? 0);
+}
+
+/** The employee's money (ТЗ 27.10 §19): fine units, no rubles for fines. */
+export function SummaryCard({ summary, className }: { summary: MoneySummary; className?: string }) {
+  return (
+    <section className={cn("rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6", className)}>
+      <p className="text-sm text-hero-muted">Штрафные единицы</p>
+      <p className={cn("font-display text-4xl font-semibold tabular", summary.fine_units > 0 && "text-[#ff8a8a]")}>
+        {summary.fine_units}
+      </p>
+      <dl className="mt-4 grid grid-cols-2 gap-2 text-sm">
+        <div><dt className="text-hero-muted">Бонусы</dt><dd className="font-semibold tabular">{rub(summary.bonuses)}</dd></div>
+        <div><dt className="text-hero-muted">Вычеты</dt><dd className="font-semibold tabular">{rub(summary.deductions)}</dd></div>
+      </dl>
+      <p className="mt-3 text-xs text-hero-muted">
+        Одна единица — твоя ставка за штуку. Удерживается из выплаты.
+        {summary.old_fines > 0 ? ` Ещё ${summary.old_fines} — старые штрафы в рублях, см. список.` : ""}
+      </p>
+    </section>
+  );
+}
+
+/** Fine units: presets 1 / 3 / 5 or any number; with the person's rate known — the rubles for the staff. */
+export function FineUnits({ value, onChange, rate, tone = "cancel" }: {
+  value: string; onChange: (v: string) => void; rate?: number | null; tone?: "cancel" | "soft";
+}) {
+  const n = Number(value);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        {UNIT_PRESETS.map((p) => (
+          <button key={p} type="button" onClick={() => onChange(String(p))}
+                  className={cn("press rounded-full px-3.5 py-1.5 text-sm font-semibold",
+                    n === p ? "bg-cancel text-white" : tone === "soft" ? "bg-cancel-soft text-cancel" : "bg-muted")}>
+            {p} ед.
+          </button>
+        ))}
+        <input inputMode="numeric" aria-label="Штрафных единиц" placeholder="своё число" value={value}
+               onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 4))}
+               className="h-9 w-28 rounded-full border-0 bg-muted px-3 text-sm tabular outline-none focus:ring-2 focus:ring-ring/25" />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Единица = ставка сотрудника за штуку{rate ? ` (${rub(rate)})` : ""}.{n && rate ? ` Итого ${rub(n * rate)} — сотрудник увидит только ${unitsText(n)}.` : " Сотрудник видит только единицы."}
+      </p>
+    </div>
+  );
+}
 
 function AmountForm({ tx, onClose, onDone }: { tx: Tx; onClose: () => void; onDone?: () => void }) {
   const [amount, setAmount] = useState("");
@@ -238,7 +304,8 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
           const out = await api.admin.pieceDeduction({ user_id: userId, day, pieces: n, reason: reason.trim(), media_file_id: media }, k);
           return { tx: out.items[0], trainer: out.items[1] };
         }
-        return { ...(await api.admin.createTx(userId, type, n, reason.trim(), k, media)), trainer: undefined };
+        return { ...(await api.admin.createTx(userId, type, type === "fine" ? { units: n } : { amount: n }, reason.trim(), k, media)),
+          trainer: undefined };
       });
       if (res && pieceMode) {
         toast.success(`Вычет ${n} шт.: ${rub(res.tx.amount ?? 0)}` + (res.trainer ? `, тренеру ${rub(res.trainer.amount ?? 0)}` : ""));
@@ -247,7 +314,8 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
         setPhoto(null);
         onDone?.();
       } else if (res) {
-        toast.success(res.tx.status === "pending_admin_approval" ? "Заявка на штраф отправлена на согласование администраторам" : `${TYPE_META[type].label} ${rub(n)} начислен`);
+        toast.success(res.tx.status === "pending_admin_approval" ? "Заявка на штраф отправлена на согласование администраторам"
+          : type === "fine" ? `Штраф: ${unitsText(n)} = ${rub(res.tx.amount ?? 0)}` : `${TYPE_META[type].label} ${rub(n)} начислен`);
         setAmount("");
         setReason("");
         setPhoto(null);
@@ -293,6 +361,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
           </p>
         </div>
       )}
+      {type === "fine" ? <FineUnits value={amount} onChange={setAmount} /> : (
       <div className="flex flex-wrap items-center gap-2">
         {(pieceMode ? [1, 3, 5, 10] : type === "bonus" ? [300, 500, 1000] : PRESETS).map((p) => (
           <button key={p} onClick={() => setAmount(String(p))}
@@ -304,6 +373,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
         <input inputMode="numeric" className={cn(input, "w-28 flex-none")} placeholder={pieceMode ? "штук" : "своя сумма"} value={amount}
                onChange={(e) => setAmount(e.target.value.replace(/\D/g, "").slice(0, 7))} />
       </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {QUICK_REASONS[type].map((r) => (
           <button key={r} onClick={() => setReason(r)}
@@ -321,8 +391,9 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
               disabled={!!busy || !n || !reason.trim()} onClick={submit}>
         {busy && <LoaderCircle className="animate-spin" />}
         {n
-          ? pieceMode ? `Вычет ${n} шт.` : `${type === "fine" && !canFine ? "Запросить штраф" : TYPE_META[type].label} ${rub(n)}`
-          : pieceMode ? "Сколько штук" : "Выберите сумму"}
+          ? pieceMode ? `Вычет ${n} шт.` : type === "fine" ? `${canFine ? "Штраф" : "Запросить штраф"}: ${n} ед.`
+            : `${TYPE_META[type].label} ${rub(n)}`
+          : pieceMode ? "Сколько штук" : type === "fine" ? "Сколько единиц" : "Выберите сумму"}
       </Button>
     </div>
   );

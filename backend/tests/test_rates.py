@@ -44,11 +44,10 @@ def calc(conn, d_from=WEEK[0], d_to=WEEK[-1], **common):
 
 def test_rate_hierarchy(conn, team):
     owner = team["owner"]
-    networks.set_rates(conn, owner, team["north"]["id"], {"rate_base": 130}, svc.new_key())
     rates.set_user_rates(conn, owner, team["petya"]["id"], {"personal_rate": 150}, svc.new_key())
     book = rates.Book.load(conn)
     assert book.day_rate(team["masha"]["id"], 25) == 120      # common
-    assert book.day_rate(team["ivan"]["id"], 25) == 130       # network
+    assert book.day_rate(team["ivan"]["id"], 25) == 120       # in a network — still the common rate (ТЗ 27.10: no network rates)
     assert book.day_rate(team["petya"]["id"], 25) == 150      # personal
     assert book.day_rate(team["petya"]["id"], 10) == 100      # «налог на лень» applies to personal rates too
     rates.set_user_rates(conn, owner, team["petya"]["id"], {"lazy_exempt": True}, svc.new_key())

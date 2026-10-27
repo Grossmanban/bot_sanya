@@ -25,7 +25,7 @@ from . import permissions as perms
 from . import services as svc
 from .config import settings
 from .db import transaction
-from .services import ACTIVE, MAX_PENALTY, MAX_VOLUME, ServiceError, _check_key, _fresh_actor, _seen, log_event
+from .services import ACTIVE, MAX_VOLUME, ServiceError, _check_key, _fresh_actor, _seen, log_event
 from .timeutil import now_iso, now_local
 
 GRACE = timedelta(hours=2)
@@ -129,9 +129,11 @@ def view(conn: sqlite3.Connection, shift: dict, now: datetime | None = None) -> 
 def _fine_view(conn, shift: dict) -> dict:
     """fine — counted in the balance; fine_pending — a trainer's fine waiting for an owner."""
     txs = finance.linked(conn, shift["id"], ("report", "no_show"))
-    active = next((t["amount"] for t in txs if t["status"] in ("active", "paid", "offset")), None)
-    pending = next((t["amount"] for t in txs if t["status"] == "pending_admin_approval"), None)
-    return {"fine": active, "fine_pending": pending}
+    active = next((t for t in txs if t["status"] in ("active", "paid", "offset")), None)
+    pending = next((t for t in txs if t["status"] == "pending_admin_approval"), None)
+    # rubles for the staff, units for the employee (ТЗ 27.10 §19); an old fine has no units
+    return {"fine": active["amount"] if active else None, "fine_pending": pending["amount"] if pending else None,
+            "fine_units": active["pieces"] if active else None, "fine_pending_units": pending["pieces"] if pending else None}
 
 
 def _queue_row(conn, s: dict) -> dict:
@@ -155,6 +157,7 @@ def _queue_row(conn, s: dict) -> dict:
         "attempts": [public_report(r) for r in attempts(conn, s["id"])],
         "team": day_actual.team_view(conn, s["shift_date"]),
         "fine_block": day_actual.shortfall_fine_block(conn, s),
+        "unit_rate": finance.unit_rate(conn, s["user_id"]),  # one fine unit in rubles, for the staff's form
     }
 
 
@@ -276,12 +279,6 @@ def _comment(text: str | None, required: bool, what: str) -> str | None:
     return text or None
 
 
-def _amount(amount) -> int:
-    if isinstance(amount, bool) or not isinstance(amount, int) or not 0 < amount <= MAX_PENALTY:
-        raise ServiceError("Некорректная сумма штрафа", 422, "bad_penalty")
-    return amount
-
-
 def _staff_shift(conn, actor: dict, shift_id: int, capability: str) -> tuple[dict, dict]:
     actor = _fresh_actor(conn, actor)
     shift = svc.get_shift(conn, shift_id)
@@ -296,20 +293,21 @@ def _staff_shift(conn, actor: dict, shift_id: int, capability: str) -> tuple[dic
     return actor, shift
 
 
-def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, key: str, amount: int | None = None,
+def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, key: str, units: int | None = None,
            comment: str | None = None) -> ReportResult:
-    """approve | return (comment) | fine (amount + reason). Staff may also overturn an approved report."""
+    """approve | return (comment) | fine (units + reason). Staff may also overturn an approved report."""
     if action not in ("approve", "return", "fine"):
         raise ServiceError("Неизвестное действие", 422, "bad_action")
     _check_key(key)
     comment = _comment(comment, action != "approve", "комментарий" if action == "return" else "причину штрафа")
     if action == "fine":
-        amount = _amount(amount)
+        units = finance.units_of(units)
     with transaction(conn):
         if _seen(conn, key):
             shift = svc.get_shift(conn, shift_id)
             return ReportResult(shift, latest(conn, shift_id), False)
         actor, shift = _staff_shift(conn, actor, shift_id, "review")
+        amount = units * finance.unit_rate(conn, shift["user_id"]) if action == "fine" else None
         fine_status = finance.fine_status(actor, svc.get_user(conn, shift["user_id"])) if action == "fine" else None
         report = latest(conn, shift_id)
         if report is None or shift["report_state"] not in REVIEWABLE:
@@ -336,30 +334,32 @@ def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, ke
              actor["telegram_id"] if decided else None, now_iso() if decided else None, now_iso(), shift_id),
         )
         if action == "fine":
-            finance.link_fine(conn, svc.get_shift(conn, shift_id), "report", amount,
+            finance.link_fine(conn, svc.get_shift(conn, shift_id), "report", units,
                               svc.report_fine_reason(svc.get_shift(conn, shift_id)), actor["telegram_id"], fine_status)
         else:
             finance.cancel_linked(conn, shift_id, ("report",), actor["telegram_id"], "Отчёт принят")
         event = {"approve": "REPORT_APPROVED", "return": "REPORT_RETURNED", "fine": "REPORT_FINED"}[action]
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, old={"report_state": shift["report_state"]},
-                  new={"report_state": state, "penalty": amount if action == "fine" else None}, description=comment)
+                  new={"report_state": state, "penalty": amount, "units": units if action == "fine" else None},
+                  description=comment)
     return ReportResult(svc.get_shift(conn, shift_id), get_report(conn, report["id"]), True, event)
 
 
 def resolve_no_show(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, key: str,
-                    amount: int | None = None, comment: str | None = None) -> ReportResult:
-    """ТЗ 3.3 path A: fine (amount + reason), or excuse without a fine (reason)."""
+                    units: int | None = None, comment: str | None = None) -> ReportResult:
+    """ТЗ 3.3 path A: fine (units + reason), or excuse without a fine (reason)."""
     if action not in ("fine", "excuse"):
         raise ServiceError("Неизвестное действие", 422, "bad_action")
     _check_key(key)
     comment = _comment(comment, True, "причину")
     if action == "fine":
-        amount = _amount(amount)
+        units = finance.units_of(units)
     with transaction(conn):
         if _seen(conn, key):
             return ReportResult(svc.get_shift(conn, shift_id), None, False)
         actor, shift = _staff_shift(conn, actor, shift_id, "review")
+        amount = units * finance.unit_rate(conn, shift["user_id"]) if action == "fine" else None
         fine_status = finance.fine_status(actor, svc.get_user(conn, shift["user_id"])) if action == "fine" else None
         if shift["report_state"] != "no_show":
             raise ServiceError("Смена не отмечена как неявка", 409, "not_no_show")
@@ -372,11 +372,12 @@ def resolve_no_show(conn: sqlite3.Connection, actor: dict, shift_id: int, action
              now_iso(), comment, now_iso(), shift_id),
         )
         if action == "fine":
-            finance.link_fine(conn, svc.get_shift(conn, shift_id), "no_show", amount,
+            finance.link_fine(conn, svc.get_shift(conn, shift_id), "no_show", units,
                               svc.report_fine_reason(svc.get_shift(conn, shift_id)), actor["telegram_id"], fine_status)
         event = "NO_SHOW_FINED" if action == "fine" else "NO_SHOW_EXCUSED"
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
-                  shift_id=shift_id, new={"penalty": amount if action == "fine" else None}, description=comment)
+                  shift_id=shift_id, new={"penalty": amount, "units": units if action == "fine" else None},
+                  description=comment)
     return ReportResult(svc.get_shift(conn, shift_id), None, True, event)
 
 

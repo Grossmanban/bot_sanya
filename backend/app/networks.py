@@ -49,7 +49,7 @@ def listing(conn: sqlite3.Connection, viewer: dict, include_archived: bool = Fal
             "trainer": {"id": trainer["id"], "name": svc.full_name(trainer), "username": trainer["username"],
                         "telegram_id": trainer["telegram_id"], "is_owner": perms.is_owner(trainer)} if trainer else None,
             # rates are money: owners only (customer round B)
-            **({"rate_base": n["rate_base"], "ladder": rates.parse_ladder(n["ladder"]), "ladder_period": n["ladder_period"],
+            **({"ladder": rates.parse_ladder(n["ladder"]), "ladder_period": n["ladder_period"],
                 "ladder_counts_trainer": bool(n["ladder_counts_trainer"])} if perms.can(viewer, "money") else {}),
             "members": [{"id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
                          "role": perms.role_of(u), "work_status": u["work_status"], "account_state": u["account_state"],
@@ -181,15 +181,10 @@ def set_trainer(conn: sqlite3.Connection, actor: dict, network_id: int, user_id:
 
 
 def set_rates(conn: sqlite3.Connection, actor: dict, network_id: int, changes: dict, key: str) -> dict:
-    """Owner: the network's base rate (None = the common one) and the trainer's ladder (customer round B)."""
+    """Owner: the trainer's ladder (customer round B). Networks no longer have their own employees' rate (27.10)."""
     from . import rates
 
     fields = {}
-    if "rate_base" in changes:
-        v = changes["rate_base"]
-        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= rates.MAX_RATE):
-            raise ServiceError("Ставка — целое число рублей", 422, "bad_rate")
-        fields["rate_base"] = v
     if "ladder" in changes:
         fields["ladder"] = rates.validate_ladder(changes["ladder"])
     if "ladder_period" in changes:

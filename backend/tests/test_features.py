@@ -168,24 +168,28 @@ def test_report_review_return_and_fine(conn, make_user):
     assert again.report["attempt"] == 2 and again.shift["report_state"] == "pending_review"
 
     with pytest.raises(svc.ServiceError) as e:  # no fine for a shortfall before the day's global actual
-        reports.review(conn, owner, s["id"], "fine", svc.new_key(), amount=700, comment="Не выполнена норма")
+        reports.review(conn, owner, s["id"], "fine", svc.new_key(), units=5, comment="Не выполнена норма")
     assert e.value.code == "shortfall_fine_blocked"
     day_actual.set_actual(conn, owner, THU, 10, svc.new_key(), today=THU + timedelta(days=2))  # team missed the plan
-    fined = reports.review(conn, owner, s["id"], "fine", svc.new_key(), amount=700, comment="Не выполнена норма")
-    assert fined.shift["report_state"] == "rejected" and fined.shift["shortfall_penalty"] == 700
+    fined = reports.review(conn, owner, s["id"], "fine", svc.new_key(), units=5, comment="Не выполнена норма")
+    assert fined.shift["report_state"] == "rejected" and fined.shift["shortfall_penalty"] == 600
+    # the employee's card: units, no rubles; the staff's day view keeps both (ТЗ 27.10 §19)
+    card = svc.serialize_shift(fined.shift, THU, conn)
+    assert (card["shortfall_units"], card["shortfall_penalty"], card["report"]["fine_units"], card["report"]["fine"]) == (5, None, 5, None)
+    assert svc.serialize_shift(fined.shift, THU, conn, staff=True)["report"]["fine"] == 600
     run(n.report_reviewed(fined.shift, fined.report, owner))
-    assert any("штраф 700 ₽" in t for chat, t in n.sent if chat == u["telegram_id"])
+    assert any("5 штрафных единиц" in t for chat, t in n.sent if chat == u["telegram_id"])
     assert [r["status"] for r in reports.attempts(conn, s["id"])] == ["rejected_retry", "rejected_penalty"]
 
     penalties = svc.user_penalties(conn, u["id"])
-    assert penalties[0]["kind"] == "report" and penalties[0]["penalty_amount"] == 700
+    assert penalties[0]["kind"] == "report" and penalties[0]["penalty_amount"] == 600
     assert "Не выполнена норма" in penalties[0]["reason"]
     st = svc.stats(conn, u["id"], TODAY, THU)
-    assert st["totals"]["penalties"] == 700 and st["totals"]["shortfall_volume"] == 6
+    assert st["totals"]["penalties"] == 600 and st["totals"]["shortfall_volume"] == 6
     wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
     header = list(wb["Итоги"].iter_rows(values_only=True))[0]
     row = list(wb["Итоги"].iter_rows(values_only=True))[1]
-    assert row[header.index("Недобор, шт.")] == 6 and row[header.index("Штрафы, ₽")] == 700
+    assert row[header.index("Недобор, шт.")] == 6 and row[header.index("Штрафы, ₽")] == 600
 
 
 def test_report_permissions(conn, make_user):
@@ -239,8 +243,8 @@ def test_no_show_reminder_and_resolution(conn, make_user):
     assert e.value.code == "deadline_passed"
 
     assert reports.queue(conn, "no_show")[0]["shift_id"] == s["id"]
-    fined = reports.resolve_no_show(conn, owner, s["id"], "fine", svc.new_key(), amount=1000, comment="Не вышел")
-    assert fined.shift["shortfall_penalty"] == 1000 and reports.queue(conn, "no_show") == []
+    fined = reports.resolve_no_show(conn, owner, s["id"], "fine", svc.new_key(), units=8, comment="Не вышел")
+    assert fined.shift["shortfall_penalty"] == 960 and reports.queue(conn, "no_show") == []
     assert svc.user_penalties(conn, u["id"])[0]["reason"].startswith("Неявка")
     # path B: staff enter the result themselves — the fine is cleared, the shift approved
     fixed = reports.manual_result(conn, owner, s["id"], 25, svc.new_key(), comment="Был на точке, скрин в чате")
@@ -475,7 +479,7 @@ def test_global_actual_recalculation(conn, make_user):
     # the team missed the plan: below-plan reports stay for manual review, fines allowed
     miss = day_actual.set_actual(conn, owner, THU, 50, svc.new_key(), today=later)
     assert miss.changed and not miss.row["met"] and miss.approved == []
-    reports.review(conn, owner, sb["id"], "fine", svc.new_key(), amount=500, comment="Не выполнена норма")
+    reports.review(conn, owner, sb["id"], "fine", svc.new_key(), units=4, comment="Не выполнена норма")
     assert svc.get_shift(conn, sa["id"])["report_state"] == "pending_review"
 
     # corrected upwards: the team met it → pending approved, the fine offered for annulment
@@ -494,11 +498,11 @@ def test_global_actual_recalculation(conn, make_user):
     late = report(conn, c, sc, 5, now=at(THU, "21:00"))
     assert late.report["status"] == "approved_team" and late.shift["report_state"] == "approved"
     with pytest.raises(svc.ServiceError) as e:
-        reports.review(conn, owner, sc["id"], "fine", svc.new_key(), amount=500, comment="x")
+        reports.review(conn, owner, sc["id"], "fine", svc.new_key(), units=4, comment="x")
     assert "выполнила" in e.value.message
 
     done = day_actual.annul_fines(conn, owner, THU, None, svc.new_key())
-    assert [s["id"] for s in done] == [sb["id"]] and done[0]["annulled_amount"] == 500
+    assert [s["id"] for s in done] == [sb["id"]] and done[0]["annulled_amount"] == 480
     assert svc.get_shift(conn, sb["id"])["shortfall_penalty"] is None
     assert [p["status"] for p in svc.user_penalties(conn, b["id"])] == ["cancelled"]
     run(n.fines_annulled(done, owner))
@@ -603,26 +607,26 @@ def test_trainer_fine_needs_approval_and_balance(conn, make_user):
     conn.execute("UPDATE users SET network_id = 1 WHERE id = ?", (u["id"],))
     stranger = make_user(first="Чужой")
 
-    req = finance.create(conn, trainer, u["id"], "fine", 500, "Опоздал", svc.new_key())
+    req = finance.create(conn, trainer, u["id"], "fine", None, "Опоздал", svc.new_key(), units=4)
     assert req.tx["status"] == "pending_admin_approval" and finance.balance(conn, u["id"])["balance"] == 0
     with pytest.raises(svc.ServiceError):  # not their network
-        finance.create(conn, trainer, stranger["id"], "fine", 500, "x", svc.new_key())
+        finance.create(conn, trainer, stranger["id"], "fine", None, "x", svc.new_key(), units=4)
     with pytest.raises(svc.ServiceError) as e:  # owners and admins decide, not trainers
         finance.decide(conn, trainer, req.tx["id"], True, None, svc.new_key())
     assert e.value.status == 403
     ok = finance.decide(conn, admin, req.tx["id"], True, None, svc.new_key())
-    assert ok.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -500
+    assert ok.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -480
 
     bonus = finance.create(conn, trainer, u["id"], "bonus", 300, "Лучший день", svc.new_key())
-    assert bonus.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -200
+    assert bonus.tx["status"] == "active" and finance.balance(conn, u["id"])["balance"] == -180
     with pytest.raises(svc.ServiceError) as e:
         finance.create(conn, admin, u["id"], "deduction", 100, "Форма", svc.new_key())
     assert e.value.code == "owner_only"
     finance.create(conn, owner, u["id"], "deduction", 100, "Форма", svc.new_key())
-    assert finance.balance(conn, u["id"]) | {} == {"fines": 500, "bonuses": 300, "deductions": 100, "balance": -300,
+    assert finance.balance(conn, u["id"]) | {} == {"fines": 480, "bonuses": 300, "deductions": 100, "balance": -280,
                                                      "pending": 0, "drafts": 0}
 
-    declined = finance.create(conn, trainer, u["id"], "fine", 700, "Спорно", svc.new_key())
+    declined = finance.create(conn, trainer, u["id"], "fine", None, "Спорно", svc.new_key(), units=5)
     finance.decide(conn, owner, declined.tx["id"], False, "Нет доказательств", svc.new_key())
     assert finance.get(conn, declined.tx["id"])["status"] == "rejected"
 
@@ -634,7 +638,7 @@ def test_trainer_fine_needs_approval_and_balance(conn, make_user):
         finance.pay_all(conn, admin, u["id"], svc.new_key())
     assert e.value.status == 403
     paid = finance.pay_all(conn, owner, u["id"], svc.new_key())
-    assert [p["amount"] for p in paid] == [500]
+    assert [p["amount"] for p in paid] == [480]
     assert finance.balance(conn, u["id"])["fines"] == 0 and finance.balance(conn, u["id"])["deductions"] == 100
 
     people = finance.summary(conn, only={u["id"]})
@@ -655,11 +659,11 @@ def test_trainer_report_fine_waits_and_reject_clears_it(conn, make_user):
     s = shift(conn, u, payload={**P, "volume": 20})
     report(conn, u, s, 10)
     day_actual.set_actual(conn, owner, THU, 5, svc.new_key(), today=THU)
-    res = reports.review(conn, trainer, s["id"], "fine", svc.new_key(), amount=500, comment="Не выполнена норма")
+    res = reports.review(conn, trainer, s["id"], "fine", svc.new_key(), units=4, comment="Не выполнена норма")
     [tx] = finance.linked(conn, s["id"], ("report",))
     assert tx["status"] == "pending_admin_approval" and finance.balance(conn, u["id"])["balance"] == 0
     view = reports.view(conn, res.shift)
-    assert view["fine"] is None and view["fine_pending"] == 500
+    assert view["fine"] is None and view["fine_pending"] == 480 and view["fine_pending_units"] == 4
     finance.decide(conn, owner, tx["id"], False, None, svc.new_key())
     shift_now = svc.get_shift(conn, s["id"])
     assert shift_now["shortfall_status"] == "waived" and shift_now["shortfall_penalty"] is None
@@ -824,20 +828,20 @@ def test_payout_calculation_and_commit(conn, make_user):
     approved(conn, a, s2, 12, now=at(THU + timedelta(days=1), "19:30"))  # approved, lazy: 12 × 100
     sb = shift(conn, b)
     report(conn, b, sb, 10)                                     # below plan, not approved → not paid
-    finance.create(conn, owner, a["id"], "fine", 500, "Опоздание", svc.new_key(), event_date=THU)
+    finance.create(conn, owner, a["id"], "fine", None, "Опоздание", svc.new_key(), event_date=THU, units=4)  # 4 × 120
     finance.create(conn, owner, a["id"], "bonus", 300, "Помощь", svc.new_key(), event_date=THU)
     finance.create(conn, owner, a["id"], "deduction", 200, "Форма", svc.new_key())
-    finance.create(conn, owner, b["id"], "fine", 2000, "Поломка", svc.new_key(), event_date=THU)
+    finance.create(conn, owner, b["id"], "fine", None, "Поломка", svc.new_key(), event_date=THU, units=17)  # 17 × 120
 
     rates = payouts.Rates.from_dict(None)
     rows = {r["name"].split()[0]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), rates)}
     ra = rows["Аня"]
     assert ra["personal_volume"] == 42 and ra["base_calc"] == 30 * 120 + 12 * 100
-    assert (ra["bonuses"], ra["fines"], ra["deductions"]) == (300, 500, 200)
-    assert ra["total"] == 4800 + 300 - 500 - 200 and ra["bank"] == "Сбербанк"
+    assert (ra["bonuses"], ra["fines"], ra["deductions"]) == (300, 480, 200)
+    assert ra["total"] == 4800 + 300 - 480 - 200 and ra["bank"] == "Сбербанк"
     assert rows["Тренер"]["team_volume"] == 42 and rows["Тренер"]["base_calc"] == 42 * 10
     rb = rows["Боря"]  # no approved work: the fine doesn't fit, the debt is kept, nothing negative
-    assert rb["total"] == 0 and rb["fines"] == 0 and rb["carried_debt"] == 2000
+    assert rb["total"] == 0 and rb["fines"] == 0 and rb["carried_debt"] == 2040
 
     # a custom commission and a base override for a bonus
     custom = payouts.Rates.from_dict({"trainer_commission": 20})
@@ -850,13 +854,13 @@ def test_payout_calculation_and_commit(conn, make_user):
                            [{"user_id": a["id"]}, {"user_id": b["id"]}, {"user_id": trainer["id"], "base_override": 1000}],
                            ["proof-1"], [], svc.new_key())
     items = {i["name"].split()[0]: i for i in batch["items"]}
-    assert items["Аня"]["total"] == 4400 and items["Тренер"]["base"] == 1000 and items["Боря"]["carried_debt"] == 2000
-    assert batch["total"] == 4400 + 1000 and batch["proof_media"] == ["proof-1"]
+    assert items["Аня"]["total"] == 4420 and items["Тренер"]["base"] == 1000 and items["Боря"]["carried_debt"] == 2040
+    assert batch["total"] == 4420 + 1000 and batch["proof_media"] == ["proof-1"]
     assert finance.balance(conn, a["id"])["balance"] == 0  # fine, bonus and deduction settled
     assert [t["status"] for t in finance.journal(conn, user_id=a["id"])] == ["offset", "offset", "offset"]
-    assert finance.balance(conn, b["id"])["fines"] == 2000  # the debt stays for the next payout
+    assert finance.balance(conn, b["id"])["fines"] == 2040  # the debt stays for the next payout
     text = payouts.bank_text(batch)
-    assert "Сбербанк:" in text and "Анна Аня — +7 900 111-22-33 — 4400 ₽" in text and "Всего к выплате: 5400 ₽" in text
+    assert "Сбербанк:" in text and "Анна Аня — +7 900 111-22-33 — 4420 ₽" in text and "Всего к выплате: 5420 ₽" in text
 
     from app import export
     wb = load_workbook(io.BytesIO(export.payout_xlsx(batch)))
@@ -1206,8 +1210,8 @@ def test_forgive_fines_trainer_and_admin_reason_optional(conn, make_user):
     u = make_user(first="Иван")
     conn.execute("UPDATE users SET network_id = 1 WHERE id = ?", (u["id"],))
     stranger = make_user(first="Чужой")
-    mine = finance.create(conn, admin, u["id"], "fine", 500, "Опоздал", svc.new_key()).tx
-    theirs = finance.create(conn, admin, stranger["id"], "fine", 300, "Опоздал", svc.new_key()).tx
+    mine = finance.create(conn, admin, u["id"], "fine", None, "Опоздал", svc.new_key(), units=5).tx
+    theirs = finance.create(conn, admin, stranger["id"], "fine", None, "Опоздал", svc.new_key(), units=3).tx
     bonus = finance.create(conn, admin, u["id"], "bonus", 200, "Молодец", svc.new_key()).tx
     with pytest.raises(svc.ServiceError) as e:  # not their network
         finance.forgive(conn, trainer, theirs["id"], None, svc.new_key())
@@ -1223,12 +1227,13 @@ def test_forgive_fines_trainer_and_admin_reason_optional(conn, make_user):
     with_reason = finance.forgive(conn, admin, theirs["id"], "Больничный", svc.new_key())
     assert with_reason.tx["decision_comment"] == "Прощён: Больничный"
     # a trainer's request waiting for approval can be forgiven too; the employee isn't told about it
-    req = finance.create(conn, trainer, u["id"], "fine", 400, "Спорно", svc.new_key()).tx
+    req = finance.create(conn, trainer, u["id"], "fine", None, "Спорно", svc.new_key(), units=4).tx
     n = FakeNotifier(conn)
     run(n.tx_forgiven(finance.forgive(conn, trainer, req["id"], None, svc.new_key()).tx, trainer,
                       "pending_admin_approval", None))
     assert not any(chat == u["telegram_id"] for chat, _ in n.sent)
     n.sent.clear()
-    fresh = finance.create(conn, owner, u["id"], "fine", 100, "Мусор", svc.new_key()).tx
+    fresh = finance.create(conn, owner, u["id"], "fine", None, "Мусор", svc.new_key(), units=1).tx
     run(n.tx_forgiven(finance.forgive(conn, admin, fresh["id"], "Убрал сам", svc.new_key()).tx, admin, "active", "Убрал сам"))
     assert any(chat == u["telegram_id"] and "прощён" in t and "Убрал сам" in t for chat, t in n.sent)
+

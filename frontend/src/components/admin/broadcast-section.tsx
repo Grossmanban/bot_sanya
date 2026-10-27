@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { BellRing, Check, CheckCheck, ChevronDown, ChevronRight, Film, FlaskConical, ImageIcon, LoaderCircle, MessageSquareReply, Pencil, Plus, Search, Send, Trash2, X } from "lucide-react";
+import { BellRing, Check, CheckCheck, ChevronDown, ChevronRight, Film, FlaskConical, ImageIcon, LoaderCircle, MessageSquareReply, Pencil, Plus, Search, Send, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,

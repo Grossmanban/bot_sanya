@@ -14,11 +14,11 @@ import { tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
+import { FineUnits } from "../finance/money";
 import { Uploads } from "../finance/payouts-section";
 import { PhotoThumb } from "../report/photo";
 
 const field = "w-full rounded-2xl border-0 bg-muted px-4 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
-const PRESETS = [500, 1000, 2000];
 const EXCUSES = ["Больничный лист предоставлен", "Согласовано с руководителем", "Технический простой"];
 
 const days = (n: number) => `${n} ${plural(n, "день", "дня", "дней")}`;
@@ -230,7 +230,7 @@ function DecisionDrawer({ open, onClose, onDone }: {
 function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive"; onDone: () => void }) {
   const fine = mode === "fine";
   const direct = useCan("fine_direct");
-  const [amount, setAmount] = useState(fine && v.suggested_amount ? String(v.suggested_amount) : "");
+  const [amount, setAmount] = useState(fine && v.suggested_units ? String(v.suggested_units) : "");
   const [comment, setComment] = useState(fine ? v.default_comment : "");
   const [files, setFiles] = useState<string[]>([]);
   const [sent, setSent] = useState(false);
@@ -242,7 +242,7 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
   async function submit() {
     try {
       await run(mode, (k) => fine
-        ? api.admin.fineViolation(v.id, { amount: sum, comment: comment.trim(), media_files: files }, k)
+        ? api.admin.fineViolation(v.id, { units: sum, comment: comment.trim(), media_files: files }, k)
         : api.admin.waiveViolation(v.id, { comment: comment.trim(), media_files: files }, k),
       fine ? (direct ? "Штраф назначен, сотрудник получил уведомление" : "Штраф отправлен на согласование администраторам")
         : "Нарушение снято, сотрудник получил уведомление");
@@ -257,24 +257,11 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
     <div className="mt-5 space-y-5 pb-4">
       {fine && (
         <div>
-          <p className="mb-2 text-sm font-semibold">Сумма штрафа</p>
-          <div className="relative">
-            <input inputMode="numeric" className={cn(field, "h-12 pr-10 font-display text-lg font-semibold tabular placeholder:font-sans placeholder:text-[15px] placeholder:font-normal")}
-                   placeholder="Например, 500" value={amount} onChange={(e) => setAmount(e.target.value.replace(/\D/g, "").slice(0, 7))} />
-            <span className="absolute top-1/2 right-4 -translate-y-1/2 text-muted-foreground">₽</span>
-          </div>
-          {v.suggested_units && v.suggested_amount ? (
-            <p className="mt-1.5 text-xs text-muted-foreground">
-              За неотмеченный день — {v.suggested_units} штрафные единицы × ставка сотрудника = {rub(v.suggested_amount)}
-            </p>
+          <p className="mb-2 text-sm font-semibold">Штрафные единицы</p>
+          <FineUnits value={amount} onChange={(x) => { tapHaptic(); setAmount(x); }} rate={v.unit_rate} />
+          {v.suggested_units ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">За неотмеченный день по правилам — {v.suggested_units} ед.</p>
           ) : null}
-          <div className="mt-2 flex gap-2">
-            {PRESETS.map((p) => (
-              <button key={p} onClick={() => { tapHaptic(); setAmount(String(p)); }}
-                      className={cn("press h-9 rounded-xl px-3 text-sm font-semibold tabular",
-                        sum === p ? "bg-primary text-primary-foreground" : "bg-muted")}>{rub(p)}</button>
-            ))}
-          </div>
         </div>
       )}
 
@@ -307,7 +294,7 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
                 fine ? "bg-cancel text-white hover:bg-cancel/90" : "bg-go text-white hover:bg-go/90")}
               disabled={!ready || !!busy || sent} onClick={submit}>
         {busy ? <LoaderCircle className="animate-spin" /> : fine ? <Wallet /> : <CheckCircle2 />}
-        {fine ? `Подтвердить штраф${sum > 0 ? ` ${rub(sum)}` : ""}` : "Подтвердить снятие"}
+        {fine ? `Подтвердить штраф${sum > 0 ? `: ${sum} ед.${v.unit_rate ? ` = ${rub(sum * v.unit_rate)}` : ""}` : ""}` : "Подтвердить снятие"}
       </Button>
     </div>
   );

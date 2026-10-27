@@ -273,7 +273,7 @@ def violation_text(v: dict, user: dict, tx: dict | None) -> str:
         missed = max(0, req - act)
         return ("⚠️ <b>НАРУШЕНИЕ ГРАФИКА | ШТРАФ НАЗНАЧЕН</b>\n\n" + head + stats +
                 ("\n\n" if unmarked else f"\n• Пропущено: {missed} {violations.days_word(missed)}\n\n") +
-                f"💰 Сумма штрафа: <b>-{tx['amount']} ₽</b>\n{comment}\n"
+                f"💰 Штраф: <b>{finance.units_text(tx) or 'назначен'}</b>\n{comment}\n"
                 f"📎 Доказательства: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
                 "ℹ️ Ваш текущий баланс обновлён. Пожалуйста, ознакомьтесь с правилами выхода на работу.")
     return ("✅ <b>НАРУШЕНИЕ ГРАФИКА | СНЯТО АДМИНИСТРАЦИЕЙ</b>\n\n" + head + stats +
@@ -293,7 +293,7 @@ def violation_archive_text(v: dict, user: dict, resolver: dict, tx: dict | None,
     if v["status"] == "penalized":
         approved = f"\n✅ Одобрил: {name_handle(approver)}" if approver else ""
         return (f"❌ <b>ШТРАФ ЗА ПРОПУСК ГРАФИКА</b>\n👤 Кто: {name_handle(user)}\n"
-                f"👮‍♂️ Назначил: {role} {name_handle(resolver)}{approved}\n💰 Сумма: -{tx['amount']} ₽\n"
+                f"👮‍♂️ Назначил: {role} {name_handle(resolver)}{approved}\n💰 Сумма: -{finance.staff_text(tx)}\n"
                 f"📝 Причина: {escape(reason)}. {escape(v['resolution_comment'] or '')}\n"
                 f"{media_line}\n⏱ Время: {stamp()}")
     return (f"☑️ <b>НАРУШЕНИЕ ПОГАШЕНО (БЕЗ ШТРАФА)</b>\n👤 Кто: {name_handle(user)}\n"
@@ -308,8 +308,8 @@ def review_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarku
     rows = [[InlineKeyboardButton(text="✅ Принять", callback_data=f"rv:a:{shift_id}"),
              InlineKeyboardButton(text="🔄 На исправление", callback_data=f"rv:r:{shift_id}")]]
     if can_fine:
-        rows.append([InlineKeyboardButton(text=f"⚠️ {a} ₽", callback_data=f"rv:f:{shift_id}:{a}") for a in PENALTY_PRESETS])
-        rows.append([InlineKeyboardButton(text="⚠️ Штраф — своя сумма", callback_data=f"rv:f:{shift_id}:c")])
+        rows.append([InlineKeyboardButton(text=f"⚠️ {a} ед.", callback_data=f"rv:f:{shift_id}:{a}") for a in finance.UNIT_PRESETS])
+        rows.append([InlineKeyboardButton(text="⚠️ Штраф — своё число единиц", callback_data=f"rv:f:{shift_id}:c")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -349,8 +349,8 @@ def fine_decision_keyboard(tx_id: int) -> InlineKeyboardMarkup:
 def no_show_keyboard(shift_id: int, can_fine: bool = True) -> InlineKeyboardMarkup:
     rows = []
     if can_fine:
-        rows.append([InlineKeyboardButton(text=f"💸 {a} ₽", callback_data=f"ns:f:{shift_id}:{a}") for a in PENALTY_PRESETS])
-        rows.append([InlineKeyboardButton(text="💸 Своя сумма", callback_data=f"ns:f:{shift_id}:c")])
+        rows.append([InlineKeyboardButton(text=f"💸 {a} ед.", callback_data=f"ns:f:{shift_id}:{a}") for a in finance.UNIT_PRESETS])
+        rows.append([InlineKeyboardButton(text="💸 Своё число единиц", callback_data=f"ns:f:{shift_id}:c")])
     rows.append([InlineKeyboardButton(text="🤝 Без штрафа", callback_data=f"ns:x:{shift_id}")])
     if settings.webapp_url.startswith("https://"):
         rows.append([InlineKeyboardButton(text="✍️ Внести результат в приложении", web_app=WebAppInfo(url=settings.webapp_url))])
@@ -987,15 +987,17 @@ class Notifier:
                             "Сдайте отчёт заново — в приложении или кнопкой ниже.", report_keyboard(shift))
             tags, line = ["отчёт", "исправление"], "🔄 ТРЕБУЕТСЯ ИСПРАВЛЕНИЕ"
         else:
-            pending = next((t for t in finance.linked(self.conn, shift["id"], ("report",))
-                            if t["status"] == "pending_admin_approval"), None)
+            fines = finance.linked(self.conn, shift["id"], ("report",))
+            pending = next((t for t in fines if t["status"] == "pending_admin_approval"), None)
             if pending:
                 await self.send(user["telegram_id"], f"❌ Отчёт отклонён: {place}{note}")
-                tags, line = ["отчёт", "штраф", "согласование"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {report['penalty_amount']} ₽ НА СОГЛАСОВАНИИ"
+                tags, line = ["отчёт", "штраф", "согласование"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {finance.staff_text(pending)} НА СОГЛАСОВАНИИ"
                 await self.fine_requested(pending, actor)
             else:
-                await self.send(user["telegram_id"], f"❌ Отчёт отклонён, штраф {report['penalty_amount']} ₽: {place}{note}")
-                tags, line = ["отчёт", "штраф"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {report['penalty_amount']} ₽"
+                fine = next((t for t in fines if t["status"] == "active"), None)
+                units = finance.units_text(fine)
+                await self.send(user["telegram_id"], f"❌ Отчёт отклонён{', штраф ' + units if units else ''}: {place}{note}")
+                tags, line = ["отчёт", "штраф"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {finance.staff_text(fine) if fine else report['penalty_amount']}"
         await self._archive_report(tags, f"{line} — {who(user)}\n{place}\n{plan_fact}{note}\nПроверил: {who(actor)}",
                                    user, report)
         for chat in reports.reviewers(self.conn, user):
@@ -1026,11 +1028,13 @@ class Notifier:
         pending = next((t for t in finance.linked(self.conn, shift["id"], ("no_show",))
                         if t["status"] == "pending_admin_approval"), None)
         if pending:
-            tags, line = ["неявка", "штраф", "согласование"], f"💸 НЕЯВКА | ШТРАФ {pending['amount']} ₽ НА СОГЛАСОВАНИИ"
+            tags, line = ["неявка", "штраф", "согласование"], f"💸 НЕЯВКА | ШТРАФ {finance.staff_text(pending)} НА СОГЛАСОВАНИИ"
             await self.fine_requested(pending, actor)
         elif shift["shortfall_status"] == "fined":
-            await self.send(user["telegram_id"], f"💸 Штраф {shift['shortfall_penalty']} ₽ за неявку: {place}{note}")
-            tags, line = ["неявка", "штраф"], f"💸 НЕЯВКА | ШТРАФ {shift['shortfall_penalty']} ₽"
+            fine = next((t for t in finance.linked(self.conn, shift["id"], ("no_show",)) if t["status"] == "active"), None)
+            units = finance.units_text(fine)
+            await self.send(user["telegram_id"], f"💸 Штраф{' ' + units if units else ''} за неявку: {place}{note}")
+            tags, line = ["неявка", "штраф"], f"💸 НЕЯВКА | ШТРАФ {finance.staff_text(fine) if fine else shift['shortfall_penalty']}"
         else:
             await self.send(user["telegram_id"], f"🤝 Неявка {place} закрыта без штрафа.{note}")
             tags, line = ["неявка"], "🤝 НЕЯВКА БЕЗ ШТРАФА"
@@ -1050,7 +1054,7 @@ class Notifier:
     async def fine_requested(self, tx: dict, trainer: dict) -> None:
         """A trainer's fine: owners decide, the balance doesn't change until then (ТЗ 5.3)."""
         user = svc.get_user(self.conn, tx["user_id"])
-        text = (f"🧾 <b>Заявка на штраф</b> от тренера {who(trainer)}\n{who(user)}: <b>{tx['amount']} ₽</b>\n"
+        text = (f"🧾 <b>Заявка на штраф</b> от тренера {who(trainer)}\n{who(user)}: <b>{finance.staff_text(tx)}</b>\n"
                 f"Причина: {escape(tx['reason'])}")
         for chat in svc.admin_telegram_ids(self.conn):  # owners and admins decide
             await self._photo_or_text(chat, tx["media_file_id"], text, fine_decision_keyboard(tx["id"]))
@@ -1059,13 +1063,13 @@ class Notifier:
         user = svc.get_user(self.conn, tx["user_id"])
         amount, reason = tx["amount"], escape(tx["reason"])
         if tx["status"] == "pending_admin_approval":
-            await self.archive(["штраф", "согласование"], f"🧾 ЗАЯВКА НА ШТРАФ {amount} ₽ — {who(user)}\n"
+            await self.archive(["штраф", "согласование"], f"🧾 ЗАЯВКА НА ШТРАФ {finance.staff_text(tx)} — {who(user)}\n"
                                f"Причина: {reason}\nТренер: {who(actor)}", user, tx["media_file_id"])
             await self.fine_requested(tx, actor)
             return
         if tx["type"] == "fine":
-            await self.send(user["telegram_id"], f"💸 Вам начислен штраф {amount} ₽.\nПричина: {reason}")
-            tags, line = ["штраф"], f"💸 ШТРАФ {amount} ₽"
+            await self.send(user["telegram_id"], f"💸 Вам назначен штраф: {finance.units_text(tx)}.\nПричина: {reason}")
+            tags, line = ["штраф"], f"💸 ШТРАФ {finance.staff_text(tx)}"
         elif tx["type"] == "bonus":
             await self.send(user["telegram_id"], f"🎁 Вам начислен бонус {amount} ₽.\nЗа что: {reason}")
             tags, line = ["бонус"], f"🎁 БОНУС {amount} ₽"
@@ -1084,30 +1088,32 @@ class Notifier:
         if v and tx["status"] == "active":
             trainer = svc.get_user(self.conn, v["resolution_admin_id"])
             await self._violation_out(v, tx, trainer, approver=actor)
-            await self.send(trainer["telegram_id"], f"Заявка на штраф {tx['amount']} ₽ за пропуск графика "
+            await self.send(trainer["telegram_id"], f"Заявка на штраф {finance.staff_text(tx)} за пропуск графика "
                             f"({who(user)}): одобрена.")
             return
         trainer = svc.get_user_by_tg(self.conn, tx["created_by"])
         comment = f"\nКомментарий: {escape(tx['decision_comment'])}" if tx["decision_comment"] else ""
         if tx["status"] == "active":
-            await self.send(user["telegram_id"], f"💸 Вам начислен штраф {tx['amount']} ₽.\nПричина: {escape(tx['reason'])}")
+            units = finance.units_text(tx)
+            await self.send(user["telegram_id"], f"💸 Вам назначен штраф{': ' + units if units else ''}.\nПричина: {escape(tx['reason'])}")
             verdict, tags = "✅ ОДОБРЕН", ["штраф"]
         else:
             verdict, tags = "❌ ОТКЛОНЁН", ["штраф", "отклонён"]  # the employee is not told (ТЗ 5.3)
         if tx["source"] == "attendance" and tx["status"] == "rejected":
             comment += "\nНарушение графика снова ждёт решения в «Дисциплине»."
         if trainer:
-            await self.send(trainer["telegram_id"], f"Заявка на штраф {tx['amount']} ₽ ({who(user)}): "
+            await self.send(trainer["telegram_id"], f"Заявка на штраф {finance.staff_text(tx)} ({who(user)}): "
                             f"{'одобрена' if tx['status'] == 'active' else 'отклонена'}.{comment}")
-        await self.archive(tags, f"{verdict} ШТРАФ {tx['amount']} ₽ — {who(user)}\nПричина: {escape(tx['reason'])}"
+        await self.archive(tags, f"{verdict} ШТРАФ {finance.staff_text(tx)} — {who(user)}\nПричина: {escape(tx['reason'])}"
                            f"{comment}\nРешил: {who(actor)}", user)
 
     async def tx_forgiven(self, tx: dict, actor: dict, was: str, reason: str | None) -> None:
         user = svc.get_user(self.conn, tx["user_id"])
-        amount = f" {tx['amount']} ₽" if tx["amount"] else ""
+        amount = f" {finance.staff_text(tx)}" if tx["amount"] else ""
+        units = finance.units_text(tx)
         why = f"\nПричина: {escape(reason)}" if reason else ""
         if was != "pending_admin_approval":  # a request nobody approved was never shown to the employee
-            await self.send(user["telegram_id"], f"🤝 Штраф{amount} прощён.{why}")
+            await self.send(user["telegram_id"], f"🤝 Штраф{' (' + units + ')' if units else ''} прощён.{why}")
         role = perms.ROLE_TITLES[perms.role_of(actor)].lower()
         await self.archive(["штраф", "прощён"], f"🤝 ШТРАФ{amount} ПРОЩЁН — {who(user)}\nБыло: {escape(tx['reason'])}"
                            f"{why}\nПростил: {who(actor)} ({role})", user)
@@ -1118,9 +1124,10 @@ class Notifier:
     async def tx_cancelled(self, tx: dict, actor: dict, was: str) -> None:
         user = svc.get_user(self.conn, tx["user_id"])
         title = finance.TYPE_TITLES[tx["type"]]
-        amount = f" {tx['amount']} ₽" if tx["amount"] else ""
+        amount = f" {finance.staff_text(tx)}" if tx["amount"] else ""
+        mine = f" ({finance.units_text(tx)})" if tx["type"] == "fine" and tx.get("pieces") else "" if tx["type"] == "fine" else amount
         if was != "pending_admin_approval":
-            await self.send(user["telegram_id"], f"↩️ {title}{amount} аннулирован.\nПричина: {escape(tx['decision_comment'] or '')}")
+            await self.send(user["telegram_id"], f"↩️ {title}{mine} аннулирован.\nПричина: {escape(tx['decision_comment'] or '')}")
         await self.archive(["аннулирование", {"fine": "штраф", "bonus": "бонус"}.get(tx["type"], "вычет")],
                            f"↩️ АННУЛИРОВАН {title.upper()}{amount} — {who(user)}\nБыло: {escape(tx['reason'])}\n"
                            f"Причина: {escape(tx['decision_comment'] or '')}\nАннулировал: {who(actor)}", user)
@@ -1203,7 +1210,7 @@ class Notifier:
             # a trainer's fine: owners approve it first; the employee hears about it only then (ТЗ 5.3)
             user = svc.get_user(self.conn, v["user_id"])
             await self.archive(["нарушение", "штраф", "согласование"],
-                               f"🧾 ЗАЯВКА НА ШТРАФ ЗА ПРОПУСК ГРАФИКА {tx['amount']} ₽ — {name_handle(user)}\n"
+                               f"🧾 ЗАЯВКА НА ШТРАФ ЗА ПРОПУСК ГРАФИКА {finance.staff_text(tx)} — {name_handle(user)}\n"
                                f"Норма выходов: {v['actual_days']}/{v['required_days']}\n"
                                f"Причина: {escape(tx['reason'])}\nТренер: {name_handle(actor)}", user, tx["media_file_id"])
             await self.fine_requested(tx, actor)
@@ -1213,7 +1220,7 @@ class Notifier:
     async def fines_paid(self, user_id: int, rows: list[dict], actor: dict) -> None:
         user = svc.get_user(self.conn, user_id)
         total = sum(r["amount"] for r in rows)
-        await self.send(user["telegram_id"], f"✅ Штрафы погашены: {len(rows)} на {total} ₽. Долг по штрафам — 0 ₽.")
+        await self.send(user["telegram_id"], f"✅ Штрафы погашены: {len(rows)}. Долга по штрафам нет.")
         await self.archive(["погашение", "штраф"], f"✅ ПОГАШЕНО {total} ₽ ({len(rows)} шт.) — {who(user)}\n"
                            f"Погасил: {who(actor)}", user)
 
@@ -1486,7 +1493,7 @@ class Notifier:
             user = svc.get_user(self.conn, s["user_id"])
             amount = s.get("annulled_amount")
             await self.send(user["telegram_id"],
-                            f"↩️ Штраф {amount} ₽ за смену {shift_place(s)} аннулирован: команда справилась с общим планом.")
+                            f"↩️ Штраф за смену {shift_place(s)} аннулирован: команда справилась с общим планом.")
             await self.archive(["аннулирование", "штраф"],
                                f"↩️ ШТРАФ АННУЛИРОВАН {amount} ₽ — {who(user)}\n{shift_place(s)}\n"
                                f"Причина: команда справилась\nАннулировал: {who(actor)}", user)
