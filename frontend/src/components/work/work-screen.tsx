@@ -46,6 +46,8 @@ function AliceScreen({ onBack }: { onBack?: () => void }) {
   const { data, setData, reload } = useLoad(() => api.alice(), []);
   const { busy, run } = useAction();
   const [period, setPeriod] = useState<"today" | "week" | "all">("today");
+  // «Закрыть»: the execution is folded away, not stopped — everything done so far is kept on the server
+  const [folded, setFolded] = useState(false);
 
   async function act(name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string) {
     try {
@@ -70,7 +72,17 @@ function AliceScreen({ onBack }: { onBack?: () => void }) {
         <h1 className="font-display text-2xl font-semibold">Яндекс Алиса</h1>
       </div>
 
-      {task ? <TaskFlow task={task} busy={busy} act={act} /> : (
+      {task && folded ? (
+        <section className="flex items-center gap-3 rounded-3xl bg-card p-5 shadow-lift">
+          <span className="min-w-0 flex-1">
+            <span className="block font-semibold">Выполнение {task.number} не завершено</span>
+            <span className="block text-sm text-muted-foreground">
+              {task.step === 0 ? "QR-код ещё на экране" : task.step <= 3 ? `Фото ${task.step} из 3` : "Все фото есть — осталось завершить"}
+            </span>
+          </span>
+          <Button className="press h-11 rounded-xl" onClick={() => setFolded(false)}><Play /> Продолжить</Button>
+        </section>
+      ) : task ? <TaskFlow task={task} busy={busy} act={act} onClose={() => setFolded(true)} /> : (
         <section className="space-y-3 rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
           <p className="text-[15px] text-hero-muted">
             Человек сам решает, пользоваться ли поиском Яндекса: настройка добровольная. Выполнение — QR-код, три фото с экранов
@@ -146,8 +158,8 @@ export function StatusChip({ task }: { task: AliceTask }) {
   return <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", tone)}>{task.status_title}</span>;
 }
 
-function TaskFlow({ task, busy, act }: {
-  task: AliceTask; busy: string | null;
+function TaskFlow({ task, busy, act, onClose }: {
+  task: AliceTask; busy: string | null; onClose: () => void;
   act: (name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string) => Promise<unknown>;
 }) {
   const [confirmStop, setConfirmStop] = useState(false);
@@ -155,8 +167,13 @@ function TaskFlow({ task, busy, act }: {
   return (
     <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="font-semibold">Выполнение {task.number}</h2>
-        <span className="flex items-center gap-1 text-xs text-muted-foreground"><QrCode className="size-3.5" /> {task.qr_number ?? "назначен"}</span>
+        <span className="min-w-0">
+          <h2 className="font-semibold">Выполнение {task.number}</h2>
+          <span className="flex items-center gap-1 text-xs text-muted-foreground"><QrCode className="size-3.5" /> {task.qr_number ?? "назначен"}</span>
+        </span>
+        <Button variant="secondary" size="sm" className="press h-9 shrink-0 rounded-xl" onClick={onClose}>
+          <X /> Закрыть
+        </Button>
       </div>
       <ol className="flex gap-1.5">
         {[0, 1, 2, 3, 4].map((i) => (

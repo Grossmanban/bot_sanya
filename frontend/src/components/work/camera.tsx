@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera as CameraIcon, Check, LoaderCircle, RotateCcw, VideoOff } from "lucide-react";
+import { Camera as CameraIcon, Check, LoaderCircle, Play, RotateCcw, VideoOff, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -21,11 +21,29 @@ export function Camera({ onAttach, busy }: { onAttach: (photo: Blob) => void; bu
   const stream = useRef<MediaStream | null>(null);
   const [state, setState] = useState<State>("idle");
   const [shot, setShot] = useState<{ blob: Blob; url: string } | null>(null);
+  const [needsTap, setNeedsTap] = useState(false);  // iOS may refuse to start the picture without a tap
 
   const stop = useCallback(() => {
     stream.current?.getTracks().forEach((t) => t.stop());
     stream.current = null;
+    if (video.current) video.current.srcObject = null;
   }, []);
+
+  // the <video> is always in the page: the stream is attached once it is there (iPhone: muted + inline, or no picture)
+  useEffect(() => {
+    const v = video.current;
+    if (state !== "live" || !v || !stream.current) return;
+    v.muted = true;
+    v.defaultMuted = true;
+    v.playsInline = true;
+    v.setAttribute("playsinline", "");
+    v.setAttribute("webkit-playsinline", "");
+    v.setAttribute("muted", "");
+    v.srcObject = stream.current;
+    const play = () => v.play().then(() => setNeedsTap(false)).catch(() => setNeedsTap(true));
+    if (v.readyState >= 1) void play();
+    else v.onloadedmetadata = () => void play();
+  }, [state]);
 
   useEffect(() => () => stop(), [stop]);
   useEffect(() => () => { if (shot) URL.revokeObjectURL(shot.url); }, [shot]);
@@ -41,12 +59,6 @@ export function Camera({ onAttach, busy }: { onAttach: (photo: Blob) => void; bu
         video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false,
       });
       setState("live");
-      requestAnimationFrame(() => {
-        if (video.current && stream.current) {
-          video.current.srcObject = stream.current;
-          void video.current.play().catch(() => undefined);
-        }
-      });
     } catch (e) {
       const name = e instanceof DOMException ? e.name : "";
       setState(name === "NotAllowedError" || name === "SecurityError" ? "denied"
@@ -56,7 +68,10 @@ export function Camera({ onAttach, busy }: { onAttach: (photo: Blob) => void; bu
 
   function capture() {
     const v = video.current;
-    if (!v || !v.videoWidth) return;
+    if (!v || !v.videoWidth) {
+      setNeedsTap(true);  // no frame yet: the picture hasn't started
+      return;
+    }
     const scale = Math.min(1, 1920 / Math.max(v.videoWidth, v.videoHeight));
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(v.videoWidth * scale);
@@ -70,6 +85,12 @@ export function Camera({ onAttach, busy }: { onAttach: (photo: Blob) => void; bu
     }, "image/jpeg", 0.85);
   }
 
+  function off() {
+    stop();
+    setNeedsTap(false);
+    setState("idle");
+  }
+
   function retake() {
     setShot(null);
     void start();
@@ -78,7 +99,13 @@ export function Camera({ onAttach, busy }: { onAttach: (photo: Blob) => void; bu
   return (
     <div className="space-y-3">
       <div className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black">
-        {state === "live" && <video ref={video} playsInline muted autoPlay className="size-full object-cover" />}
+        <video ref={video} playsInline muted autoPlay className={cn("size-full object-cover", state !== "live" && "hidden")} />
+        {state === "live" && needsTap && (
+          <button className="absolute inset-0 grid place-items-center bg-black/50 text-sm font-semibold text-white"
+                  onClick={() => video.current?.play().then(() => setNeedsTap(false)).catch(() => undefined)}>
+            <span><Play className="mx-auto mb-2 size-8" />Нажмите, чтобы показать камеру</span>
+          </button>
+        )}
         {state === "shot" && shot && (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={shot.url} alt="Снимок" className="size-full object-contain" />
@@ -95,9 +122,14 @@ export function Camera({ onAttach, busy }: { onAttach: (photo: Blob) => void; bu
         )}
       </div>
       {state === "live" ? (
-        <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" onClick={capture}>
-          <CameraIcon /> Сделать фото
-        </Button>
+        <div className="grid grid-cols-[auto_1fr] gap-2">
+          <Button variant="secondary" className="press h-12 rounded-2xl" aria-label="Выключить камеру" onClick={off}>
+            <X />
+          </Button>
+          <Button className="press h-12 rounded-2xl text-[15px] font-semibold" onClick={capture}>
+            <CameraIcon /> Сделать фото
+          </Button>
+        </div>
       ) : state === "shot" ? (
         <div className="grid grid-cols-2 gap-2">
           <Button variant="secondary" className="press h-12 rounded-2xl" disabled={busy} onClick={retake}>
