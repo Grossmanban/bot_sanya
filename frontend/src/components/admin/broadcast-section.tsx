@@ -20,7 +20,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, type Broadcast, type BroadcastPerson, type BroadcastTemplate, type User } from "@/lib/api";
 import { ddmm, plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
-import { tapHaptic } from "@/lib/telegram";
+import { openProfile, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { RichEditor, type RichEditorHandle } from "./rich-editor";
 import { PhotoPicker, VideoPicker } from "../report/photo";
@@ -433,7 +433,8 @@ function Receipts({ id, ack, replies }: { id: number; ack: boolean; replies: boo
           {answered.map((r) => (
             <div key={r.user_id} className="rounded-xl bg-card p-3 text-sm">
               <p className="font-medium">
-                <a href={r.username ? `https://t.me/${r.username}` : `tg://user?id=${r.telegram_id}`} className="underline-offset-2 hover:underline">
+                <a href={r.username ? `https://t.me/${r.username}` : `tg://user?id=${r.telegram_id}`} className="underline-offset-2 hover:underline"
+                   onClick={(e) => { e.preventDefault(); openProfile(r.username, r.telegram_id); }}>
                   {r.name}
                 </a>
                 {r.username && <span className="font-normal text-muted-foreground"> @{r.username}</span>}

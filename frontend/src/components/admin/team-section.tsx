@@ -19,7 +19,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
 import { dayMonth, offFor } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
-import { haptic, openChat, webApp } from "@/lib/telegram";
+import { haptic, openChat, openProfile, webApp } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
@@ -314,6 +314,10 @@ function MemberSheet({
                   <DrawerDescription>
                     {user.username ? `@${user.username}, ` : ""}ID {user.telegram_id}
                   </DrawerDescription>
+                  <button className="mt-1 text-sm font-semibold text-primary underline-offset-2 hover:underline"
+                          onClick={() => openProfile(user.username, user.telegram_id)}>
+                    Открыть профиль в Telegram{user.username ? "" : " (через бота)"}
+                  </button>
                 </div>
                 {wide && (
                   <DrawerClose className="grid size-9 place-items-center rounded-full bg-muted" aria-label="Закрыть">

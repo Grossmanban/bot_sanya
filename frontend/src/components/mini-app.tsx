@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Briefcase, CalendarDays, ShieldCheck, Trophy, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
-import { getThemePref, initData, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
+import { getThemePref, initData, setBotUsername, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
 import { ThemeContext } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
@@ -55,7 +55,9 @@ export function MiniApp() {
 
   const loadMe = useCallback(async () => {
     try {
-      setMe(await api.me());
+      const loaded = await api.me();
+      setBotUsername(loaded.bot_username);
+      setMe(loaded);
       setFatal(null);
     } catch (e) {
       setFatal(e instanceof Error ? e.message : "Не удалось загрузить данные");

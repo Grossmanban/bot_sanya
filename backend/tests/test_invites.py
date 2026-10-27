@@ -115,3 +115,32 @@ def test_http_access(conn, make_user):
     rotated = client.post("/api/admin/invites/rotate", json={"idempotency_key": key()}, headers=owner).json()
     assert rotated["rotated"]["ref"] == 1
     assert client.get("/api/me/referrals", headers=eh).json()["link"] != refs["link"]
+
+
+def test_profile_card_for_people_without_username(conn, make_user):
+    """ТЗ 27.10 §11: the Telegram ID is the key; without a username the bot sends a card with the name as a link."""
+    from app import notify
+
+    sent = []
+
+    class Bot:
+        async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
+            sent.append((chat_id, text, reply_markup))
+
+    n = Notifier(Bot(), conn)
+    client = TestClient(create_app(conn, n, "test_bot"))
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    plain = make_user(first="Без", username=None)
+    other = make_user(first="Чужой")
+    r = client.post("/api/profile-link", json={"telegram_id": plain["telegram_id"]}, headers=owner)
+    assert r.json() == {"sent": True, "bot_username": "test_bot"}
+    chat, text, markup = sent[-1]
+    assert chat == 999 and f'tg://user?id={plain["telegram_id"]}' in text and str(plain["telegram_id"]) in text
+    assert markup.inline_keyboard[0][0].url == f"tg://user?id={plain['telegram_id']}"
+    # an employee may not ask about anyone; a stranger from the access log — only for those who see the log
+    assert client.post("/api/profile-link", json={"telegram_id": plain["telegram_id"]},
+                       headers=headers(other["telegram_id"])).status_code == 403
+    invites.log_attempt(conn, {"id": 8301, "first_name": "Ольга"}, "no_link")
+    assert client.post("/api/profile-link", json={"telegram_id": 8301}, headers=owner).json()["sent"]
+    assert "(без username, ID <code>" in notify.who(svc.get_user(conn, plain["id"]))

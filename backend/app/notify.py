@@ -53,7 +53,8 @@ def who(user: dict) -> str:
     name = escape(svc.full_name(user))
     if user.get("username"):
         return f"@{escape(user['username'])}, {name}"
-    return f'<a href="tg://user?id={user["telegram_id"]}">{name}</a> (без username)'
+    # ТЗ 27.10 §11: the Telegram ID is the identifier; the name opens the profile wherever the client allows it
+    return f'<a href="tg://user?id={user["telegram_id"]}">{name}</a> (без username, ID <code>{user["telegram_id"]}</code>)'
 
 
 def prize_line(item: dict) -> str:
@@ -843,6 +844,28 @@ class Notifier:
         await self.send(user["telegram_id"], text)
         await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
                            f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
+
+    async def profile_card(self, chat_id: int, person: dict) -> bool:
+        """ТЗ 27.10 §11: a person without a username — the bot sends a card where the name opens the profile
+        (a text mention works for people who started the bot), with a button when Telegram allows it."""
+        from aiogram.exceptions import TelegramBadRequest
+
+        name = escape(" ".join(x for x in (person.get("first_name"), person.get("last_name")) if x) or "Без имени")
+        text = (f'👤 <a href="tg://user?id={person["telegram_id"]}">{name}</a>\n'
+                + (f"@{escape(person['username'])}\n" if person.get("username") else "Username нет\n")
+                + f"Telegram ID: <code>{person['telegram_id']}</code>\n\nНажмите на имя, чтобы открыть профиль.")
+        if self.bot is None:
+            return False
+        button = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="Открыть профиль", url=f"tg://user?id={person['telegram_id']}")]])
+        try:
+            await self._retry(lambda: self.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=button))
+            return True
+        except TelegramBadRequest:  # the person's privacy settings forbid the button: the name still works
+            return await self.send(chat_id, text)
+        except Exception as exc:
+            log.warning("profile card to %s failed: %s", chat_id, exc)
+            return False
 
     async def product_access(self, user: dict, product: str, allow: bool, actor: dict) -> None:
         from . import products

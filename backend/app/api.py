@@ -294,6 +294,10 @@ class ProductAccess(BaseModel):
     idempotency_key: str
 
 
+class ProfileLink(BaseModel):
+    telegram_id: int
+
+
 class GroupAction(BaseModel):
     user_id: int
     kind: str
@@ -713,6 +717,28 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/invites/rotate")
     async def admin_invites_rotate(body: KeyOnly, admin: dict = Depends(staff("invites"))):
         return {"rotated": invites.rotate_all(conn, admin, body.idempotency_key), **invite_list()}
+
+    # ------------------------------------------------------------ Telegram profiles (ТЗ 27.10 §11)
+
+    @api.post("/profile-link")
+    async def profile_link(body: ProfileLink, user: dict = Depends(current_user)):
+        """No username: the bot sends the viewer a card whose name opens the profile. Staff — people they manage
+        (strangers from «Попытки доступа» for those who see that log); anyone — their referrer and their referrals."""
+        target = svc.get_user_by_tg(conn, body.telegram_id)
+        if target is not None:
+            mine = target["id"] == user.get("referrer_id") or target.get("referrer_id") == user["id"]
+            if not (mine or perms.sees_everyone(user) or perms.manages(user, target)):
+                raise svc.ServiceError("Недостаточно прав", 403, "forbidden")
+            person = target
+        else:
+            if not perms.can(user, "access_log"):
+                raise svc.ServiceError("Недостаточно прав", 403, "forbidden")
+            row = conn.execute("SELECT * FROM access_attempts WHERE telegram_id = ? ORDER BY last_at DESC LIMIT 1",
+                               (body.telegram_id,)).fetchone()
+            if row is None:
+                raise svc.ServiceError("Человек не найден", 404, "not_found")
+            person = dict(row)
+        return {"sent": await notifier.profile_card(user["telegram_id"], person), "bot_username": app.state.bot_username}
 
     # ------------------------------------------------------------ groups by work days (ТЗ 27.10 §26–27)
 
@@ -1311,7 +1337,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             if only is not None and s["user_id"] not in only:
                 continue
             item = svc.serialize_shift(s, today, conn, staff=True)
-            item.update(user_id=s["user_id"], name=f"{s['first_name']} {s['last_name']}", username=s["username"])
+            item.update(user_id=s["user_id"], name=f"{s['first_name']} {s['last_name']}", username=s["username"],
+                        telegram_id=s["telegram_id"])
             items.append(item)
         count, volume = svc.day_totals(conn, d)
         if only is not None:

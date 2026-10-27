@@ -20,6 +20,7 @@ import { STATUS_META, longDate } from "@/lib/format";
 import { useAction } from "@/lib/hooks";
 import { useWide } from "@/lib/use-media";
 import { useCan } from "@/lib/caps";
+import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { ReportDecision } from "./reports";
 
@@ -39,6 +40,7 @@ export interface EditableShift {
   report?: ReportView | null;
   name: string;
   username: string | null;
+  telegram_id?: number | null;
 }
 
 const PENALTY_PRESETS = [500, 1000, 2000];
@@ -149,7 +151,10 @@ export function AdminShiftSheet({
             <div className={cn("overflow-y-auto px-5", wide ? "h-full py-8" : "pb-safe pt-2")}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <DrawerTitle className="truncate font-display text-xl font-semibold">{shift.name}</DrawerTitle>
+                  <DrawerTitle className="truncate font-display text-xl font-semibold">
+                    <button className="max-w-full truncate text-left underline-offset-4 hover:underline"
+                            onClick={() => openProfile(shift.username, shift.telegram_id)}>{shift.name}</button>
+                  </DrawerTitle>
                   <DrawerDescription>
                     {longDate(shift.date)}
                     {shift.username ? `, @${shift.username}` : ""}

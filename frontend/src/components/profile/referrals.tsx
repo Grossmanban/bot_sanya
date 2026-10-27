@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Referral } from "@/lib/api";
 import { useLoad } from "@/lib/hooks";
-import { haptic, webApp } from "@/lib/telegram";
+import { haptic, openProfile, webApp } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { LinkTimer, QrImage, useCountdown } from "../link-timer";
 
@@ -107,7 +107,8 @@ export function Referrals() {
               return (
                 <li key={r.id} className="space-y-2 px-5 py-3.5 md:px-6">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="min-w-0 truncate font-medium">{r.name}</span>
+                    <button className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline"
+                            onClick={() => openProfile(r.username, r.telegram_id)}>{r.name}</button>
                     <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", st.tone)}>
                       {p?.review ? "На проверке" : st.label}
                     </span>

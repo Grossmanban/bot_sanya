@@ -294,6 +294,8 @@ export interface Referral {
   progress: StageProgress | null;
   stage1_counted: number | null;
   stage2_counted: number | null;
+  telegram_id?: number | null;
+  username?: string | null;
 }
 
 /** ТЗ №20, №22: what goals and events share once running. */
@@ -743,6 +745,7 @@ export interface AdminShift extends Shift {
   user_id: number;
   name: string;
   username: string | null;
+  telegram_id?: number;
 }
 
 export interface Raspred {
@@ -1100,6 +1103,8 @@ export const api = {
   referrals: () => request<{ link: string | null; expires_at: string; seconds_left: number; ttl_minutes: number;
     items: Referral[]; targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
   referralQr: () => request<{ svg: string; link: string; expires_at: string; seconds_left: number }>("/api/me/referrals/qr"),
+  /** ТЗ 27.10 §11: a person without a username — the bot sends a card with a link to the profile */
+  profileLink: (telegram_id: number) => post<{ sent: boolean; bot_username: string | null }>("/api/profile-link", { telegram_id }),
   work: () => request<{ items: { product: Product; title: string }[] }>("/api/work"),
   alice: () => request<{ task: AliceTask | null; has_qr: boolean; stats: AliceStats; history: AliceTask[] }>("/api/work/alice"),
   aliceStart: (key: string) => post<{ task: AliceTask; stats: AliceStats }>("/api/work/alice/start", { idempotency_key: key }),

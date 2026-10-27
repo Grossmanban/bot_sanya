@@ -86,16 +86,39 @@ export function openBotChat(botUsername: string) {
   }
 }
 
-/** A person's Telegram profile: by @username when there is one, otherwise by their Telegram id. */
+let botName: string | null = null;
+/** The bot's username, for «open the chat with the bot» (set once /api/me answers). */
+export function setBotUsername(name: string | null | undefined) {
+  botName = name ?? null;
+}
+
+/** ТЗ 27.10 §11: a person's Telegram profile by the Telegram ID (never the database id).
+ * With a username — t.me/<username>, which every client opens. Without one Telegram guarantees nothing:
+ * the bot sends a card whose name opens the profile and the chat with the bot opens; failing that — tg://user?id. */
 export function openProfile(username: string | null | undefined, telegramId?: number | null) {
+  const app = webApp();
   if (username) {
     const url = `https://t.me/${username}`;
-    const app = webApp();
     if (app) app.openTelegramLink(url);
     else window.open(url, "_blank");
-  } else if (telegramId) {
-    window.location.href = `tg://user?id=${telegramId}`;
+    return;
   }
+  if (!telegramId) return;
+  void (async () => {
+    try {
+      const { api } = await import("./api");  // lazy: api imports this module
+      const res = await api.profileLink(telegramId);
+      const bot = res.bot_username ?? botName;
+      if (res.sent && bot) {
+        if (app) app.openTelegramLink(`https://t.me/${bot}`);
+        else window.open(`https://t.me/${bot}`, "_blank");
+        return;
+      }
+    } catch {
+      /* no rights or no bot: try the direct link */
+    }
+    window.location.href = `tg://user?id=${telegramId}`;
+  })();
 }
 
 export function haptic(type: HapticNotification) {

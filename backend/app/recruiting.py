@@ -207,7 +207,10 @@ def referrals(conn: sqlite3.Connection, user: dict) -> list[dict]:
     for r in rows:
         app = dict(r)
         p = progress(conn, app)
+        person = svc.get_user(conn, app["user_id"]) or {}
         out.append({"id": app["id"], "name": app["full_name"], "status": app["status"], "created_at": app["created_at"],
+                    # ТЗ 27.10 §11: the profile by the Telegram ID
+                    "telegram_id": person.get("telegram_id"), "username": person.get("username"),
                     "progress": p, "stage1_counted": app["stage1_counted"], "stage2_counted": app["stage2_counted"]})
     return out
 
