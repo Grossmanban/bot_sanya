@@ -11,7 +11,7 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import reports, violations
+from . import alice, products, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -137,6 +137,7 @@ class EventBody(BaseModel):
     prize_type: str | None = None
     prize_photo: str | None = None
     prize_media_kind: str | None = None
+    product: str | None = None          # ТЗ 27.10 §29: only those with access to the product take part
     idempotency_key: str
 
 
@@ -214,6 +215,8 @@ class GoalBody(BaseModel):
     location: str | None = None         # a point goal
     reset_time: str | None = None
     forever: bool = False               # a point goal «каждый день, бессрочно»
+    product: str | None = None          # ТЗ 27.10 §29: «alice» — counts accepted executions
+    grant_access: bool = False          # give the product's access to the people who lack it
     idempotency_key: str
 
 
@@ -250,6 +253,44 @@ class UserRates(BaseModel):
     # trainers and instructors: an individual rate per piece of their people (ТЗ 27.10 §24)
     personal_commission: int | None = None
     clear_personal_commission: bool = False
+    idempotency_key: str
+
+
+class AliceDecide(BaseModel):
+    approve: bool
+    reason: str | None = None
+    idempotency_key: str
+
+
+class AliceQrPatch(BaseModel):
+    number: str | None = None
+    archive: bool = False
+    idempotency_key: str
+
+
+class AliceAssign(BaseModel):
+    user_id: int
+    on: bool = True
+    idempotency_key: str
+
+
+class AliceQueries(BaseModel):
+    text: str
+    idempotency_key: str
+
+
+class AlicePayout(BaseModel):
+    date_from: str
+    date_to: str
+    confirmed: dict[int, int] = {}
+    title: str | None = None
+    proof_media: list[str] = []
+    idempotency_key: str | None = None
+
+
+class ProductAccess(BaseModel):
+    product: str
+    allow: bool
     idempotency_key: str
 
 
@@ -607,6 +648,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "events": len(events.visible(conn, user)),
             "network": (networks.get(conn, user["network_id"]) or {}).get("name") if user["network_id"] else None,
             "capabilities": perms.capabilities(user),
+            # ТЗ 27.10 §28: «Работа» shows only the products the person has access to
+            "products": products.of_user(conn, user["id"]),
             # a trainee's shifts are training ones and not paid
             "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user)},
             "bot_username": app.state.bot_username,
@@ -711,6 +754,186 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         user = require(admin, "groups", body.user_id)
         await groups.remove(conn, notifier.bot, user, body.kind, admin)
         return await groups_view()
+
+    # ------------------------------------------------------------ «Работа» and «Яндекс Алиса» (ТЗ 27.10 §28–44)
+
+    def alice_me(user: dict) -> dict:
+        task = alice.active(conn, user["id"])
+        return {"task": alice.view(conn, task) if task else None, "has_qr": alice.assigned_qr(conn, user["id"]) is not None,
+                "stats": alice.my_stats(conn, user["id"], today_local()), "history": alice.history(conn, user["id"])}
+
+    def alice_task(user: dict, task: dict) -> dict:
+        return {"task": alice.view(conn, task), "stats": alice.my_stats(conn, user["id"], today_local())}
+
+    @api.get("/work")
+    async def work(user: dict = Depends(current_user)):
+        mine = products.of_user(conn, user["id"])
+        return {"items": [{"product": p, "title": products.PRODUCTS[p]} for p in mine]}
+
+    @api.get("/work/alice")
+    async def work_alice(date_from: str | None = Query(None, alias="from"), date_to: str | None = Query(None, alias="to"),
+                         user: dict = Depends(current_user)):
+        products.require(conn, user, alice.PRODUCT)
+        out = alice_me(user)
+        if date_from and date_to:
+            out["stats"] = alice.my_stats(conn, user["id"], today_local(), svc.parse_date(date_from), svc.parse_date(date_to))
+        return out
+
+    @api.post("/work/alice/start")
+    async def work_alice_start(body: KeyOnly, user: dict = Depends(current_user)):
+        return alice_task(user, alice.start(conn, user, body.idempotency_key))
+
+    @api.post("/work/alice/{task_id}/scanned")
+    async def work_alice_scanned(task_id: int, user: dict = Depends(current_user)):
+        return alice_task(user, alice.scanned(conn, user, task_id))
+
+    @api.put("/work/alice/{task_id}/photo/{stage}")
+    async def work_alice_photo(task_id: int, stage: int, request: Request, user: dict = Depends(current_user)):
+        data, ext = await read_photo(request, required=True)
+        return alice_task(user, alice.put_photo(conn, user, task_id, stage, data, ext))
+
+    @api.delete("/work/alice/{task_id}/photo/{stage}")
+    async def work_alice_photo_delete(task_id: int, stage: int, user: dict = Depends(current_user)):
+        return alice_task(user, alice.delete_photo(conn, user, task_id, stage))
+
+    @api.post("/work/alice/{task_id}/next")
+    async def work_alice_next(task_id: int, user: dict = Depends(current_user)):
+        return alice_task(user, alice.fix_stage(conn, user, task_id))
+
+    @api.post("/work/alice/{task_id}/finish")
+    async def work_alice_finish(task_id: int, body: KeyOnly, user: dict = Depends(current_user)):
+        task = alice.finish(conn, user, task_id, body.idempotency_key)
+        if task["status"] in ("sending", "send_failed"):
+            task = await alice.deliver(conn, notifier.bot, task_id)
+        return alice_task(user, task)
+
+    @api.post("/work/alice/{task_id}/retry")
+    async def work_alice_retry(task_id: int, user: dict = Depends(current_user)):
+        task = alice.get(conn, task_id)
+        if task is None or task["user_id"] != user["id"]:
+            raise svc.ServiceError("Выполнение не найдено", 404, "not_found")
+        return alice_task(user, await alice.deliver(conn, notifier.bot, task_id))
+
+    @api.post("/work/alice/{task_id}/abandon")
+    async def work_alice_abandon(task_id: int, user: dict = Depends(current_user)):
+        alice.abandon(conn, user, task_id)
+        return alice_me(user)
+
+    @api.get("/media/alice/{photo_id}")
+    async def alice_photo(photo_id: int, exp: int, sig: str):
+        if not media.verify(photo_id, exp, sig, kind="alice"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        row = conn.execute("SELECT * FROM alice_photos WHERE id = ?", (photo_id,)).fetchone()
+        if row is None:
+            raise svc.ServiceError("Фото не найдено", 404, "not_found")
+        if row["temp_path"] and Path(row["temp_path"]).is_file():  # not sent yet: the file waiting on the server
+            path = Path(row["temp_path"])
+            return FileResponse(path, media_type=media.TYPES.get(path.suffix.lstrip("."), "image/jpeg"),
+                                headers={"Cache-Control": "private, max-age=600"})
+        return await media_response(row["file_id"], "photo")
+
+    @api.get("/media/aliceqr/{qr_id}")
+    async def alice_qr_image(qr_id: int, exp: int, sig: str):
+        if not media.verify(qr_id, exp, sig, kind="aliceqr"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        qr = alice.get_qr(conn, qr_id)
+        return await media_response(qr["image"] if qr else None, "photo")
+
+    @api.get("/admin/team/{user_id}/products")
+    async def admin_user_products(user_id: int, admin: dict = Depends(staff("products"))):
+        require(admin, "products", user_id)
+        return products.view(conn, user_id)
+
+    @api.post("/admin/team/{user_id}/products")
+    async def admin_user_products_set(user_id: int, body: ProductAccess, admin: dict = Depends(staff("products"))):
+        user, changed = products.set_access(conn, admin, user_id, body.product, body.allow, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.product_access(user, body.product, body.allow, admin))
+        return products.view(conn, user_id)
+
+    @api.get("/admin/alice")
+    async def admin_alice(_: dict = Depends(staff("alice"))):
+        forum = alice.forum(conn)
+        counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM alice_tasks GROUP BY status")}
+        people = [{"id": u["id"], "name": svc.full_name(u)} for u in svc.list_users(conn) if products.has(conn, u, alice.PRODUCT)]
+        return {"forum": forum, "counts": counts, "people": people, "rate": app_settings.get_all(conn)["alice_rate"]}
+
+    @api.get("/admin/alice/queue")
+    async def admin_alice_queue(status: str | None = "moderation", user_id: int | None = None, qr_id: int | None = None,
+                                date_from: str | None = Query(None, alias="from"), date_to: str | None = Query(None, alias="to"),
+                                _: dict = Depends(staff("alice"))):
+        if status and status not in alice.STATUS:
+            raise svc.ServiceError("Неизвестный статус", 422, "bad_status")
+        return {"items": alice.queue(conn, status or None, user_id, qr_id,
+                                     svc.parse_date(date_from) if date_from else None,
+                                     svc.parse_date(date_to) if date_to else None)}
+
+    @api.post("/admin/alice/{task_id}/decide")
+    async def admin_alice_decide(task_id: int, body: AliceDecide, admin: dict = Depends(staff("alice"))):
+        task, changed = alice.moderate(conn, admin, task_id, body.approve, body.reason, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.alice_decided(task))
+            notifier.spawn(alice.post_status(conn, notifier.bot, task_id))
+        return {"task": alice.view(conn, task, staff=True)}
+
+    @api.get("/admin/alice/qr")
+    async def admin_alice_qrs(archived: bool = False, _: dict = Depends(staff("alice"))):
+        return {"items": alice.qr_list(conn, archived)}
+
+    @api.post("/admin/alice/qr")
+    async def admin_alice_qr_create(request: Request, idempotency_key: str, number: str | None = None,
+                                    admin: dict = Depends(staff("alice"))):
+        data, ext = await read_photo(request, required=True)
+        alice.create_qr(conn, admin, media.save_local(data, ext), number, idempotency_key)
+        return {"items": alice.qr_list(conn)}
+
+    @api.put("/admin/alice/qr/{qr_id}/image")
+    async def admin_alice_qr_image(qr_id: int, request: Request, idempotency_key: str, admin: dict = Depends(staff("alice"))):
+        data, ext = await read_photo(request, required=True)
+        alice.update_qr(conn, admin, qr_id, idempotency_key, image=media.save_local(data, ext))
+        return {"items": alice.qr_list(conn)}
+
+    @api.patch("/admin/alice/qr/{qr_id}")
+    async def admin_alice_qr_patch(qr_id: int, body: AliceQrPatch, admin: dict = Depends(staff("alice"))):
+        alice.update_qr(conn, admin, qr_id, body.idempotency_key, number_=body.number, archive=body.archive)
+        return {"items": alice.qr_list(conn)}
+
+    @api.post("/admin/alice/qr/{qr_id}/assign")
+    async def admin_alice_qr_assign(qr_id: int, body: AliceAssign, admin: dict = Depends(staff("alice"))):
+        if alice.assign(conn, admin, qr_id, body.user_id, body.on, body.idempotency_key):
+            notifier.spawn(notifier.alice_qr_changed(svc.get_user(conn, body.user_id), body.on))
+        return {"items": alice.qr_list(conn)}
+
+    @api.get("/admin/alice/qr/{qr_id}/history")
+    async def admin_alice_qr_history(qr_id: int, _: dict = Depends(staff("alice"))):
+        return {"items": alice.qr_history(conn, qr_id)}
+
+    @api.get("/admin/alice/queries")
+    async def admin_alice_queries(_: dict = Depends(staff("alice"))):
+        return {"items": alice.queries(conn)}
+
+    @api.put("/admin/alice/queries")
+    async def admin_alice_queries_set(body: AliceQueries, admin: dict = Depends(staff("alice"))):
+        return {"items": alice.set_queries(conn, admin, body.text, body.idempotency_key)}
+
+    @api.get("/admin/alice/stats")
+    async def admin_alice_stats(date_from: str = Query(alias="from"), date_to: str = Query(alias="to"),
+                                _: dict = Depends(staff("alice"))):
+        return alice.admin_stats(conn, svc.parse_date(date_from), svc.parse_date(date_to))
+
+    @api.post("/admin/alice/payout/preview")
+    async def admin_alice_payout_preview(body: AlicePayout, _: dict = Depends(staff("money"))):
+        return alice.reconcile(conn, svc.parse_date(body.date_from), svc.parse_date(body.date_to), body.confirmed)
+
+    @api.post("/admin/alice/payout/commit")
+    async def admin_alice_payout_commit(body: AlicePayout, owner: dict = Depends(staff("money"))):
+        if not body.idempotency_key:
+            raise svc.ServiceError("Нет ключа операции", 422, "key_required")
+        batch_id = alice.commit_payout(conn, owner, body.title or "", svc.parse_date(body.date_from),
+                                       svc.parse_date(body.date_to), body.confirmed, body.proof_media, body.idempotency_key)
+        batch = payouts.batch(conn, batch_id)
+        notifier.spawn(notifier.alice_paid(batch))
+        return {"batch": batch, "bank_text": payouts.bank_text(batch)}
 
     @api.get("/admin/access-attempts")
     async def admin_access_attempts(_: dict = Depends(staff("access_log"))):
@@ -935,7 +1158,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"point": svc.update_point(conn, admin, point_id, changes)}
 
     # money settings: only owners see and change them (customer round B)
-    OWNER_SETTINGS = set(pricing.DEFAULTS) | {"revenue_per_piece"}
+    OWNER_SETTINGS = set(pricing.DEFAULTS) | {"revenue_per_piece", "alice_rate"}
 
     def settings_view(viewer: dict) -> dict:
         archive = app_settings.get_raw(conn, "archive_chat_id")
@@ -1258,7 +1481,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                               ends_at=when(body.ends_at), key=body.idempotency_key, description=body.description,
                               prize=body.prize, target=body.target, max_winners=body.max_winners,
                               max_attempts=body.max_attempts, network_id=body.network_id, prize_type=body.prize_type,
-                              prize_photo=body.prize_photo, prize_media_kind=body.prize_media_kind)
+                              prize_photo=body.prize_photo, prize_media_kind=body.prize_media_kind, product=body.product)
         notifier.spawn(notifier.event_created(event))
         return {"event": events.view(conn, event)}
 
@@ -1327,7 +1550,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                             location=body.location, reset_time=body.reset_time,
                             key=body.idempotency_key, description=body.description, user_id=body.user_id,
                             network_id=body.network_id, mode=body.mode, prize=body.prize, prize_type=body.prize_type,
-                            prize_photo=body.prize_photo)
+                            prize_photo=body.prize_photo, product=body.product, grant_access=body.grant_access)
         notifier.spawn(notifier.goal_created(goal))
         return {"goal": goal_admin_view(goal, admin)}
 

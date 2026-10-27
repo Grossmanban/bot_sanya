@@ -24,7 +24,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from . import lifecycle, networks
+from . import lifecycle, networks, products
 from . import permissions as perms
 from . import services as svc
 from .db import transaction
@@ -50,9 +50,21 @@ def participants(conn: sqlite3.Connection, goal_id: int, annulled: bool = False)
             WHERE p.goal_id = ? {'' if annulled else 'AND p.annulled_at IS NULL'} ORDER BY p.joined_at""", (goal_id,))]
 
 
-def volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_to: str) -> dict[int, int]:
+def _alice(conn, user_ids: list[int], date_from: str, date_to: str, statuses: tuple[str, ...]) -> dict[int, int]:
+    """ТЗ 27.10 §29: a «Яндекс Алиса» goal counts executions (accepted ones — agreed with the owner), not pieces."""
+    rows = conn.execute(
+        f"""SELECT user_id, COUNT(*) AS v FROM alice_tasks WHERE status IN ({','.join('?' * len(statuses))})
+            AND substr(completed_at, 1, 10) BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
+            GROUP BY user_id""", (*statuses, date_from, date_to, *user_ids))
+    return {r["user_id"]: r["v"] for r in rows}
+
+
+def volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_to: str,
+            product: str | None = None) -> dict[int, int]:
     if not user_ids:
         return {}
+    if product == "alice":
+        return _alice(conn, user_ids, date_from, date_to, ("accepted", "paid"))
     rows = conn.execute(
         f"""SELECT user_id, SUM(fact_volume) AS v FROM shifts WHERE status IN {ACTIVE} AND report_state = 'approved'
             AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
@@ -60,10 +72,13 @@ def volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_
     return {r["user_id"]: r["v"] for r in rows}
 
 
-def pending_volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_to: str) -> dict[int, int]:
+def pending_volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_to: str,
+                    product: str | None = None) -> dict[int, int]:
     """Facts sent but not reviewed yet — shown next to the progress, not in it."""
     if not user_ids:
         return {}
+    if product == "alice":
+        return _alice(conn, user_ids, date_from, date_to, ("sending", "send_failed", "moderation"))
     rows = conn.execute(
         f"""SELECT user_id, SUM(fact_volume) AS v FROM shifts WHERE status IN {ACTIVE} AND report_state = 'pending_review'
             AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
@@ -77,7 +92,7 @@ def history_before(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) ->
     if created <= goal["date_from"]:
         return {}
     last = min(goal["date_to"], (date.fromisoformat(created) - timedelta(days=1)).isoformat())
-    return volumes(conn, user_ids, goal["date_from"], last)
+    return volumes(conn, user_ids, goal["date_from"], last, goal.get("product"))
 
 
 def counted_so_far(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) -> tuple[int, int]:
@@ -85,6 +100,9 @@ def counted_so_far(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) ->
     starts with (ТЗ №18)."""
     if not user_ids:
         return 0, 0
+    if goal.get("product") == "alice":
+        got = _alice(conn, user_ids, goal["date_from"], goal["date_to"], ("accepted", "paid"))
+        return sum(got.values()), sum(got.values())
     row = conn.execute(
         f"""SELECT COUNT(*), COALESCE(SUM(fact_volume), 0) FROM shifts WHERE status IN {ACTIVE}
             AND report_state = 'approved' AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ?
@@ -93,6 +111,8 @@ def counted_so_far(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) ->
 
 
 def eligible(conn: sqlite3.Connection, goal: dict, user: dict, now: datetime | None = None) -> bool:
+    if goal.get("product") and not products.has(conn, user, goal["product"]):
+        return False  # ТЗ 27.10 §29: a product's goal is for those with access to it
     if goal["kind"] == "personal":
         return goal["user_id"] == user["id"]
     if goal["kind"] == "network":
@@ -159,7 +179,7 @@ def view(conn: sqlite3.Connection, goal: dict, viewer: dict | None = None, now: 
         return _point_view(conn, goal, viewer, now)
     everyone = participants(conn, goal["id"], annulled=True)
     people = [p for p in everyone if not p["annulled_at"]]
-    vols = volumes(conn, [p["user_id"] for p in people], goal["date_from"], goal["date_to"])
+    vols = volumes(conn, [p["user_id"] for p in people], goal["date_from"], goal["date_to"], goal.get("product"))
     total = sum(vols.values())
     me = next((p for p in people if viewer and p["user_id"] == viewer["id"]), None)
     my_annulled = next((p for p in everyone if viewer and p["user_id"] == viewer["id"] and p["annulled_at"]), None)
@@ -170,11 +190,12 @@ def view(conn: sqlite3.Connection, goal: dict, viewer: dict | None = None, now: 
     else:
         ids = [p["user_id"] for p in people]
     before = sum(history_before(conn, goal, ids).values())
-    pending = sum(pending_volumes(conn, ids, goal["date_from"], goal["date_to"]).values())
+    pending = sum(pending_volumes(conn, ids, goal["date_from"], goal["date_to"], goal.get("product")).values())
     out = {
         "id": goal["id"], "title": goal["title"], "description": goal["description"], "kind": goal["kind"],
         "mode": goal["mode"], "target": goal["target"], "date_from": goal["date_from"], "date_to": goal["date_to"],
         "status": goal["status"], "network": (networks.get(conn, goal["network_id"]) or {}).get("name") if goal["network_id"] else None,
+        "product": goal.get("product"),
         "progress": total if goal["mode"] == "shared" else mine, "total": total,
         "participants": [{"user_id": p["user_id"], "name": svc.full_name(p), "volume": vols.get(p["user_id"], 0),
                           "done": bool(p["completed_at"]), "annulled": bool(p["annulled_at"]),
@@ -283,7 +304,7 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, kind: str, targ
            key: str, description: str | None = None, user_id: int | None = None, network_id: int | None = None,
            mode: str = "shared", prize: str | None = None, prize_type: str | None = None,
            prize_photo: str | None = None, user_ids: list[int] | None = None, location: str | None = None,
-           reset_time: str | None = None) -> dict:
+           reset_time: str | None = None, product: str | None = None, grant_access: bool = False) -> dict:
     """Owners/admins: any goal; a trainer: personal and group goals for their people and their network's goal
     (ТЗ 9.3). Point goals — owners and admins."""
     title = _clean_title(title)
@@ -293,6 +314,20 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, kind: str, targ
     _check_range(date_from, date_to)
     prize_photo = lifecycle.clean_file_id(prize_photo)
     _check_key(key)
+    products.check_product(product)
+    if product and kind == "point":
+        raise ServiceError("Цель точки считает штуки смен — продукт для неё не выбирается", 422, "bad_product")
+    if product and kind in ("personal", "group"):
+        # ТЗ 27.10 §29: warn about people without access, and give it when asked
+        ids = list(user_ids or []) if kind == "group" else [user_id] if user_id else []
+        targets = [svc.get_user(conn, i) for i in ids]
+        missing = [u for u in targets if u is not None and not products.has(conn, u, product)]
+        if missing and not grant_access:
+            raise ServiceError("Нет доступа к «" + products.PRODUCTS[product] + "»: "
+                               + ", ".join(svc.full_name(u) for u in missing) + ". Выдать доступ и создать цель?",
+                               409, "no_product_access")
+        for u in missing:
+            products.set_access(conn, actor, u["id"], product, True, svc.new_key())
     with transaction(conn):
         if _seen(conn, key):
             return get(conn, conn.execute("SELECT MAX(id) FROM goals").fetchone()[0])
@@ -336,12 +371,12 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, kind: str, targ
             user_id = network_id = None
         cur = conn.execute(
             """INSERT INTO goals (title, description, kind, mode, target, date_from, date_to, user_id, network_id,
-                                  created_by, created_at, prize, prize_type, prize_photo, location, reset_time)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  created_by, created_at, prize, prize_type, prize_photo, location, reset_time, product)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (title, (description or "").strip()[:500] or None, kind, mode, target, date_from.isoformat(),
              date_to.isoformat(), user_id, network_id, actor["telegram_id"], now_iso(),
              (prize or "").strip()[:200] or None, lifecycle.clean_prize_type(prize_type), prize_photo,
-             location if kind == "point" else None, reset_time if kind == "point" else None),
+             location if kind == "point" else None, reset_time if kind == "point" else None, product),
         )
         for u in ([target_user] if target_user is not None else group):
             conn.execute("INSERT INTO goal_participants (goal_id, user_id, joined_at) VALUES (?, ?, ?)",
@@ -423,7 +458,7 @@ def revoke(conn: sqlite3.Connection, actor: dict, goal_id: int, key: str) -> tup
             return get(conn, goal_id), []
         actor, goal = lifecycle.load_for_change(conn, actor, "goal", goal_id, None)
         people = participants(conn, goal_id)
-        vols = volumes(conn, [p["user_id"] for p in people], goal["date_from"], goal["date_to"])
+        vols = volumes(conn, [p["user_id"] for p in people], goal["date_from"], goal["date_to"], goal.get("product"))
         if not _revocable(goal, people, vols):
             raise ServiceError("Все отметившие «выполнено» и сейчас не ниже нормы", 409, "nothing_to_revoke")
         if goal["mode"] == "shared":
@@ -487,7 +522,7 @@ def check_completions(conn: sqlite3.Connection, today: date | None = None,
         people = participants(conn, g["id"])
         if not people:
             continue
-        vols = volumes(conn, [p["user_id"] for p in people], g["date_from"], g["date_to"])
+        vols = volumes(conn, [p["user_id"] for p in people], g["date_from"], g["date_to"], g.get("product"))
         fresh = []
         with transaction(conn):
             if g["mode"] == "shared":

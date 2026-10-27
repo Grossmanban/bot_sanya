@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import lifecycle, networks, richtext
+from . import lifecycle, networks, products, richtext
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -111,9 +111,11 @@ def get_entry(conn: sqlite3.Connection, entry_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def eligible(event: dict, user: dict) -> bool:
+def eligible(event: dict, user: dict, conn: sqlite3.Connection | None = None) -> bool:
+    """May take part: active, of the event's network (if any), with access to its product (ТЗ 27.10 §29)."""
     return user["status"] == "approved" and user["account_state"] == "active" and (
-        event["network_id"] is None or user.get("network_id") == event["network_id"])
+        event["network_id"] is None or user.get("network_id") == event["network_id"]) and (
+        not event.get("product") or (conn is not None and products.has(conn, user, event["product"])))
 
 
 def entries(conn: sqlite3.Connection, event_id: int) -> list[dict]:
@@ -183,7 +185,7 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
     me = next((r for r in board if viewer and r["user_id"] == viewer["id"]), None)
     won = bool(me and me["winner"])
     phase = _phase(event, now)
-    can_submit = (viewer is not None and eligible(event, viewer) and phase == "live" and not pending
+    can_submit = (viewer is not None and eligible(event, viewer, conn) and phase == "live" and not pending
                   and event["visibility"] != "hidden"
                   and rejected < event["max_attempts"] and not (event["mode"] == "first_to_reach" and won))
     return {
@@ -199,6 +201,7 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
         "max_attempts": event["max_attempts"], "starts_at": event["starts_at"], "ends_at": event["ends_at"],
         "buffer_min": event["buffer_min"], "status": event["status"], "phase": phase,
         "network": (networks.get(conn, event["network_id"]) or {}).get("name") if event["network_id"] else None,
+        "product": event.get("product"),
         "leaderboard": [{k: r[k] for k in ("user_id", "name", "score", "confirmed", "pending", "place", "winner", "out")}
                         for r in board],
         "winners_count": sum(r["winner"] for r in board),
@@ -213,7 +216,17 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
 def _scoped(conn: sqlite3.Connection, user: dict, where: str, order: str) -> list[dict]:
     rows = [dict(r) for r in conn.execute(
         f"SELECT * FROM events WHERE deleted_at IS NULL AND status != 'cancelled' AND {where} ORDER BY {order}")]
-    return [r for r in rows if r["network_id"] is None or r["network_id"] == user.get("network_id") or perms.sees_everyone(user)]
+    return [r for r in rows if open_to(conn, r, user)]
+
+
+def open_to(conn: sqlite3.Connection, event: dict, user: dict) -> bool:
+    """The network's people (everyone for a company-wide event); a product's event (ТЗ 27.10 §29) — only those with
+    access to the product. Owners and admins see all."""
+    if perms.sees_everyone(user):
+        return True
+    if event["network_id"] is not None and event["network_id"] != user.get("network_id"):
+        return False
+    return products.has(conn, user, event.get("product"))
 
 
 def _ended(event: dict) -> str | None:
@@ -250,7 +263,7 @@ def readable(conn: sqlite3.Connection, user: dict, event_id: int) -> dict:
     """An event the person may open: from the feed or from «Архив»."""
     event = get(conn, event_id)
     if (event is None or event["deleted_at"] or event["status"] == "cancelled"
-            or not (event["network_id"] is None or event["network_id"] == user.get("network_id") or perms.sees_everyone(user))):
+            or not open_to(conn, event, user)):
         raise ServiceError("Событие не найдено", 404, "not_found")
     return event
 
@@ -281,8 +294,9 @@ def _check_range(starts_at: datetime, ends_at: datetime) -> None:
 def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, starts_at: datetime, ends_at: datetime,
            key: str, description: str | None = None, prize: str | None = None, target: int | None = None,
            max_winners: int = 1, max_attempts: int = 3, network_id: int | None = None, prize_type: str | None = None,
-           prize_photo: str | None = None, prize_media_kind: str | None = None) -> dict:
+           prize_photo: str | None = None, prize_media_kind: str | None = None, product: str | None = None) -> dict:
     title = _clean_title(title)
+    products.check_product(product)
     description_html, description = clean_description(description)
     prize_media_kind = clean_media_kind(prize_media_kind)
     if mode not in ("first_to_reach", "accumulative"):
@@ -308,13 +322,13 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, star
         cur = conn.execute(
             """INSERT INTO events (title, description, description_html, prize, prize_type, prize_photo,
                                    prize_media_kind, mode, target, max_winners, max_attempts, starts_at, ends_at,
-                                   network_id, created_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   network_id, created_by, created_at, product)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (title, description, description_html, (prize or "").strip()[:200] or None,
              lifecycle.clean_prize_type(prize_type), prize_photo, prize_media_kind, mode,
              target if mode == "first_to_reach" else None, max_winners, max_attempts,
              starts_at.isoformat(timespec="minutes"), ends_at.isoformat(timespec="minutes"), network_id,
-             actor["telegram_id"], now_iso()),
+             actor["telegram_id"], now_iso(), product),
         )
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="EVENT_CREATED", key=key,
                   new={"event": cur.lastrowid, "mode": mode}, description=title)
@@ -322,7 +336,7 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, star
 
 
 def check_entry(conn, event: dict | None, user: dict, now: datetime) -> dict:
-    if event is None or event["deleted_at"] or not eligible(event, user):
+    if event is None or event["deleted_at"] or not eligible(event, user, conn):
         raise ServiceError("Событие не найдено", 404, "not_found")
     if event["visibility"] == "hidden":
         raise ServiceError("Это событие завершено или скрыто администрацией", 409, "hidden")

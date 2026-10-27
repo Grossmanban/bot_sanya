@@ -60,6 +60,8 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "main_team_days": ("3", "count"),
     "groups_auto_invite": ("1", "bool"),
     "groups_check_time": ("10:15", "time"),
+    # ТЗ 27.10 §42: rubles per accepted «Яндекс Алиса» execution (owners only; a payout keeps the rate it used)
+    "alice_rate": ("100", "rub"),
     "training_reminder_eve_time": ("20:00", "time"),
     "training_reminder_morning_time": ("08:00", "time"),
     # ТЗ №9: employees see who else works that day (off — only how many)

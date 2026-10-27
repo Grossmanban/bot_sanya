@@ -163,7 +163,7 @@ def _lazy_since(conn, user_id: int) -> str | None:
     """The last day paid before the pool existed: those payouts already paid lazy days at the lazy rate."""
     row = conn.execute(
         """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id
-           WHERE i.user_id = ? AND i.lazy_before IS NULL""", (user_id,)).fetchone()
+           WHERE i.user_id = ? AND i.lazy_before IS NULL AND b.product IS NULL""", (user_id,)).fetchone()
     return row[0]
 
 
@@ -194,7 +194,8 @@ def employee_view(conn: sqlite3.Connection, user_id: int, today: date) -> dict:
     """The employee's side (ТЗ 27.10 §19–20): approved pieces after the last payout and the pool.
     Pieces, not rubles: the payout may come out lower (fines, the pool, deductions)."""
     paid_through = conn.execute(
-        """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id WHERE i.user_id = ?""",
+        """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id
+           WHERE i.user_id = ? AND b.product IS NULL""",  # a product's payout (§41) pays executions, not pieces
         (user_id,)).fetchone()[0] or ""
     pieces = conn.execute(
         f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND status IN {ACTIVE}
@@ -378,7 +379,7 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> dict | None:
 
 def history(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
     return [{**dict(r), "people": r["people"]} for r in conn.execute(
-        """SELECT b.id, b.title, b.period_from, b.period_to, b.total, b.created_at,
+        """SELECT b.id, b.title, b.period_from, b.period_to, b.total, b.created_at, b.product,
                   (SELECT COUNT(*) FROM payout_items i WHERE i.batch_id = b.id) AS people
            FROM payout_batches b ORDER BY b.id DESC LIMIT ?""", (limit,))]
 

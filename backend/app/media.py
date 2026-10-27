@@ -89,6 +89,7 @@ def photo_url(object_id: int, now: float | None = None, kind: str = "report") ->
     violation<N> (N-th proof of a schedule violation decision) — each signed separately."""
     # rounded expiry keeps the URL stable for a while, so the browser can cache the image
     exp = (int((now or time.time()) // 600) * 600) + LINK_TTL
+    # alice — a photo stage of a «Яндекс Алиса» execution, aliceqr — a QR code's picture
     path = f"violation/{object_id}/{kind[9:]}" if kind.startswith("violation") else f"{kind}/{object_id}"
     return f"/api/media/{path}?exp={exp}&sig={_sig(object_id, exp, kind)}"
 

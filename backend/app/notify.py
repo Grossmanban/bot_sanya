@@ -844,6 +844,38 @@ class Notifier:
         await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
                            f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
 
+    async def product_access(self, user: dict, product: str, allow: bool, actor: dict) -> None:
+        from . import products
+
+        title = products.PRODUCTS[product]
+        await self.send(user["telegram_id"], f"🧰 Вам открыт доступ к «{title}» — раздел «Работа» в приложении."
+                        if allow else f"🧰 Доступ к «{title}» закрыт. История выполнений и выплат сохранена.")
+        await self.archive(["доступ"], f"🧰 {who(user)}: «{title}» — {'доступ выдан' if allow else 'доступ закрыт'}"
+                                       f"\nИзменил: {who(actor)}", user)
+
+    async def alice_qr_changed(self, user: dict, on: bool) -> None:
+        await self.send(user["telegram_id"], "🔳 Вам назначен QR-код для «Яндекс Алисы» — можно начинать выполнения."
+                        if on else "🔳 QR-код для «Яндекс Алисы» с вас снят. Новый назначит администратор.")
+
+    async def alice_decided(self, task: dict) -> None:
+        """§39: the person learns the moderator's decision; the money comes after Yandex confirms it."""
+        from . import alice
+
+        user = svc.get_user(self.conn, task["user_id"])
+        if task["status"] == "accepted":
+            text = f"✅ Выполнение {alice.number(task['id'])} принято и ждёт оплаты — оплата после подтверждения Яндекса."
+        else:
+            reason = f"\nПричина: {escape(task['reject_reason'])}" if task["reject_reason"] else ""
+            text = f"❌ Выполнение {alice.number(task['id'])} отклонено и не оплачивается.{reason}"
+        await self.send(user["telegram_id"], text)
+
+    async def alice_paid(self, batch: dict) -> None:
+        for it in batch["items"]:
+            user = svc.get_user(self.conn, it["user_id"])
+            await self.send(user["telegram_id"], f"💰 «Яндекс Алиса»: оплачено выполнений — {it['personal_volume']}.")
+        await self.archive(["выплата", "алиса"], f"💰 Выплата «{escape(batch['title'])}» по «Яндекс Алисе»: "
+                                                 f"{len(batch['items'])} чел., {batch['total']} ₽")
+
     async def group_invited(self, user: dict, kind: str, inv: dict) -> bool:
         """ТЗ 27.10 §27: the personal link goes to the person; the archive keeps the fact (not the link)."""
         from . import groups
@@ -1408,7 +1440,7 @@ class Notifier:
             text += "\n\n" + (event["description_html"] or escape(event["description"]))
         sent = 0
         for user in svc.list_users(self.conn):
-            if events.eligible(event, user):
+            if events.eligible(event, user, self.conn):
                 # the prize photo or video carries the text (or goes first when the text is too long for a caption)
                 sent += await self._deliver(user["telegram_id"], text, event["prize_photo"], self._event_markup(),
                                             event["prize_media_kind"]) is not None
@@ -1449,7 +1481,7 @@ class Notifier:
         from . import events
 
         on_board = {r["user_id"] for r in events.leaderboard(self.conn, event)}
-        chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u)]
+        chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u, self.conn)]
         return list(dict.fromkeys(chats))
 
     async def event_updated(self, update) -> int:
@@ -1491,7 +1523,7 @@ class Notifier:
             lines.append(f"🏆 Приз: {escape(prize_line(event))}")
         text = "\n".join(lines)
         on_board = {r["user_id"] for r in board}
-        chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u)]
+        chats = [u["telegram_id"] for u in svc.list_users(self.conn) if u["id"] in on_board or events.eligible(event, u, self.conn)]
         chats.append(event["created_by"])
         for chat in dict.fromkeys(chats):  # each person once, even the creator who is also a participant
             await self.send(chat, text)

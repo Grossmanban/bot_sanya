@@ -76,6 +76,8 @@ CAN = {
     "invites": {OWNER},             # ТЗ 27.10 §6, §8: owner invitations, «Обновить все ссылки»
     "access_log": {OWNER, ADMIN},   # ТЗ 27.10 §5: «Попытки доступа»
     "groups": {OWNER, ADMIN},       # ТЗ 27.10 §26–27: «Предзакреп» / «Основная команда»
+    "products": {OWNER, ADMIN},     # ТЗ 27.10 §28: give and take access to «Работа» products
+    "alice": {OWNER, ADMIN},        # ТЗ 27.10 §32, §38: QR codes, search queries, moderation, statistics
 }
 
 

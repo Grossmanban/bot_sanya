@@ -1012,6 +1012,97 @@ CREATE INDEX ix_group_invites_link ON group_invites (link);
 """)
 
 
+# 29: «Работа» and «Яндекс Алиса» (ТЗ 27.10 §28–44): access to products, QR codes, executions with three photo
+# stages kept in a Telegram forum group, moderation, the payout by Yandex's report; goals and events per product
+MIGRATIONS.append("""
+CREATE TABLE product_access (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    product     TEXT NOT NULL,
+    granted_at  TEXT NOT NULL,
+    granted_by  INTEGER NOT NULL,
+    revoked_at  TEXT,
+    revoked_by  INTEGER
+);
+CREATE UNIQUE INDEX ux_product_access_live ON product_access (user_id, product) WHERE revoked_at IS NULL;
+CREATE TABLE alice_qr (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    number      TEXT,
+    image       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    created_by  INTEGER NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE alice_qr_assign (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    qr_id       INTEGER NOT NULL REFERENCES alice_qr(id),
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    assigned_at TEXT NOT NULL,
+    assigned_by INTEGER NOT NULL,
+    removed_at  TEXT,
+    removed_by  INTEGER
+);
+CREATE UNIQUE INDEX ux_alice_qr_assign_live ON alice_qr_assign (qr_id, user_id) WHERE removed_at IS NULL;
+CREATE TABLE alice_queries (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    text    TEXT NOT NULL UNIQUE,
+    active  INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE alice_tasks (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER NOT NULL REFERENCES users(id),
+    qr_id          INTEGER NOT NULL REFERENCES alice_qr(id),
+    qr_number      TEXT,
+    query          TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'in_progress'
+                   CHECK (status IN ('in_progress','sending','send_failed','moderation','rejected','accepted','paid','abandoned')),
+    step           INTEGER NOT NULL DEFAULT 0,          -- 0 the QR on screen, 1..3 the photo stage, 4 all three fixed
+    started_at     TEXT NOT NULL,
+    scanned_at     TEXT,
+    stage1_at      TEXT,
+    stage2_at      TEXT,
+    stage3_at      TEXT,
+    completed_at   TEXT,
+    send_error     TEXT,
+    send_attempts  INTEGER NOT NULL DEFAULT 0,
+    chat_id        INTEGER,
+    thread_id      INTEGER,
+    message_ids    TEXT,
+    moderated_by   INTEGER,
+    moderated_at   TEXT,
+    reject_reason  TEXT,
+    payout_id      INTEGER REFERENCES payout_batches(id),
+    paid_at        TEXT
+);
+CREATE UNIQUE INDEX ux_alice_tasks_active ON alice_tasks (user_id) WHERE status = 'in_progress';
+CREATE INDEX ix_alice_tasks_status ON alice_tasks (status, completed_at);
+CREATE INDEX ix_alice_tasks_qr ON alice_tasks (qr_id, status, completed_at);
+CREATE TABLE alice_photos (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     INTEGER NOT NULL REFERENCES alice_tasks(id),
+    stage       INTEGER NOT NULL CHECK (stage IN (1,2,3)),
+    temp_path   TEXT,                 -- until it is in Telegram, removed after a successful send
+    file_id     TEXT,                 -- the photo in the forum group
+    message_id  INTEGER,
+    sha256      TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    uploaded_at TEXT NOT NULL,
+    replaced_at TEXT
+);
+CREATE UNIQUE INDEX ux_alice_photos_live ON alice_photos (task_id, stage) WHERE replaced_at IS NULL;
+CREATE INDEX ix_alice_photos_hash ON alice_photos (sha256);
+CREATE TABLE alice_topics (
+    user_id     INTEGER PRIMARY KEY REFERENCES users(id),
+    chat_id     INTEGER NOT NULL,
+    thread_id   INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+ALTER TABLE payout_batches ADD COLUMN product TEXT;
+ALTER TABLE goals ADD COLUMN product TEXT;
+ALTER TABLE events ADD COLUMN product TEXT;
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

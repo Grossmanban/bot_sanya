@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import app_settings, events, export, goals, groups, notify, recruiting, reports, violations
+from . import alice, app_settings, events, export, goals, groups, notify, recruiting, reports, violations
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -110,6 +110,12 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
         if _every(conn, "groups_auto", now, minutes=10):
             for _ in await groups.auto_invites(conn, notifier.bot, notifier.group_invited):
                 ran.append("group_invite")
+    # ТЗ 27.10 §36: an execution whose photos didn't reach the group is sent again (never left as «sent»)
+    if notifier.bot is not None and _every(conn, "alice_retry", now, minutes=10):
+        for task_id in alice.to_retry(conn):
+            task = await alice.deliver(conn, notifier.bot, task_id)
+            if task and task["status"] == "moderation":
+                ran.append("alice_sent")
     done = goals.check_completions(conn, today, now)
     if done:
         ran.append("goals")
