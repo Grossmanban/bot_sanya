@@ -56,6 +56,10 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "second_stage_units": ("50", "count"),
     # ТЗ 27.10 §8: referral links and their QR codes change this often; the old one stops working
     "link_ttl_minutes": ("60", "ttl"),
+    # ТЗ 27.10 §26–27: «Основная команда» from this many confirmed work days; personal invitations; a daily check
+    "main_team_days": ("3", "count"),
+    "groups_auto_invite": ("1", "bool"),
+    "groups_check_time": ("10:15", "time"),
     "training_reminder_eve_time": ("20:00", "time"),
     "training_reminder_morning_time": ("08:00", "time"),
     # ТЗ №9: employees see who else works that day (off — only how many)

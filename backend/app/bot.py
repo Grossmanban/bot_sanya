@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    ChatJoinRequest,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -20,7 +21,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import broadcasts, day_actual, finance, invites, recruiting, reports
+from . import broadcasts, day_actual, finance, groups, invites, recruiting, reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -821,6 +822,52 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             "с хештегами — ищите по #штраф, #блок, #отчёт или по имени сотрудника."
         )
         await notifier.archive(["архив"], f"Архив подключён — {escape(message.from_user.full_name)}")
+
+    # ------------------------------------------------------------ groups by work days (ТЗ 27.10 §26–27)
+
+    @router.message(Command("group_pre", "group_main"))
+    async def group_here(message: Message):
+        if message.from_user.id not in settings.admin_ids:
+            return
+        kind = "pre" if message.text.split()[0].split("@")[0] == "/group_pre" else "main"
+        if message.chat.type not in ("group", "supergroup"):
+            await message.answer(f"Отправьте /group_{kind} внутри группы «{groups.KINDS[kind]}», куда бот добавлен.")
+            return
+        try:
+            groups.connect(conn, kind, message.chat.id, message.chat.title or groups.KINDS[kind], message.from_user.id)
+        except svc.ServiceError as exc:
+            await message.answer(exc.message)
+            return
+        rights = await groups.bot_rights(message.bot, message.chat.id)
+        missing = [] if rights["invite"] and rights["remove"] else [
+            t for t, ok in (("приглашать пользователей", rights["invite"]), ("банить пользователей", rights["remove"])) if not ok]
+        await message.answer(
+            f"👥 Группа подключена как «{groups.KINDS[kind]}». Приглашения сюда — личные: по ссылке войдёт только тот, "
+            "кому её отправил бот." + (f"\n\n⚠️ Сделайте бота администратором с правами: {', '.join(missing)}." if missing else ""))
+
+    @router.message(Command("group_off"))
+    async def group_off(message: Message):
+        if message.from_user.id not in settings.admin_ids:
+            return
+        for kind in groups.KINDS:
+            if (groups.chat(conn, kind) or {}).get("chat_id") == message.chat.id:
+                groups.connect(conn, kind, None, None, message.from_user.id)
+                await message.answer(f"Группа «{groups.KINDS[kind]}» отключена.")
+                return
+        await message.answer("Эта группа не подключена.")
+
+    @router.chat_join_request()
+    async def join_request(request: ChatJoinRequest):
+        link = request.invite_link.invite_link if request.invite_link else None
+        ok, user = await groups.join_request(conn, request.bot, request.chat.id, request.from_user.id, link)
+        if ok and user is not None:
+            if (groups.chat(conn, "main") or {}).get("chat_id") == request.chat.id and groups.chat(conn, "pre"):
+                try:  # moved up: out of «Предзакреп», if the bot may (ТЗ 27.10 §27)
+                    if await groups.member_state(request.bot, groups.chat(conn, "pre")["chat_id"], user["telegram_id"]) == "member":
+                        await groups.remove(conn, request.bot, user, "pre", None)
+                except svc.ServiceError:
+                    await notifier.to_admins(f"👥 {escape(svc.full_name(user))} вступил в «Основную команду», но остался в "
+                                             "«Предзакрепе»: у бота нет права удалять участников — уберите вручную.")
 
     @router.message(Command("archive_off"))
     async def archive_off(message: Message):

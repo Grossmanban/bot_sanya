@@ -363,6 +363,33 @@ export function SettingsSection() {
           ))}
         </div>
       </section>
+      <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <div>
+          <span className="block font-medium">Группы «Предзакреп» и «Основная команда»</span>
+          <span className="block text-sm text-muted-foreground">
+            С какого подтверждённого рабочего дня — в основную команду; сверка членства раз в день; автоматические личные приглашения
+            (каждому — один раз на группу).
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">Основная команда с, дней</span>
+            <input inputMode="numeric" aria-label="Основная команда с, дней" value={cfg.main_team_days || ""}
+                   onChange={(e) => set({ main_team_days: Number(e.target.value.replace(/\D/g, "").slice(0, 3)) || 0 })}
+                   className="h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] tabular outline-none focus:ring-2 focus:ring-ring/25" />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">Сверка в</span>
+            <input type="time" aria-label="Сверка в" value={cfg.groups_check_time}
+                   onChange={(e) => set({ groups_check_time: e.target.value })}
+                   className="h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] tabular outline-none focus:ring-2 focus:ring-ring/25" />
+          </label>
+        </div>
+        <label className="flex cursor-pointer items-center gap-3">
+          <span className="min-w-0 flex-1 text-sm">Приглашать автоматически</span>
+          <Switch checked={cfg.groups_auto_invite} onCheckedChange={(v) => set({ groups_auto_invite: v })} />
+        </label>
+      </section>
       <section className="flex items-center justify-between gap-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
         <span className="min-w-0">
           <span className="block font-medium">Реферальные ссылки меняются</span>

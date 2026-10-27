@@ -55,7 +55,35 @@ export const ROLE_TITLES: Record<Role, string> = {
 export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
-  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log";
+  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups";
+
+export type GroupKind = "pre" | "main";
+export type GroupMember = "member" | "out" | "unknown" | null;
+
+/** ТЗ 27.10 §26–27: a person's place by confirmed work days and what Telegram says about membership */
+export interface GroupRow {
+  user_id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+  days: number;
+  first_day: string | null;
+  expected: GroupKind;
+  member: Record<GroupKind, GroupMember>;
+  checked_at: string | null;
+  invites: Record<GroupKind, { created_at: string; used_at: string | null; expires_at: string; revoked: boolean; auto: boolean } | null>;
+  issues: string[];
+  action: "invite_pre" | "invite_main" | "move" | "remove_main" | "remove_pre" | "check" | null;
+  action_label: string | null;
+}
+
+export interface GroupsBoard {
+  threshold: number;
+  groups: Record<GroupKind, { title: string; chat_id: number } | null>;
+  rights: Partial<Record<GroupKind, { ok: boolean; admin: boolean; invite: boolean; remove: boolean; error: string | null }>>;
+  bot: boolean;
+  items: GroupRow[];
+}
 
 /** ТЗ 27.10 §6: an owner's invitation link */
 export interface Invite {
@@ -705,6 +733,10 @@ export interface ScheduleSettings {
   internship_units: number;
   /** ТЗ 27.10 §8: referral links (and their QR codes) change this often, minutes */
   link_ttl_minutes: number;
+  /** ТЗ 27.10 §26: «Основная команда» from this many confirmed work days */
+  main_team_days: number;
+  groups_auto_invite: boolean;
+  groups_check_time: string;
   second_stage_units: number;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
@@ -1005,6 +1037,10 @@ export const api = {
     post<{ ok: boolean }>(`/api/shifts/${id}/contact-admin`, { text, idempotency_key: key }),
 
   admin: {
+    groups: () => request<GroupsBoard>("/api/admin/groups"),
+    checkGroups: () => post<GroupsBoard & { checked: number }>("/api/admin/groups/check", {}),
+    groupInvite: (user_id: number, kind: GroupKind) => post<GroupsBoard>("/api/admin/groups/invite", { user_id, kind }),
+    groupRemove: (user_id: number, kind: GroupKind) => post<GroupsBoard>("/api/admin/groups/remove", { user_id, kind }),
     invites: () => request<{ items: Invite[]; ttl_minutes: number }>("/api/admin/invites"),
     createInvite: (body: { label: string; ttl_minutes: number; max_uses: number | null }, key: string) =>
       post<{ invite: Invite; items: Invite[]; ttl_minutes: number }>("/api/admin/invites", { ...body, idempotency_key: key }),

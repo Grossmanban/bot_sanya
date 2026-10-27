@@ -844,6 +844,15 @@ class Notifier:
         await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
                            f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
 
+    async def group_invited(self, user: dict, kind: str, inv: dict) -> bool:
+        """ТЗ 27.10 §27: the personal link goes to the person; the archive keeps the fact (not the link)."""
+        from . import groups
+
+        ok = await self.send(user["telegram_id"], groups.invite_text(kind, inv))
+        await self.archive(["группа"], f"👥 {who(user)}: приглашение в «{groups.KINDS[kind]}»"
+                                       + ("" if ok else " — бот не смог написать человеку"), user)
+        return ok
+
     async def instructor_changed(self, user: dict, actor: dict) -> None:
         """ТЗ 27.10 §22: the person, their new instructor and the archive learn about the assignment."""
         from . import networks

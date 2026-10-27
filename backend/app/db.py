@@ -986,6 +986,32 @@ def _instructors(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_instructors)
 
 
+# 28: groups by work days (ТЗ 27.10 §26–27): what Telegram said about membership, and personal invitations
+MIGRATIONS.append("""
+CREATE TABLE group_members (
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('pre','main')),
+    state       TEXT NOT NULL CHECK (state IN ('member','out','unknown')),
+    checked_at  TEXT NOT NULL,
+    PRIMARY KEY (user_id, kind)
+);
+CREATE TABLE group_invites (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('pre','main')),
+    link        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    used_at     TEXT,
+    revoked_at  TEXT,
+    auto        INTEGER NOT NULL DEFAULT 0,
+    created_by  INTEGER
+);
+CREATE INDEX ix_group_invites_user ON group_invites (user_id, kind);
+CREATE INDEX ix_group_invites_link ON group_invites (link);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

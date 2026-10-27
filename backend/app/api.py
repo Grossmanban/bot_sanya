@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import broadcasts, day_actual, events, finance, goals, invites, lifecycle, networks, payouts, rates, recruiting
+from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
+from . import recruiting
 from . import reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
@@ -250,6 +251,11 @@ class UserRates(BaseModel):
     personal_commission: int | None = None
     clear_personal_commission: bool = False
     idempotency_key: str
+
+
+class GroupAction(BaseModel):
+    user_id: int
+    kind: str
 
 
 class InstructorBody(BaseModel):
@@ -664,6 +670,47 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/invites/rotate")
     async def admin_invites_rotate(body: KeyOnly, admin: dict = Depends(staff("invites"))):
         return {"rotated": invites.rotate_all(conn, admin, body.idempotency_key), **invite_list()}
+
+    # ------------------------------------------------------------ groups by work days (ТЗ 27.10 §26–27)
+
+    async def groups_view() -> dict:
+        data = groups.board(conn)
+        rights = {}
+        for kind, g in data["groups"].items():
+            if g and notifier.bot is not None:
+                rights[kind] = await groups.bot_rights(notifier.bot, g["chat_id"])
+        return {**data, "rights": rights, "bot": notifier.bot is not None}
+
+    @api.get("/admin/groups")
+    async def admin_groups(_: dict = Depends(staff("groups"))):
+        return await groups_view()
+
+    @api.post("/admin/groups/check")
+    async def admin_groups_check(_: dict = Depends(staff("groups"))):
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен", 409, "no_bot")
+        checked = await groups.check(conn, notifier.bot)
+        return {"checked": checked, **await groups_view()}
+
+    @api.post("/admin/groups/invite")
+    async def admin_groups_invite(body: GroupAction, admin: dict = Depends(staff("groups"))):
+        if body.kind not in groups.KINDS:
+            raise svc.ServiceError("Неизвестная группа", 422, "bad_group")
+        user = require(admin, "groups", body.user_id)
+        inv = await groups.invite(conn, notifier.bot, user, body.kind, admin)
+        sent = await notifier.group_invited(user, body.kind, inv)
+        if not sent:
+            raise svc.ServiceError("Ссылка создана, но бот не смог написать человеку — пусть нажмёт /start в боте",
+                                   409, "not_delivered")
+        return await groups_view()
+
+    @api.post("/admin/groups/remove")
+    async def admin_groups_remove(body: GroupAction, admin: dict = Depends(staff("groups"))):
+        if body.kind not in groups.KINDS:
+            raise svc.ServiceError("Неизвестная группа", 422, "bad_group")
+        user = require(admin, "groups", body.user_id)
+        await groups.remove(conn, notifier.bot, user, body.kind, admin)
+        return await groups_view()
 
     @api.get("/admin/access-attempts")
     async def admin_access_attempts(_: dict = Depends(staff("access_log"))):

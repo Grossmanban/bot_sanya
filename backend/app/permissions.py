@@ -75,6 +75,7 @@ CAN = {
     "all_people": {OWNER, ADMIN},   # works with the whole team, not one network (company-wide goals, events)
     "invites": {OWNER},             # ТЗ 27.10 §6, §8: owner invitations, «Обновить все ссылки»
     "access_log": {OWNER, ADMIN},   # ТЗ 27.10 §5: «Попытки доступа»
+    "groups": {OWNER, ADMIN},       # ТЗ 27.10 §26–27: «Предзакреп» / «Основная команда»
 }
 
 

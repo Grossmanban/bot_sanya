@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import app_settings, events, export, goals, notify, recruiting, reports, violations
+from . import app_settings, events, export, goals, groups, notify, recruiting, reports, violations
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -104,11 +104,26 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
     for application in recruiting.reached(conn):
         ran.append("stage_reached")
         await notifier.stage_reached(application)
+    # ТЗ 27.10 §26–27: the daily check of both groups, and personal invitations when someone reaches a group
+    if notifier.bot is not None and any(groups.chat(conn, k) for k in groups.KINDS):
+        await daily("groups_check", True, cfg["groups_check_time"], lambda: groups.check(conn, notifier.bot))
+        if _every(conn, "groups_auto", now, minutes=10):
+            for _ in await groups.auto_invites(conn, notifier.bot, notifier.group_invited):
+                ran.append("group_invite")
     done = goals.check_completions(conn, today, now)
     if done:
         ran.append("goals")
         await notifier.goals_completed(done)
     return ran
+
+
+def _every(conn, name: str, now: datetime, minutes: int) -> bool:
+    """A job that runs at most every N minutes (kept in the database, so restarts don't rerun it)."""
+    last = app_settings.get_raw(conn, f"last:{name}")
+    if last and datetime.fromisoformat(last) > now - timedelta(minutes=minutes):
+        return False
+    app_settings.set_raw(conn, f"last:{name}", now.isoformat(timespec="seconds"))
+    return True
 
 
 def reports_since(conn, today: date) -> date:
