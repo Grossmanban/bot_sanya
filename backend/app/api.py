@@ -670,7 +670,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         items = finance.journal(conn, user_id=user["id"],
                                 statuses=("draft", "active", "paid", "offset", "cancelled"), limit=200)
         # ТЗ 27.10 §19: fines in units, no rubles balance — the employee's own summary
-        return {"summary": finance.employee_summary(conn, user["id"]), "items": [finance.for_employee(t) for t in items]}
+        summary = {**finance.employee_summary(conn, user["id"]), **payouts.employee_view(conn, user["id"], today_local())}
+        return {"summary": summary, "items": [finance.for_employee(t) for t in items]}
 
     # ------------------------------------------------------------ schedule
 

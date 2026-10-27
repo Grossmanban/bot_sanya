@@ -1,7 +1,10 @@
 """SBP payment profile and the payout registry (ТЗ модули 9–10). Owners only, except one's own profile.
 
 Calculation for a period (ТЗ 11.1, decisions for stage 6, flexible rates — see rates.py):
-    base       = Σ over APPROVED reports by day: fact × that person's rate of the day
+    pieces     = P, the APPROVED pieces of the period; L — the «налог на лень» pool (ТЗ 27.10 §20–21):
+                 every approved day below the threshold adds its pieces, every payout takes what it paid lazily
+    base       = min(P, L) × lazy rate + the rest × the person's rate (rates as of the payout);
+                 the pool is written off only by a committed payout
     trainers  += the network's ladder: team volume × the step rate, per day or per week
     owners who work shifts are paid for their own pieces like anyone (their personal rate); a network
     they lead pays no trainer share. The owners' earnings: revenue_per_piece × pieces − everything paid out
@@ -152,6 +155,52 @@ def _open_money(conn, user_id: int, date_to: date) -> list[dict]:
            AND (type = 'deduction' OR event_date <= ?) ORDER BY event_date, id""", (user_id, date_to.isoformat()))]
 
 
+def _lazy_since(conn, user_id: int) -> str | None:
+    """The last day paid before the pool existed: those payouts already paid lazy days at the lazy rate."""
+    row = conn.execute(
+        """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id
+           WHERE i.user_id = ? AND i.lazy_before IS NULL""", (user_id,)).fetchone()
+    return row[0]
+
+
+def lazy_pool(conn: sqlite3.Connection, user_id: int, threshold: int, upto: date) -> int:
+    """L: pieces of approved days below the threshold up to `upto`, minus what payouts took at the lazy rate.
+    Kept across weeks and months; a person with «не применять налог на лень» (threshold 0) has none."""
+    if threshold <= 0:
+        return 0
+    since = _lazy_since(conn, user_id) or ""
+    accrued = conn.execute(
+        f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND status IN {ACTIVE}
+            AND report_state = 'approved' AND training = 0 AND fact_volume IS NOT NULL AND fact_volume < ?
+            AND shift_date > ? AND shift_date <= ?""", (user_id, threshold, since, upto.isoformat())).fetchone()[0]
+    taken = conn.execute("SELECT COALESCE(SUM(lazy_units), 0) FROM payout_items WHERE user_id = ?", (user_id,)).fetchone()[0]
+    return max(0, accrued - taken)
+
+
+def split_lazy(pieces: int, pool: int, own: dict) -> dict:
+    """ТЗ 27.10 §21: min(P, L) pieces at the lazy rate, the rest at the person's rate."""
+    lazy = min(pieces, pool) if own["lazy_threshold"] > 0 else 0
+    full = pieces - lazy
+    return {"lazy_units": lazy, "full_units": full, "lazy_before": pool, "lazy_after": pool - lazy,
+            "rate_base": own["rate_base"], "rate_lazy": own["rate_lazy"],
+            "pieces_pay": full * own["rate_base"] + lazy * own["rate_lazy"]}
+
+
+def employee_view(conn: sqlite3.Connection, user_id: int, today: date) -> dict:
+    """The employee's side (ТЗ 27.10 §19–20): approved pieces after the last payout and the pool.
+    Pieces, not rubles: the payout may come out lower (fines, the pool, deductions)."""
+    paid_through = conn.execute(
+        """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id WHERE i.user_id = ?""",
+        (user_id,)).fetchone()[0] or ""
+    pieces = conn.execute(
+        f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND status IN {ACTIVE}
+            AND report_state = 'approved' AND training = 0 AND fact_volume IS NOT NULL AND shift_date > ?""",
+        (user_id, paid_through)).fetchone()[0]
+    own = Book.load(conn).user_rates(user_id)
+    return {"to_pay_pieces": pieces, "paid_through": paid_through or None,
+            "lazy_units": lazy_pool(conn, user_id, own["lazy_threshold"], today)}
+
+
 def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: Rates,
               network_id: int | None = None) -> list[dict]:
     """The auto-calculator grid (ТЗ 11.2, step 2). Nothing is saved. `rates` are the common rates
@@ -169,7 +218,9 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
     for u in people:
         mine = [a for a in approved if a["user_id"] == u["id"]]
         personal = sum(a["fact_volume"] for a in mine)
-        pieces_pay = sum(book.pay(u["id"], a["fact_volume"]) for a in mine)
+        own = book.user_rates(u["id"])
+        lazy = split_lazy(personal, lazy_pool(conn, u["id"], own["lazy_threshold"], date_to), own)
+        pieces_pay = lazy["pieces_pay"]
         team, commission, share = 0, 0, []
         if u["id"] in led:
             share = book.trainer_share(conn, led[u["id"]], date_from, date_to)
@@ -193,7 +244,8 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             "pieces_pay": pieces_pay,
             "commission": commission,
             "commission_days": share,
-            "rates": book.user_rates(u["id"]),
+            "rates": own,
+            **lazy,
             "base_calc": base,
             **settle(base, money),
         })
@@ -234,7 +286,9 @@ def settle(base: int, money: list[dict]) -> dict:
                 used.append(t["id"])
             else:
                 carried += t["amount"]
-    return {"bonuses": sum(t["amount"] for t in bonuses), "fines": taken["fine"], "deductions": taken["deduction"],
+    fine_units = sum(t.get("pieces") or 0 for t in money if t["type"] == "fine" and t["id"] in used)
+    return {"bonuses": sum(t["amount"] for t in bonuses), "fines": taken["fine"], "fine_units": fine_units,
+            "deductions": taken["deduction"],
             "total": available, "carried_debt": carried, "tx_ids": used,
             "has_deductions": any(t["type"] == "deduction" for t in money)}
 
@@ -276,11 +330,14 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
             base = override if override is not None else r["base_calc"]
             conn.execute(
                 """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
-                       team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
+                       lazy_units, lazy_before, rate_base, rate_lazy)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (batch_id, r["user_id"], r["role"], r["network"], r["phone"], r["bank"], r["recipient"], r["personal_volume"],
                  r["team_volume"], r["base_calc"], base, r["bonuses"], r["fines"], r["deductions"], r["total"],
-                 r["carried_debt"], r["pieces_pay"], r["commission"]),
+                 r["carried_debt"], r["pieces_pay"], r["commission"],
+                 # the pool is written off here, inside the payout's transaction — never by a preview
+                 r["lazy_units"], r["lazy_before"], r["rate_base"], r["rate_lazy"]),
             )
             if r["tx_ids"]:
                 conn.execute(

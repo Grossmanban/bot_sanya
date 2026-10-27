@@ -896,6 +896,16 @@ ALTER TABLE shifts ADD COLUMN edit_window_closed INTEGER NOT NULL DEFAULT 0;
 """)
 
 
+# 25: «Налог на лень» as a pool (ТЗ 27.10 §20–21): what each payout took from it.
+# lazy_before IS NULL — a payout from before the pool: those days were already paid at the lazy rate.
+MIGRATIONS.append("""
+ALTER TABLE payout_items ADD COLUMN lazy_units INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE payout_items ADD COLUMN lazy_before INTEGER;
+ALTER TABLE payout_items ADD COLUMN rate_base INTEGER;
+ALTER TABLE payout_items ADD COLUMN rate_lazy INTEGER;
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

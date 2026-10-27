@@ -193,12 +193,15 @@ export function SummaryCard({ summary, className }: { summary: MoneySummary; cla
       <p className={cn("font-display text-4xl font-semibold tabular", summary.fine_units > 0 && "text-[#ff8a8a]")}>
         {summary.fine_units}
       </p>
-      <dl className="mt-4 grid grid-cols-2 gap-2 text-sm">
+      <dl className="mt-4 grid grid-cols-2 gap-x-2 gap-y-3 text-sm">
+        <div><dt className="text-hero-muted">Штук к оплате</dt><dd className="font-semibold tabular">{summary.to_pay_pieces} шт.</dd></div>
+        <div><dt className="text-hero-muted">Налог на лень</dt><dd className="font-semibold tabular">{summary.lazy_units} шт.</dd></div>
         <div><dt className="text-hero-muted">Бонусы</dt><dd className="font-semibold tabular">{rub(summary.bonuses)}</dd></div>
         <div><dt className="text-hero-muted">Вычеты</dt><dd className="font-semibold tabular">{rub(summary.deductions)}</dd></div>
       </dl>
       <p className="mt-3 text-xs text-hero-muted">
-        Одна единица — твоя ставка за штуку. Удерживается из выплаты.
+        Штуки к оплате — по принятым отчётам{summary.paid_through ? ` после ${dayMonth(summary.paid_through)}` : ""}. Реальная выплата может быть меньше:
+        штрафы, вычеты и налог на лень. Одна штрафная единица — твоя ставка за штуку. Штуки из копилки налога на лень при выплате оплачиваются по пониженной ставке.
         {summary.old_fines > 0 ? ` Ещё ${summary.old_fines} — старые штрафы в рублях, см. список.` : ""}
       </p>
     </section>

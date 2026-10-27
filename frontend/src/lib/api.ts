@@ -510,6 +510,11 @@ export interface Tx {
 /** What the employee sees (ТЗ 27.10 §19): fines in units, bonuses and deductions in rubles. */
 export interface MoneySummary {
   fine_units: number;
+  /** approved pieces after the last payout — pieces, not rubles: the payout may come out lower */
+  to_pay_pieces: number;
+  paid_through: string | null;
+  /** the «налог на лень» pool */
+  lazy_units: number;
   /** fines from before units: counted without a number of units */
   old_fines: number;
   bonuses: number;
@@ -727,6 +732,15 @@ export interface PayoutRow {
   commission: number;
   commission_days?: { date: string; volume: number; step_volume: number; rate: number; amount: number }[];
   rates?: { rate_base: number; rate_lazy: number; lazy_threshold: number };
+  /** «налог на лень» (ТЗ 27.10 §21): min(P, L) pieces at the lazy rate, the rest at the full one */
+  lazy_units: number;
+  full_units?: number;
+  lazy_before: number | null;
+  lazy_after?: number;
+  rate_base: number | null;
+  rate_lazy: number | null;
+  /** fine units taken by this payout (their rubles are in `fines`) */
+  fine_units?: number;
 }
 
 /** The owner's side of a payout (customer round B). */

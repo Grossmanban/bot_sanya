@@ -287,7 +287,14 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney
           </p>
           {(row.pieces_pay > 0 || row.commission > 0) && (
             <p className="mt-1 text-xs text-muted-foreground">
-              {row.pieces_pay > 0 && <>За штуки {rub(row.pieces_pay)}{row.rates ? ` (ставка ${row.rates.rate_base} ₽)` : ""}</>}
+              {row.pieces_pay > 0 && (
+                <>
+                  За штуки {rub(row.pieces_pay)}
+                  {row.rate_base != null && ` (${row.full_units ?? row.personal_volume - row.lazy_units} × ${row.rate_base} ₽`}
+                  {row.rate_base != null && row.lazy_units > 0 && ` + ${row.lazy_units} × ${row.rate_lazy} ₽ налог на лень`}
+                  {row.rate_base != null && ")"}
+                </>
+              )}
               {row.pieces_pay > 0 && row.commission > 0 && " · "}
               {row.commission > 0 && (
                 <span className="font-semibold text-foreground">
@@ -310,6 +317,15 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney
         <Money label="Штрафы" value={row.fines} sign="−" tone="text-cancel" />
         <Money label="Вычеты" value={row.deductions} sign="−" tone="text-final" />
       </div>
+      {!!row.lazy_before && (
+        <p className="mt-2 pl-9 text-xs text-muted-foreground">
+          Копилка налога на лень: <span className="font-semibold text-foreground tabular">{row.lazy_before} → {row.lazy_after ?? row.lazy_before - row.lazy_units} шт.</span>
+          {" "}— спишется только при фиксации выплаты.
+        </p>
+      )}
+      {!!row.fine_units && (
+        <p className="mt-1 pl-9 text-xs text-muted-foreground">Штрафы: {row.fine_units} ед. = {rub(row.fines)}</p>
+      )}
       {row.carried_debt > 0 && (
         <p className="mt-2 pl-9 text-xs text-wait">Не поместилось в выплату: {rub(row.carried_debt)} — останется долгом.</p>
       )}
@@ -454,6 +470,7 @@ function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
                   <span className="block text-xs text-muted-foreground">
                     {it.phone ?? "нет телефона"} · база {rub(it.base)}{it.bonuses ? ` +${rub(it.bonuses)}` : ""}
                     {it.fines ? ` −${rub(it.fines)}` : ""}{it.deductions ? ` −${rub(it.deductions)} вычет` : ""}
+                    {it.lazy_units ? ` · налог на лень ${it.lazy_units} шт. по ${it.rate_lazy} ₽` : ""}
                   </span>
                 </span>
                 <span className="font-display font-semibold tabular">{rub(it.total)}</span>
