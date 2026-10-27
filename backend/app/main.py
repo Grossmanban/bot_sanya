@@ -41,10 +41,11 @@ async def main() -> None:
     )
 
     tasks = [asyncio.create_task(server.serve())]
+    background: list[asyncio.Task] = []  # one-off jobs: their end must not stop the app
     if bot is not None:
         dp = Dispatcher()
         dp.include_router(build_router(conn, notifier))
-        tasks.append(asyncio.create_task(setup_menu_button(bot, conn)))
+        background.append(asyncio.create_task(setup_menu_button(bot, conn)))
         tasks.append(asyncio.create_task(dp.start_polling(bot, handle_signals=False)))
         tasks.append(asyncio.create_task(run_scheduler(conn, notifier)))
 
@@ -53,7 +54,7 @@ async def main() -> None:
         for t in done:
             t.result()
     finally:
-        for t in tasks:
+        for t in tasks + background:
             t.cancel()
         if bot is not None:
             await bot.session.close()
