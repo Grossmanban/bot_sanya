@@ -29,7 +29,9 @@ from .services import ACTIVE, ServiceError, _check_key, _fresh_actor, _seen, log
 from .timeutil import now_iso, now_local
 
 OPEN = ("new", "scheduled")              # waiting for staff
-TABS = {"new": ("new",), "scheduled": ("scheduled",), "internship": ("internship", "done"), "rejected": ("rejected",)}
+# «Ожидают рассмотрения», «На обучении», «Стажировка», «Завершённые» (the second stage is tracked there), «Отклонённые»
+TABS = {"new": ("new",), "scheduled": ("scheduled",), "internship": ("internship",), "done": ("done",),
+        "rejected": ("rejected",)}
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 MAX_TEXT = 100
 
@@ -316,6 +318,25 @@ def reject(conn: sqlite3.Connection, actor: dict, app_id: int, reason: str | Non
         log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="APPLICATION_REJECTED", key=key,
                   new={"application": app_id}, description=reason)
     return get(conn, app_id), True
+
+
+def cancel_training(conn: sqlite3.Connection, actor: dict, app_id: int, key: str) -> tuple[dict, bool]:
+    """«Отменить обучение»: back to «Ожидают рассмотрения», the training details are cleared. Not a refusal."""
+    _check_key(key)
+    with transaction(conn):
+        actor, app = _load(conn, actor, app_id)
+        if _seen(conn, key) or app["status"] == "new":
+            return app, False
+        if app["status"] != "scheduled":
+            raise ServiceError("Отменить можно только назначенное обучение", 409, "bad_status")
+        conn.execute("""UPDATE applications SET status = 'new', training_date = NULL, training_time = NULL,
+                               training_location = NULL, trainer_id = NULL, training_set_by = NULL, training_set_at = NULL,
+                               training_confirmed_at = NULL, reminded_eve = NULL, reminded_morning = NULL WHERE id = ?""",
+                     (app_id,))
+        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="TRAINING_CANCELLED", key=key,
+                  old={k: app[k] for k in ("training_date", "training_time", "training_location", "trainer_id")},
+                  new={"application": app_id})
+    return {**get(conn, app_id), "cancelled_trainer_id": app["trainer_id"], "cancelled_date": app["training_date"]}, True
 
 
 def return_to_reserve(conn: sqlite3.Connection, actor: dict, app_id: int, key: str) -> tuple[dict, bool]:

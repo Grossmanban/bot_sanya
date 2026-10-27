@@ -707,6 +707,16 @@ class Notifier:
             text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")]])
         await self.send(user["telegram_id"], head + "\n\n" + self._training_text(app).split("\n\n")[0].split("\n", 1)[1], markup)
 
+    async def training_cancelled(self, app: dict) -> None:
+        """The candidate is back among those waiting; the trainer is told the session is off."""
+        user = svc.get_user(self.conn, app["user_id"])
+        day = app.get("cancelled_date")
+        when = f" {day[8:10]}.{day[5:7]}" if day else ""
+        await self.send(user["telegram_id"], f"ℹ️ Обучение{when} отменено. Мы свяжемся с вами, когда назначим новую дату.")
+        trainer = svc.get_user(self.conn, app["cancelled_trainer_id"]) if app.get("cancelled_trainer_id") else None
+        if trainer:
+            await self.send(trainer["telegram_id"], f"ℹ️ Обучение{when} отменено\n{self._application_who(app)}")
+
     async def application_rejected(self, app: dict) -> None:
         user = svc.get_user(self.conn, app["user_id"])
         text = "К сожалению, мы вынуждены отказать вам в сотрудничестве."
@@ -759,12 +769,17 @@ class Notifier:
         await self.to_admins(f"🎯 <b>{escape(app['full_name'])}</b> {what}: {app['units']} из {app['target']} шт. "
                              "Проверьте и подтвердите в «Онбординг».", _open_admin())
 
-    async def stage_confirmed(self, app: dict, stage: int, tx: dict | None) -> None:
+    async def stage_confirmed(self, app: dict, stage: int, tx: dict | None, reached: int | None = None) -> None:
+        """`reached` — what the person had when staff checked; a different `counted` is explained to them."""
         user = svc.get_user(self.conn, app["user_id"])
         counted = app[f"stage{stage}_counted"]
+        fixed = f"\nАдминистратор скорректировал результат: {reached} → {counted} шт." \
+            if reached is not None and reached != counted else ""
         if stage == 1:
             await self.send(user["telegram_id"], f"✅ Стажировка засчитана: {counted} шт. Теперь вы в команде — "
-                                                 "дальше смены оплачиваются как обычно.")
+                                                 f"дальше смены оплачиваются как обычно.{fixed}")
+        elif fixed:
+            await self.send(user["telegram_id"], f"✅ Второй этап засчитан: {counted} шт.{fixed}")
         if app["referrer_id"]:
             ref = svc.get_user(self.conn, app["referrer_id"])
             step = "прошёл стажировку" if stage == 1 else "отработал второй этап"

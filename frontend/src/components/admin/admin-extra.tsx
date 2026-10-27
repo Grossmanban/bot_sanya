@@ -345,6 +345,24 @@ export function SettingsSection() {
           </select>
         </div>
       </section>
+      <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <div>
+          <span className="block font-medium">Стажировка и второй этап</span>
+          <span className="block text-sm text-muted-foreground">
+            Сколько единиц к оплате нужно для проверки. Стажировка — учебные смены, они не оплачиваются; второй этап — рабочие
+            смены после стажировки. Засчитывается то количество, которое администратор подтвердил в отчётах.
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {([["internship_units", "Стажировка, ед."], ["second_stage_units", "Второй этап, ед."]] as const).map(([k, label]) => (
+            <label key={k} className="space-y-1">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              <input inputMode="numeric" aria-label={label} className="h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] tabular outline-none focus:ring-2 focus:ring-ring/25"
+                     value={cfg[k] || ""} onChange={(e) => set({ [k]: Number(e.target.value.replace(/\D/g, "").slice(0, 5)) || 0 } as Partial<ScheduleSettings>)} />
+            </label>
+          ))}
+        </div>
+      </section>
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!dirty || !!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} {dirty ? "Сохранить настройки" : "Всё сохранено"}
       </Button>

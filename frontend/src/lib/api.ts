@@ -626,6 +626,9 @@ export interface ScheduleSettings {
   show_colleague_names: boolean;
   /** ТЗ №22: finished goals and events move to «Архив» after this many days */
   feed_hide_after_days: number;
+  /** recruiting: units of the internship and of the second stage (the referrer's bonuses) */
+  internship_units: number;
+  second_stage_units: number;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
   daily_mark_enabled: boolean;
@@ -928,14 +931,16 @@ export const api = {
     broadcastTest: (body: { html: string; signed: boolean; require_ack: boolean; media_file_id: string | null;
       media_kind: "photo" | "video"; allow_reply: boolean }) => post<{ ok: boolean }>("/api/admin/broadcasts/test", body),
     uploadVideo: (file: Blob) => upload<{ file_id: string }>("/api/admin/media/video", file),
-    onboarding: (tab: "new" | "scheduled" | "internship" | "rejected") =>
-      request<{ items: Application[]; counts: Record<"new" | "scheduled" | "internship" | "rejected", number>;
+    onboarding: (tab: "new" | "scheduled" | "internship" | "done" | "rejected") =>
+      request<{ items: Application[]; counts: Record<"new" | "scheduled" | "internship" | "done" | "rejected", number>;
         trainers: { id: number; name: string; username: string | null }[]; points: string[];
         targets: { internship_units: number; second_stage_units: number } }>(`/api/admin/onboarding?tab=${tab}`),
     assignTraining: (id: number, body: { date: string; time: string; location: string; trainer_id: number }, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/training`, { ...body, idempotency_key: key }),
     rejectApplication: (id: number, reason: string | null, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/reject`, { reason, idempotency_key: key }),
+    cancelTraining: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/cancel-training`, { idempotency_key: key }),
     returnApplication: (id: number, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/return`, { idempotency_key: key }),
     contactApplication: (id: number, manager: string) =>

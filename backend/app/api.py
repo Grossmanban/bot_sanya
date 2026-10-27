@@ -1469,6 +1469,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             notifier.spawn(notifier.application_rejected(a))
         return {"application": application_out(a)}
 
+    @api.post("/admin/onboarding/{app_id}/cancel-training")
+    async def admin_training_cancel(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        a, changed = recruiting.cancel_training(conn, admin, app_id, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.training_cancelled(a))
+        return {"application": application_out(recruiting.get(conn, app_id))}
+
     @api.post("/admin/onboarding/{app_id}/return")
     async def admin_application_return(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
         a, changed = recruiting.return_to_reserve(conn, admin, app_id, body.idempotency_key)
@@ -1491,10 +1498,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/onboarding/{app_id}/stage")
     async def admin_stage(app_id: int, body: StageBody, admin: dict = Depends(staff("registrations"))):
+        before = recruiting.progress(conn, recruiting.get(conn, app_id) or {"status": None})
         a, tx, changed = recruiting.confirm_stage(conn, admin, app_id, body.stage, body.counted, body.bonus,
                                                   body.idempotency_key)
         if changed:
-            notifier.spawn(notifier.stage_confirmed(a, body.stage, tx))
+            notifier.spawn(notifier.stage_confirmed(a, body.stage, tx, before["units"] if before else None))
         return {"application": application_out(a)}
 
     @api.get("/media/avatar/{user_id}")

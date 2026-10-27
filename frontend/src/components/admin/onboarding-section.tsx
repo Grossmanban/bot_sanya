@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { CalendarPlus, Check, GraduationCap, LoaderCircle, MessageCircle, RotateCcw, Send, UserX } from "lucide-react";
+import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, RotateCcw, Send, UserX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type User } from "@/lib/api";
@@ -10,12 +10,13 @@ import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 
-type Tab = "new" | "scheduled" | "internship" | "rejected";
+type Tab = "new" | "scheduled" | "internship" | "done" | "rejected";
 const TABS: { id: Tab; label: string }[] = [
-  { id: "new", label: "Не назначены" },
-  { id: "scheduled", label: "Обучение" },
+  { id: "new", label: "Ожидают рассмотрения" },
+  { id: "scheduled", label: "На обучении" },
   { id: "internship", label: "Стажировка" },
-  { id: "rejected", label: "Отклонено" },
+  { id: "done", label: "Завершённые" },
+  { id: "rejected", label: "Отклонённые" },
 ];
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
@@ -118,7 +119,7 @@ export function OnboardingSection({ me }: { me: User }) {
   );
 }
 
-type Panel = "training" | "reject" | "contact" | "stage" | null;
+type Panel = "training" | "reject" | "contact" | "stage" | "cancel" | null;
 
 function Candidate({ a, me, trainers, points, onDone }: {
   a: Application; me: User; trainers: { id: number; name: string; username: string | null }[]; points: string[]; onDone: () => void;
@@ -233,10 +234,15 @@ function Candidate({ a, me, trainers, points, onDone }: {
             <Check /> {a.status === "internship" ? "Проверить стажировку" : "Проверить второй этап"}
           </Button>
         )}
+        {a.status === "scheduled" && (
+          <Button variant="secondary" size="sm" className="h-9 rounded-xl" onClick={() => setPanel(panel === "cancel" ? null : "cancel")}>
+            <CalendarX /> Отменить обучение
+          </Button>
+        )}
         {(a.status === "new" || a.status === "scheduled") && (
           <Button variant="ghost" size="sm" className="h-9 rounded-xl text-cancel hover:bg-cancel-soft hover:text-cancel"
                   onClick={() => setPanel(panel === "reject" ? null : "reject")}>
-            <UserX /> Отказать
+            <UserX /> {a.status === "scheduled" ? "Отказать в обучении" : "Отказать"}
           </Button>
         )}
         {a.status === "rejected" && (
@@ -252,6 +258,15 @@ function Candidate({ a, me, trainers, points, onDone }: {
                                                a.status === "new" ? "Обучение назначено, кандидат получил сообщение" : "Обучение изменено, кандидат получил сообщение")} />}
       {panel === "contact" && <ContactForm me={me} busy={!!busy}
                                            onSave={(manager) => act("contact", () => api.admin.contactApplication(a.id, manager), "Сообщение отправлено кандидату")} />}
+      {panel === "cancel" && (
+        <div className="row-in space-y-2 rounded-2xl bg-muted/50 p-3">
+          <p className="text-sm">Обучение отменится, кандидат вернётся в «Ожидают рассмотрения» — это не отказ. Он и тренер получат сообщение, дату можно назначить заново.</p>
+          <Button className="press h-11 w-full rounded-xl" disabled={!!busy}
+                  onClick={() => act("cancel", (k) => api.admin.cancelTraining(a.id, k), "Обучение отменено, кандидат снова ожидает рассмотрения")}>
+            {busy === "cancel" && <LoaderCircle className="animate-spin" />} Да, отменить обучение
+          </Button>
+        </div>
+      )}
       {panel === "reject" && <RejectForm busy={!!busy}
                                          onSave={(reason) => act("reject", (k) => api.admin.rejectApplication(a.id, reason, k), "Кандидату отказано")} />}
       {panel === "stage" && p && <StageForm a={a} busy={!!busy}
@@ -317,9 +332,9 @@ function RejectForm({ busy, onSave }: { busy: boolean; onSave: (reason: string |
     <div className="row-in space-y-2 rounded-2xl bg-cancel-soft p-3">
       <input className={field} placeholder="Причина (необязательно) — кандидат её увидит" value={reason}
              onChange={(e) => setReason(e.target.value.slice(0, 300))} />
-      <p className="text-xs text-muted-foreground">Кандидат получит отказ, бот перестанет ему отвечать. Вернуть можно во вкладке «Отклонено».</p>
+      <p className="text-xs text-muted-foreground">Кандидат получит отказ, бот перестанет ему отвечать, анкета уйдёт в «Отклонённые». Вернуть можно оттуда.</p>
       <Button className="press h-11 w-full rounded-xl bg-cancel text-white hover:bg-cancel/90" disabled={busy} onClick={() => onSave(reason.trim() || null)}>
-        {busy && <LoaderCircle className="animate-spin" />} Отказать
+        {busy && <LoaderCircle className="animate-spin" />} Да, отказать
       </Button>
     </div>
   );

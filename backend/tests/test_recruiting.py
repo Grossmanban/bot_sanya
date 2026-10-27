@@ -155,3 +155,36 @@ def test_http_register_with_start_param_and_onboarding(conn, make_user):
     assert client.get("/api/admin/onboarding", headers=employee).status_code == 403
     refs = client.get("/api/me/referrals", headers=employee).json()
     assert refs["code"] == code and refs["items"][0]["status"] == "new"
+
+
+def test_cancel_training_tabs_and_a_corrected_stage(conn, make_user):
+    """ТЗ 27.10 §12–14: «Отменить обучение» returns to the waiting list (not a refusal); «Завершённые» is its own tab;
+    a corrected count is explained to the person."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = make_user(first="Тренер")
+    user, app = recruiting.submit(conn, {"id": 6101, "username": "kolya"}, {**FORM, "full_name": "Колин Коля"})
+    day = now_local().date() + timedelta(days=1)
+    recruiting.assign_training(conn, owner, app["id"], day, "11:00", "Европа", trainer["id"], svc.new_key())
+    waiting = recruiting.submit(conn, {"id": 6102}, FORM)[1]
+    assert recruiting.cancel_training(conn, owner, waiting["id"], svc.new_key())[1] is False  # nothing to cancel
+    a, changed = recruiting.cancel_training(conn, owner, app["id"], svc.new_key())
+    assert changed and a["status"] == "new" and a["training_date"] is None and a["trainer_id"] is None
+    assert svc.get_user(conn, user["id"])["status"] == "pending"  # not a refusal
+    n = FakeNotifier(conn)
+    run(n.training_cancelled(a))
+    assert any(chat == 6101 and "Обучение" in t and "отменено" in t for chat, t in n.sent)
+    assert any(chat == trainer["telegram_id"] for chat, _ in n.sent)
+    assert recruiting.counts(conn) | {} == {"new": 2, "scheduled": 0, "internship": 0, "done": 0, "rejected": 0}
+
+    recruiting.assign_training(conn, owner, app["id"], day, "11:00", "Европа", trainer["id"], svc.new_key())
+    recruiting.start_internship(conn, owner, app["id"], svc.new_key())
+    a, _, _ = recruiting.confirm_stage(conn, owner, app["id"], 1, 18, 0, svc.new_key())
+    assert recruiting.counts(conn)["done"] == 1 and recruiting.counts(conn)["internship"] == 0
+    assert [x["id"] for x in recruiting.listing(conn, "done")] == [app["id"]]
+    n.sent.clear()
+    run(n.stage_confirmed(a, 1, None, reached=20))
+    [text] = [t for chat, t in n.sent if chat == 6101]
+    assert "Стажировка засчитана: 18" in text and "20 → 18" in text
+    n.sent.clear()
+    run(n.stage_confirmed(a, 1, None, reached=18))  # the same value — no correction line
+    assert not any("скорректировал" in t for _, t in n.sent)
