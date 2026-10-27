@@ -27,7 +27,8 @@ const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
 ];
 
 // role colours in the header (ТЗ №1): owner, admin, trainer, employee
-const ROLE_DOT: Record<User["role"], string> = { owner: "bg-final", admin: "bg-primary", trainer: "bg-wait", employee: "bg-go" };
+const ROLE_DOT: Record<User["role"], string> = { owner: "bg-final", admin: "bg-primary", trainer: "bg-wait",
+  instructor: "bg-wait", employee: "bg-go" };
 
 export function Wordmark({ className }: { className?: string }) {
   return <span className={cn("font-display font-semibold tracking-tight lowercase", className)}>выход</span>;

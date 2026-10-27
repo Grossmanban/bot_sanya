@@ -191,6 +191,8 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
               ["rate_lazy", "Налог на лень, ₽ за шт."],
               ["lazy_threshold", "Налог, если меньше, шт."],
               ["trainer_commission", "Тренеру, ₽ за шт. сети"],
+              ["instructor_commission", "Инструктору, ₽ за шт."],
+              ["piece_cap", "Предел за штуку, ₽"],
             ] as [keyof PayoutRates, string][]).map(([k, label]) => (
               <label key={k} className="space-y-1.5">
                 <span className="text-xs text-muted-foreground">{label}</span>
@@ -280,7 +282,7 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney
           <p className="truncate font-semibold">{row.name}</p>
           <p className="text-xs text-muted-foreground">
             {ROLE_TITLES[row.role]}{row.network ? ` · ${row.network}` : ""} · {row.personal_volume} шт.
-            {row.team_volume ? ` · сеть ${row.team_volume} шт.` : ""}
+            {row.team_volume ? ` · ${row.commission_kind === "instructor" ? "его люди" : "сеть"} ${row.team_volume} шт.` : ""}
           </p>
           <p className={cn("text-xs", row.bank ? "text-muted-foreground" : "font-semibold text-wait")}>
             {row.bank ? `${row.bank}, ${row.phone}` : "Реквизиты не заполнены"}
@@ -298,11 +300,12 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney
               {row.pieces_pay > 0 && row.commission > 0 && " · "}
               {row.commission > 0 && (
                 <span className="font-semibold text-foreground">
-                  тренерские {rub(row.commission)} ({row.team_volume} шт. по {steps.join("/")} ₽)
+                  {row.commission_kind === "instructor" ? "инструкторские" : "тренерские"} {rub(row.commission)} ({row.team_volume} шт. по {steps.join("/")} ₽)
                 </span>
               )}
             </p>
           )}
+          {!!row.commission_days?.length && <CommissionDays row={row} />}
         </div>
         <span className="font-display text-lg font-semibold tabular">{rub(total)}</span>
       </div>
@@ -340,6 +343,45 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney
         )}
       </div>
     </li>
+  );
+}
+
+/** ТЗ 27.10 §25: metric (approved pieces), per day — the result, the step reached, the rate paid within the delta. */
+function CommissionDays({ row }: { row: PayoutRow }) {
+  const [open, setOpen] = useState(false);
+  const days = row.commission_days ?? [];
+  return (
+    <div className="mt-1">
+      <button className="text-xs font-semibold text-primary underline-offset-2 hover:underline" onClick={() => setOpen((v) => !v)}>
+        {open ? "Скрыть расчёт" : "Расчёт по дням"}
+      </button>
+      {open && (
+        <div className="mt-1.5 overflow-hidden rounded-xl bg-muted/50 text-xs">
+          <p className="px-3 pt-2 text-muted-foreground">
+            Метрика — принятые штуки {row.commission_kind === "instructor" ? "закреплённых сотрудников" : "сети"}. Ступень оплачивает все штуки.
+            {row.delta != null && ` Тренер и инструктор вместе — не больше ${row.delta} ₽ за штуку (тренер первым).`}
+          </p>
+          <table className="mt-1 w-full tabular">
+            <thead className="text-muted-foreground">
+              <tr><th className="px-3 py-1 text-left font-normal">День</th><th className="font-normal">Шт.</th><th className="font-normal">Для ступени</th>
+                <th className="font-normal">Ступень</th><th className="font-normal">Платим</th><th className="px-3 text-right font-normal">Сумма</th></tr>
+            </thead>
+            <tbody>
+              {days.map((d) => (
+                <tr key={d.date} className="border-t border-border/60">
+                  <td className="px-3 py-1">{d.date.slice(8, 10)}.{d.date.slice(5, 7)}</td>
+                  <td className="text-center">{d.volume}</td>
+                  <td className="text-center">{d.step_volume}</td>
+                  <td className="text-center">{d.step_rate ?? d.rate} ₽</td>
+                  <td className={cn("text-center", d.step_rate != null && d.step_rate !== d.rate && "font-semibold text-wait")}>{d.rate} ₽</td>
+                  <td className="px-3 text-right">{rub(d.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 

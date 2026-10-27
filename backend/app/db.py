@@ -950,6 +950,42 @@ ALTER TABLE referral_hits ADD COLUMN link_id INTEGER REFERENCES invite_links(id)
 """)
 
 
+def _instructors(conn: sqlite3.Connection) -> None:
+    """Migration 27 (ТЗ 27.10 §22–25): the «instructor» role, people assigned to an instructor, an individual rate
+    for trainers and instructors, the instructors' ladder of a network.
+
+    The role's CHECK can't change in place: users is rebuilt from its own current definition (create-copy-drop-rename),
+    every row and index kept."""
+    import re
+
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").fetchone()[0]
+    new = sql.replace("CHECK (role IN ('employee','trainer','admin'))",
+                      "CHECK (role IN ('employee','trainer','instructor','admin'))")
+    if new == sql:
+        raise RuntimeError("migration 27: the users.role check was not found")
+    new = re.sub(r'^CREATE TABLE\s+"?users"?', "CREATE TABLE users_new", new, count=1)
+    indexes = [r[0] for r in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'users' AND sql IS NOT NULL")]
+    cols = ", ".join(r[1] for r in conn.execute("PRAGMA table_info(users)"))
+    conn.execute(new)
+    conn.execute(f"INSERT INTO users_new ({cols}) SELECT {cols} FROM users")
+    conn.execute("DROP TABLE users")
+    conn.execute("ALTER TABLE users_new RENAME TO users")
+    for index in indexes:
+        conn.execute(index)
+    _run_script(conn, """
+    ALTER TABLE users ADD COLUMN instructor_id INTEGER REFERENCES users(id);
+    ALTER TABLE users ADD COLUMN personal_commission INTEGER;
+    ALTER TABLE networks ADD COLUMN instructor_ladder TEXT;
+    ALTER TABLE networks ADD COLUMN instructor_ladder_period TEXT NOT NULL DEFAULT 'day'
+        CHECK (instructor_ladder_period IN ('day','week'));
+    CREATE INDEX ix_users_instructor ON users (instructor_id) WHERE instructor_id IS NOT NULL;
+    """)
+
+
+MIGRATIONS.append(_instructors)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

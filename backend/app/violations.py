@@ -197,7 +197,7 @@ def scan(conn: sqlite3.Connection, common: int, today: date | None = None) -> li
                AND (decided_at IS NULL OR substr(decided_at, 1, 10) < ?)""", (start.isoformat(),)).fetchall():
             u = dict(u)
             quota = norm_of(u, common)
-            if quota <= 0 or perms.role_of(u) not in (perms.EMPLOYEE, perms.TRAINER):
+            if quota <= 0 or perms.role_of(u) not in (perms.EMPLOYEE, perms.TRAINER, perms.INSTRUCTOR):
                 continue
             worked = work_days(conn, u["id"], start, end)
             if len(worked) >= quota:
@@ -222,7 +222,7 @@ def unmarked(conn: sqlite3.Connection, day: date) -> list[dict]:
     return [dict(u) for u in conn.execute(
         """SELECT * FROM users WHERE status = 'approved' AND account_state = 'active' AND work_status = 'working'
            ORDER BY first_name, last_name""")
-        if u["id"] not in marked and perms.role_of(dict(u)) in (perms.EMPLOYEE, perms.TRAINER)]
+        if u["id"] not in marked and perms.role_of(dict(u)) in (perms.EMPLOYEE, perms.TRAINER, perms.INSTRUCTOR)]
 
 
 def scan_unmarked(conn: sqlite3.Connection, day: date) -> list[dict]:

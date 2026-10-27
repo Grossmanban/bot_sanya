@@ -97,6 +97,8 @@ class PayoutRates(BaseModel):
     rate_lazy: int | None = None
     lazy_threshold: int | None = None
     trainer_commission: int | None = None
+    instructor_commission: int | None = None
+    piece_cap: int | None = None
 
 
 class PayoutPreview(BaseModel):
@@ -234,6 +236,9 @@ class NetworkPatch(BaseModel):
     ladder: list[LadderStep] | None = None
     ladder_period: str | None = None
     ladder_counts_trainer: bool | None = None
+    # ТЗ 27.10 §25: the instructors' ladder of this network
+    instructor_ladder: list[LadderStep] | None = None
+    instructor_ladder_period: str | None = None
     idempotency_key: str
 
 
@@ -241,6 +246,14 @@ class UserRates(BaseModel):
     personal_rate: int | None = None
     clear_personal_rate: bool = False
     lazy_exempt: bool | None = None
+    # trainers and instructors: an individual rate per piece of their people (ТЗ 27.10 §24)
+    personal_commission: int | None = None
+    clear_personal_commission: bool = False
+    idempotency_key: str
+
+
+class InstructorBody(BaseModel):
+    instructor_id: int | None = None
     idempotency_key: str
 
 
@@ -442,6 +455,7 @@ def public_user(user: dict) -> dict:
         "account_state": user["account_state"],
         "state_reason": user["state_reason"],
         "network_id": user["network_id"],
+        "instructor_id": user.get("instructor_id"),  # ТЗ 27.10 §22: None — directly under the trainer
         "is_owner": svc.is_owner(user),
         "notify_reminders": bool(user.get("notify_reminders", 1)),
         # «не работает 12 дн.»: seen by the person and by admins and trainers
@@ -454,7 +468,8 @@ def public_user(user: dict) -> dict:
 
 def money_fields(user: dict) -> dict:
     """A person's rates — shown to owners only (customer round B)."""
-    return {"personal_rate": user.get("personal_rate"), "lazy_exempt": bool(user.get("lazy_exempt"))}
+    return {"personal_rate": user.get("personal_rate"), "lazy_exempt": bool(user.get("lazy_exempt")),
+            "personal_commission": user.get("personal_commission")}
 
 
 # All handlers and dependencies are `async def` on purpose: they then run on the event loop,
@@ -1349,6 +1364,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             money["ladder_period"] = body.ladder_period
         if body.ladder_counts_trainer is not None:
             money["ladder_counts_trainer"] = body.ladder_counts_trainer
+        if body.instructor_ladder is not None:
+            money["instructor_ladder"] = [{"from": s.from_, "rate": s.rate} for s in body.instructor_ladder]
+        if body.instructor_ladder_period is not None:
+            money["instructor_ladder_period"] = body.instructor_ladder_period
         if money:
             if not perms.can(owner, "money"):
                 raise svc.ServiceError("Ставки меняет только владелец", 403, "owner_only")
@@ -1364,6 +1383,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             changes["personal_rate"] = None if body.clear_personal_rate else body.personal_rate
         if body.lazy_exempt is not None:
             changes["lazy_exempt"] = body.lazy_exempt
+        if body.personal_commission is not None or body.clear_personal_commission:
+            changes["personal_commission"] = None if body.clear_personal_commission else body.personal_commission
         user = rates.set_user_rates(conn, owner, user_id, changes, body.idempotency_key)
         return {"user": {**public_user(user), **money_fields(user)}}
 
@@ -1383,6 +1404,14 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if changed:
             name = networks.get(conn, body.network_id)["name"] if body.network_id else None
             notifier.spawn(notifier.network_changed(user, name, owner))
+        return {"user": public_user(user), "changed": changed}
+
+    @api.post("/admin/team/{user_id}/instructor")
+    async def admin_member_instructor(user_id: int, body: InstructorBody, owner: dict = Depends(staff("networks"))):
+        """ТЗ 27.10 §22: assign a person to an instructor of their network, or back to the trainer (None)."""
+        user, changed = networks.set_instructor(conn, owner, user_id, body.instructor_id, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.instructor_changed(user, owner))
         return {"user": public_user(user), "changed": changed}
 
     # ------------------------------------------------------------ money (ТЗ модуль 4)

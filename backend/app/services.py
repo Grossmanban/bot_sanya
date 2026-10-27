@@ -305,7 +305,7 @@ def team(conn) -> list[dict]:
 
 
 def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict, bool]:
-    if role not in ("admin", "trainer", "employee"):
+    if role not in ("admin", "trainer", "instructor", "employee"):
         raise ServiceError("Некорректная роль", 422, "bad_role")
     if not is_owner(actor):
         raise ServiceError("Назначать роли может только владелец", 403, "owner_only")
@@ -326,6 +326,10 @@ def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
         if role != "trainer":  # no longer leads a network
             conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
+        if role != "instructor":  # their people go back to the trainer — nobody is left without a lead (ТЗ 27.10 §23)
+            conn.execute("UPDATE users SET instructor_id = NULL WHERE instructor_id = ?", (user_id,))
+        if role != "employee":  # staff aren't assigned to an instructor
+            conn.execute("UPDATE users SET instructor_id = NULL WHERE id = ?", (user_id,))
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="ROLE_CHANGED", key=key,
                   old={"role": user["role"]}, new={"role": role})
     return get_user(conn, user_id), True
@@ -448,7 +452,7 @@ def day_totals(conn, day: date) -> tuple[int, int]:
 
 def active_shifts_on(conn, day: date) -> list[dict]:
     rows = conn.execute(
-        f"""SELECT s.*, u.first_name, u.last_name, u.username, u.telegram_id, u.network_id
+        f"""SELECT s.*, u.first_name, u.last_name, u.username, u.telegram_id, u.network_id, u.instructor_id
             FROM shifts s JOIN users u ON u.id = s.user_id
             WHERE s.shift_date = ? AND s.status IN {ACTIVE}
             ORDER BY s.start_time, u.first_name""",
@@ -1046,12 +1050,15 @@ def admin_delete_shift(conn, admin: dict, shift_id: int, reason: str, key: str) 
 
 
 def raspred(conn, day: date, viewer: dict | None = None) -> dict:
-    """The day's list for the work chat. A trainer (viewer) gets only their own network's people."""
+    """The day's list for the work chat. A trainer (viewer) gets only their own network's people,
+    an instructor only the people assigned to them."""
     shifts = active_shifts_on(conn, day)
     network = None
     if viewer is not None and not perms.sees_everyone(viewer):
         mine = viewer.get("network_id")
         shifts = [s for s in shifts if mine is not None and s["network_id"] == mine]
+        if perms.role_of(viewer) == perms.INSTRUCTOR:
+            shifts = [s for s in shifts if s["instructor_id"] == viewer["id"]]
         network = conn.execute("SELECT name FROM networks WHERE id = ?", (mine,)).fetchone() if mine else None
     lines = []
     for s in shifts:

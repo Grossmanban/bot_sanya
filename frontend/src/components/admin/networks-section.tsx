@@ -93,6 +93,7 @@ function NetworkCard({ net, people, owners, canEdit, onChanged }: {
   const { busy, run } = useAction();
   const memberIds = new Set([...net.members.map((m) => m.id), net.trainer?.id]);
   const candidates = people.filter((u) => !memberIds.has(u.id));
+  const instructors = net.members.filter((m) => m.role === "instructor");
 
   const act = async (name: string, fn: (k: string) => Promise<unknown>, ok: string) => {
     try {
@@ -161,9 +162,24 @@ function NetworkCard({ net, people, owners, canEdit, onChanged }: {
       {net.members.length > 0 && (
         <ul className="divide-y border-t">
           {net.members.map((m) => (
-            <li key={m.id} className="flex items-center gap-3 px-5 py-2.5 md:px-6">
+            <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 py-2.5 md:px-6">
               <span className={cn("size-1.5 rounded-full", m.work_status === "working" ? "bg-go" : "bg-idle")} />
               <span className="min-w-0 flex-1 truncate text-[15px]">{m.name}</span>
+              {m.role === "instructor" && <span className="shrink-0 rounded-full bg-wait-soft px-2 py-0.5 text-xs font-semibold text-wait">инструктор</span>}
+              {canEdit && m.role === "employee" && instructors.length > 0 && (
+                <select aria-label="Кому подчиняется" disabled={!!busy} value={m.instructor_id ?? ""}
+                        className="order-last ml-4.5 h-8 max-w-full basis-full rounded-lg border-0 bg-muted px-2 text-xs outline-none sm:order-none sm:ml-0 sm:basis-auto sm:max-w-44"
+                        onChange={(e) => act(`ins-${m.id}`, (k) => api.admin.setInstructor(m.id, e.target.value ? Number(e.target.value) : null, k),
+                          e.target.value ? "Закреплён за инструктором" : "Работает напрямую с тренером")}>
+                  <option value="">Тренеру напрямую</option>
+                  {instructors.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+                </select>
+              )}
+              {!canEdit && m.instructor_id && (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  у {instructors.find((i) => i.id === m.instructor_id)?.name.split(" ")[0] ?? "инструктора"}
+                </span>
+              )}
               {m.account_state === "paused" ? <span className="text-xs font-semibold text-wait">пауза</span>
                 : m.work_status !== "working" && offFor(m.status_days) && (
                   <span className="shrink-0 text-xs text-muted-foreground">не работает {offFor(m.status_days)}</span>
@@ -253,17 +269,23 @@ function NetworkRates({ net, onChanged }: { net: Network; onChanged: () => void 
     (net.ladder ?? []).map((s) => ({ from: String(s.from), rate: String(s.rate) })));
   const [period, setPeriod] = useState<"day" | "week">(net.ladder_period ?? "day");
   const [withTrainer, setWithTrainer] = useState(!!net.ladder_counts_trainer);
+  const [isteps, setISteps] = useState<{ from: string; rate: string }[]>(
+    (net.instructor_ladder ?? []).map((s) => ({ from: String(s.from), rate: String(s.rate) })));
+  const [iperiod, setIPeriod] = useState<"day" | "week">(net.instructor_ladder_period ?? "day");
+  const hasInstructors = net.members.some((m) => m.role === "instructor");
   const { busy, run } = useAction();
   const ownerLed = !!net.trainer?.is_owner;
   const summary = ownerLed ? "без тренерских" : (net.ladder?.length ? `лестница: ${net.ladder.map((s) => `от ${s.from} — ${s.rate} ₽`).join(", ")}`
     : "тренеру — общая комиссия");
 
   async function save() {
-    const ladder = steps.filter((s) => s.from !== "" && s.rate !== "").map((s) => ({ from: Number(s.from), rate: Number(s.rate) }));
+    const clean = (list: { from: string; rate: string }[]) =>
+      list.filter((s) => s.from !== "" && s.rate !== "").map((s) => ({ from: Number(s.from), rate: Number(s.rate) }));
     try {
       await run("rates", (k) => api.admin.updateNetwork(net.id, {
-        ladder, ladder_period: period, ladder_counts_trainer: withTrainer,
-      }, k), "Тренерские сети сохранены");
+        ladder: clean(steps), ladder_period: period, ladder_counts_trainer: withTrainer,
+        instructor_ladder: clean(isteps), instructor_ladder_period: iperiod,
+      }, k), "Ставки сети сохранены");
       setOpen(false);
       onChanged();
     } catch {
@@ -276,7 +298,7 @@ function NetworkRates({ net, onChanged }: { net: Network; onChanged: () => void 
       <button className="press flex w-full items-center gap-3 text-left" onClick={() => setOpen((v) => !v)}>
         <span className="grid size-9 place-items-center rounded-xl bg-muted"><Coins className="size-4" /></span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[15px] font-medium">Тренерские сети</span>
+          <span className="block text-[15px] font-medium">Тренерские и инструкторские</span>
           <span className="block truncate text-xs text-muted-foreground">{summary}</span>
         </span>
         <span className="text-xs font-semibold text-muted-foreground">{open ? "Скрыть" : "Изменить"}</span>
@@ -294,39 +316,7 @@ function NetworkRates({ net, onChanged }: { net: Network; onChanged: () => void 
                   Без ступеней — общая комиссия за штуку.
                 </p>
               </div>
-              <div className="flex gap-1 rounded-xl bg-muted p-1">
-                {(["day", "week"] as const).map((p) => (
-                  <button key={p} onClick={() => setPeriod(p)}
-                          className={cn("press h-8 flex-1 rounded-lg text-xs font-semibold", period === p ? "bg-card shadow-lift" : "text-muted-foreground")}>
-                    {p === "day" ? "Объём за день" : "Объём за неделю"}
-                  </button>
-                ))}
-              </div>
-              <ul className="space-y-2">
-                {steps.map((st, i) => (
-                  <li key={i} className="flex items-center gap-2 text-sm">
-                    <span className="text-muted-foreground">от</span>
-                    <input inputMode="numeric" aria-label="От, штук" value={st.from}
-                           onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, from: e.target.value.replace(/\D/g, "").slice(0, 6) } : x)))}
-                           className="h-9 w-20 rounded-lg border-0 bg-muted px-2 text-sm tabular outline-none" />
-                    <span className="text-muted-foreground">шт. →</span>
-                    <input inputMode="numeric" aria-label="Ставка, ₽ за штуку" value={st.rate}
-                           onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, rate: e.target.value.replace(/\D/g, "").slice(0, 6) } : x)))}
-                           className="h-9 w-16 rounded-lg border-0 bg-muted px-2 text-sm tabular outline-none" />
-                    <span className="text-muted-foreground">₽/шт.</span>
-                    <button aria-label="Убрать ступень" onClick={() => setSteps(steps.filter((_, j) => j !== i))}
-                            className="press ml-auto grid size-8 place-items-center rounded-lg text-muted-foreground hover:bg-muted">
-                      <Trash2 className="size-4" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              {steps.length < 10 && (
-                <Button variant="secondary" size="sm" className="press h-9 rounded-xl"
-                        onClick={() => setSteps([...steps, { from: steps.length ? "" : "0", rate: "" }])}>
-                  <Plus /> Ступень
-                </Button>
-              )}
+              <LadderEditor steps={steps} setSteps={setSteps} period={period} setPeriod={setPeriod} />
               <label className="flex cursor-pointer items-center gap-3">
                 <span className="min-w-0 flex-1 text-sm">
                   Учитывать штуки самого тренера
@@ -336,11 +326,65 @@ function NetworkRates({ net, onChanged }: { net: Network; onChanged: () => void 
               </label>
             </div>
           )}
+          <div className="space-y-3">
+            <div>
+              <p className="text-sm font-semibold">Лестница инструкторов</p>
+              <p className="text-xs text-muted-foreground">
+                Считается по принятым штукам людей, закреплённых за инструктором. Вместе с тренером — не больше
+                «Предела за штуку» минус общая ставка (150 − 120 = 30 ₽): тренер получает первым, инструктор — остаток.
+                Без ступеней — общая ставка инструктора из «Настроек».{!hasInstructors && " В сети пока нет инструкторов."}
+              </p>
+            </div>
+            <LadderEditor steps={isteps} setSteps={setISteps} period={iperiod} setPeriod={setIPeriod} />
+          </div>
           <Button className="press h-11 w-full rounded-xl font-semibold" disabled={!!busy} onClick={save}>
             {busy && <LoaderCircle className="animate-spin" />} Сохранить ставки сети
           </Button>
         </div>
       )}
     </div>
+  );
+}
+
+function LadderEditor({ steps, setSteps, period, setPeriod }: {
+  steps: { from: string; rate: string }[]; setSteps: (s: { from: string; rate: string }[]) => void;
+  period: "day" | "week"; setPeriod: (p: "day" | "week") => void;
+}) {
+  return (
+    <>
+      <div className="flex gap-1 rounded-xl bg-muted p-1">
+        {(["day", "week"] as const).map((p) => (
+          <button key={p} onClick={() => setPeriod(p)}
+                  className={cn("press h-8 flex-1 rounded-lg text-xs font-semibold", period === p ? "bg-card shadow-lift" : "text-muted-foreground")}>
+            {p === "day" ? "Объём за день" : "Объём за неделю"}
+          </button>
+        ))}
+      </div>
+      <ul className="space-y-2">
+        {steps.map((st, i) => (
+          <li key={i} className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">от</span>
+            <input inputMode="numeric" aria-label="От, штук" value={st.from}
+                   onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, from: e.target.value.replace(/\D/g, "").slice(0, 6) } : x)))}
+                   className="h-9 w-20 rounded-lg border-0 bg-muted px-2 text-sm tabular outline-none" />
+            <span className="text-muted-foreground">шт. →</span>
+            <input inputMode="numeric" aria-label="Ставка, ₽ за штуку" value={st.rate}
+                   onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, rate: e.target.value.replace(/\D/g, "").slice(0, 6) } : x)))}
+                   className="h-9 w-16 rounded-lg border-0 bg-muted px-2 text-sm tabular outline-none" />
+            <span className="text-muted-foreground">₽/шт.</span>
+            <button aria-label="Убрать ступень" onClick={() => setSteps(steps.filter((_, j) => j !== i))}
+                    className="press ml-auto grid size-8 place-items-center rounded-lg text-muted-foreground hover:bg-muted">
+              <Trash2 className="size-4" />
+            </button>
+          </li>
+        ))}
+      </ul>
+      {steps.length < 10 && (
+        <Button variant="secondary" size="sm" className="press h-9 rounded-xl"
+                onClick={() => setSteps([...steps, { from: steps.length ? "" : "0", rate: "" }])}>
+          <Plus /> Ступень
+        </Button>
+      )}
+    </>
   );
 }

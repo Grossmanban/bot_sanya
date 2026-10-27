@@ -52,12 +52,14 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
   return (
     <div className="space-y-4">
       {canDecide && <Invite botUsername={data.bot_username} />}
-      {me.role === "trainer" && (
+      {(me.role === "trainer" || me.role === "instructor") && (
         <section className="rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
           <p className="text-sm text-hero-muted">Ваша сеть</p>
           <h2 className="font-display text-xl font-semibold">{network ?? "не назначена"}</h2>
           <p className="mt-1 text-sm text-hero-muted">
-            {network ? "Вы видите и ведёте только людей своей сети." : "Попросите владельца добавить вас в сеть — тогда здесь появится команда."}
+            {!network ? "Попросите владельца добавить вас в сеть — тогда здесь появится команда."
+              : me.role === "instructor" ? "Вы видите и ведёте только закреплённых за вами сотрудников."
+                : "Вы видите и ведёте только людей своей сети, включая людей инструкторов."}
           </p>
         </section>
       )}
@@ -228,7 +230,7 @@ function Group({
   );
 }
 
-const ROLE_OPTIONS: Exclude<Role, "owner">[] = ["employee", "trainer", "admin"];
+const ROLE_OPTIONS: Exclude<Role, "owner">[] = ["employee", "instructor", "trainer", "admin"];
 
 function MemberSheet({
   user,
@@ -372,7 +374,7 @@ function MemberSheet({
                 </div>
               )}
 
-              {approved && !isSelf && !user.is_owner && (user.role === "employee" || user.role === "trainer") && caps.includes("review") && (
+              {approved && !isSelf && !user.is_owner && ["employee", "trainer", "instructor"].includes(user.role) && caps.includes("review") && (
                 <NormPicker user={user} onUpdated={onUpdated} />
               )}
               {/* anyone who works shifts may get a personal rate — owners too, including themselves */}
@@ -383,7 +385,7 @@ function MemberSheet({
               {canRole && (
                 <div className="mt-6">
                   <p className="mb-2 text-xs text-muted-foreground">Права</p>
-                  <div className="grid grid-cols-3 gap-1 rounded-2xl bg-muted p-1">
+                  <div className="grid grid-cols-2 gap-1 rounded-2xl bg-muted p-1 sm:grid-cols-4">
                     {ROLE_OPTIONS.map((r) => (
                       <button
                         key={r}
@@ -402,6 +404,8 @@ function MemberSheet({
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                     {user.role === "trainer"
                       ? "Тренер видит только свою сеть: смены, отчёты, паузы. Штрафы — через администратора."
+                      : user.role === "instructor"
+                        ? "Инструктор видит только закреплённых за ним сотрудников (назначаются в «Сетях»): смены, отчёты, паузы. Штрафы — через администратора."
                       : user.role === "admin"
                         ? "Администратор работает со всеми: смены, отчёты, штрафы, рассылки. Без денег и блокировок."
                         : "Сотрудник видит свой график, отчёты и штрафы."}
@@ -567,6 +571,41 @@ function NormPicker({ user, onUpdated }: { user: User; onUpdated: (u: User) => v
 }
 
 /** Owner only (customer round B): a personal rate over the network's/common one and «не применять налог на лень». */
+/** ТЗ 27.10 §24: a trainer's or an instructor's own rate per piece of their people (over the ladder and the common one). */
+function OwnCommission({ user, save, busy }: {
+  user: User; busy: boolean;
+  save: (body: Parameters<typeof api.admin.setUserRates>[1], ok: string) => Promise<void>;
+}) {
+  const saved = user.personal_commission != null ? String(user.personal_commission) : "";
+  const [value, setValue] = useState(saved);
+  const whose = user.role === "trainer" ? "сети" : "своих людей";
+  return (
+    <>
+      <div className="flex items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px] font-semibold">{user.role === "trainer" ? "Ставка тренера" : "Ставка инструктора"}</span>
+          <span className="block text-xs text-muted-foreground">
+            ₽ за штуку {whose}. Пусто — по лестнице сети или общая. Вместе тренер и инструктор получают не больше дельты (150 ₽ − общая ставка).
+          </span>
+        </span>
+        <div className="relative w-24 shrink-0">
+          <input inputMode="numeric" aria-label="Ставка с объёма, ₽ за штуку" placeholder="лестница" value={value}
+                 onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                 className="h-10 w-full rounded-xl border-0 bg-card pr-7 pl-3 text-sm font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
+          <span className="absolute top-1/2 right-2.5 -translate-y-1/2 text-xs text-muted-foreground">₽</span>
+        </div>
+      </div>
+      {value !== saved && (
+        <Button size="sm" className="press h-9 w-full rounded-xl" disabled={busy}
+                onClick={() => save(value ? { personal_commission: Number(value) } : { clear_personal_commission: true },
+                  value ? `Ставка с объёма: ${value} ₽ за штуку` : "Ставка с объёма — по лестнице")}>
+          Сохранить ставку с объёма
+        </Button>
+      )}
+    </>
+  );
+}
+
 function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) => void }) {
   const { busy, run } = useAction();
   const [rate, setRate] = useState(user.personal_rate != null ? String(user.personal_rate) : "");
@@ -584,7 +623,7 @@ function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) =
       <div className="flex items-center gap-3">
         <span className="min-w-0 flex-1">
           <span className="block text-[15px] font-semibold">Личная ставка</span>
-          <span className="block text-xs text-muted-foreground">Пусто — ставка сети или общая. Видит и меняет только владелец</span>
+          <span className="block text-xs text-muted-foreground">Пусто — общая ставка. Видит и меняет только владелец</span>
         </span>
         <div className="relative w-24 shrink-0">
           <input inputMode="numeric" aria-label="Личная ставка, ₽ за штуку" placeholder="общая" value={rate}
@@ -600,6 +639,7 @@ function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) =
           {busy && <LoaderCircle className="animate-spin" />} Сохранить ставку
         </Button>
       )}
+      {(user.role === "trainer" || user.role === "instructor") && <OwnCommission user={user} save={save} busy={!!busy} />}
       <label className="flex cursor-pointer items-center gap-3">
         <span className="min-w-0 flex-1">
           <span className="block text-[15px] font-semibold">Не применять налог на лень</span>

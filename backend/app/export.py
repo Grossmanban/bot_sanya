@@ -169,7 +169,8 @@ def export_filename(date_from: date, date_to: date) -> str:
     return f"grafik_{date_from:%d.%m}-{date_to:%d.%m.%Y}.xlsx"
 
 
-ROLE_RU = {"owner": "Владелец", "admin": "Администратор", "trainer": "Тренер", "employee": "Сотрудник"}
+ROLE_RU = {"owner": "Владелец", "admin": "Администратор", "trainer": "Тренер", "instructor": "Инструктор",
+           "employee": "Сотрудник"}
 
 
 def payout_xlsx(batch: dict) -> bytes:

@@ -253,8 +253,8 @@ async def report_digest(conn, notifier: Notifier, today: date, audience: str) ->
     trainers = []
     if audience == "staff":
         trainers = [dict(r) for r in conn.execute(
-            """SELECT * FROM users WHERE role = 'trainer' AND status = 'approved' AND account_state != 'blocked'
-               AND network_id IS NOT NULL""")]
+            """SELECT * FROM users WHERE role IN ('trainer', 'instructor') AND status = 'approved'
+               AND account_state != 'blocked' AND network_id IS NOT NULL""")]
 
     def text(only: set[int] | None) -> str | None:
         m = [x for x in missing if only is None or x["user_id"] in only]
@@ -277,7 +277,8 @@ async def report_digest(conn, notifier: Notifier, today: date, audience: str) ->
     for chat in recipients:
         sent += await notifier.send(chat, full, _open_app())
     for t in trainers:
-        own = {r[0] for r in conn.execute("SELECT id FROM users WHERE network_id = ? AND id != ?", (t["network_id"], t["id"]))}
+        own = {r[0] for r in conn.execute("SELECT id FROM users WHERE network_id = ? AND id != ?", (t["network_id"], t["id"]))
+               } if t["role"] == "trainer" else {r[0] for r in conn.execute("SELECT id FROM users WHERE instructor_id = ?", (t["id"],))}
         body = text(own)
         if body and t["telegram_id"] not in recipients:
             sent += await notifier.send(t["telegram_id"], body, _open_app())

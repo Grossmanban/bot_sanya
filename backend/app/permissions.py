@@ -6,13 +6,15 @@ Roles (agreed with the owner, ТЗ v9.1 + one extra):
   admin    — works with everyone: schedule, reports, fines without approval, bonuses, pauses,
              broadcasts. No money operations, no blocking, no roles.
   trainer  — like an admin but only for people of their own network; fines go to an owner for approval.
+  instructor — (ТЗ 27.10 §22–23) works under the network's trainer with the people assigned to them only:
+             schedule, reports, discipline; fines go for approval. The role alone opens nobody else.
   employee — their own schedule, reports and balance.
 """
 
 from .config import settings
 
-OWNER, ADMIN, TRAINER, EMPLOYEE = "owner", "admin", "trainer", "employee"
-ROLE_TITLES = {OWNER: "Владелец", ADMIN: "Администратор", TRAINER: "Тренер", EMPLOYEE: "Сотрудник"}
+OWNER, ADMIN, TRAINER, INSTRUCTOR, EMPLOYEE = "owner", "admin", "trainer", "instructor", "employee"
+ROLE_TITLES = {OWNER: "Владелец", ADMIN: "Администратор", TRAINER: "Тренер", INSTRUCTOR: "Инструктор", EMPLOYEE: "Сотрудник"}
 
 
 def is_owner(user: dict | None) -> bool:
@@ -24,12 +26,13 @@ def role_of(user: dict | None) -> str:
         return EMPLOYEE
     if is_owner(user):
         return OWNER
-    return user["role"] if user["role"] in (ADMIN, TRAINER) else EMPLOYEE
+    return user["role"] if user["role"] in (ADMIN, TRAINER, INSTRUCTOR) else EMPLOYEE
 
 
 def is_staff(user: dict | None) -> bool:
     """Has the admin panel at all (scope may still be limited for trainers)."""
-    return role_of(user) in (OWNER, ADMIN, TRAINER) and user["status"] == "approved" and user["account_state"] != "blocked"
+    return role_of(user) in (OWNER, ADMIN, TRAINER, INSTRUCTOR) and user["status"] == "approved" \
+        and user["account_state"] != "blocked"
 
 
 def sees_everyone(user: dict | None) -> bool:
@@ -42,6 +45,8 @@ def manages(actor: dict | None, target: dict | None) -> bool:
         return False
     if sees_everyone(actor):
         return True
+    if role_of(actor) == INSTRUCTOR:  # only the people assigned to them
+        return target.get("instructor_id") == actor["id"] and target["id"] != actor["id"]
     return actor.get("network_id") is not None and actor["network_id"] == target.get("network_id") and target["id"] != actor["id"]
 
 
@@ -54,19 +59,19 @@ CAN = {
     "networks": {OWNER},
     "fine_direct": {OWNER, ADMIN},  # trainers' fines wait for an owner or an admin
     "approve_fines": {OWNER, ADMIN},
-    "forgive_fines": {OWNER, ADMIN, TRAINER},  # «Простить» a fine, the reason is optional; a trainer — their network
-    "fine_request": {TRAINER},
+    "forgive_fines": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # «Простить» a fine, the reason is optional; a trainer — their network
+    "fine_request": {TRAINER, INSTRUCTOR},
     "bonus": {OWNER, ADMIN, TRAINER},
-    "pause": {OWNER, ADMIN, TRAINER},
-    "review": {OWNER, ADMIN, TRAINER},
-    "schedule": {OWNER, ADMIN, TRAINER},
+    "pause": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
+    "review": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
+    "schedule": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "broadcast_all": {OWNER, ADMIN},
     "broadcast_network": {OWNER, ADMIN, TRAINER},
     "settings": {OWNER, ADMIN},
     "points": {OWNER, ADMIN},
     "registrations": {OWNER, ADMIN},
-    "export": {OWNER, ADMIN, TRAINER},
-    "raspred": {OWNER, ADMIN, TRAINER},  # the list for the work chat; a trainer gets their network's
+    "export": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
+    "raspred": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # the list for the work chat; a trainer gets their network's
     "all_people": {OWNER, ADMIN},   # works with the whole team, not one network (company-wide goals, events)
     "invites": {OWNER},             # ТЗ 27.10 §6, §8: owner invitations, «Обновить все ссылки»
     "access_log": {OWNER, ADMIN},   # ТЗ 27.10 §5: «Попытки доступа»

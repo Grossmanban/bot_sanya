@@ -800,13 +800,14 @@ class Notifier:
 
     async def to_managers(self, user: dict, text: str, markup: InlineKeyboardMarkup | None = None,
                           exclude: int | None = None, trainer_buttons: bool = True) -> None:
-        """Owners, admins and the trainer of the person's network (ТЗ модуль 8)."""
+        """Owners, admins, the trainer of the person's network (ТЗ модуль 8) and their instructor (ТЗ 27.10 §23)."""
         from . import networks
 
         await self.to_admins(text, markup, exclude)
-        trainer = networks.trainer_of(self.conn, user)
-        if trainer and trainer["telegram_id"] != exclude and trainer["telegram_id"] not in svc.admin_telegram_ids(self.conn):
-            await self.send(trainer["telegram_id"], text, markup if trainer_buttons else None)
+        admins = svc.admin_telegram_ids(self.conn)
+        for lead in (networks.trainer_of(self.conn, user), networks.instructor_of(self.conn, user)):
+            if lead and lead["telegram_id"] != exclude and lead["telegram_id"] not in admins:
+                await self.send(lead["telegram_id"], text, markup if trainer_buttons else None)
 
     async def shift_event(self, event: str, shift_id: int, old: dict | None = None) -> None:
         shift = svc.get_shift(self.conn, shift_id)
@@ -842,6 +843,19 @@ class Notifier:
         await self.send(user["telegram_id"], text)
         await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
                            f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
+
+    async def instructor_changed(self, user: dict, actor: dict) -> None:
+        """ТЗ 27.10 §22: the person, their new instructor and the archive learn about the assignment."""
+        from . import networks
+
+        lead = networks.instructor_of(self.conn, user)
+        if lead:
+            await self.send(user["telegram_id"], f"🧭 Ваш инструктор — {who(lead)}.")
+            await self.send(lead["telegram_id"], f"🧭 За вами закреплён сотрудник {who(user)}.")
+        else:
+            await self.send(user["telegram_id"], "🧭 Вы работаете напрямую с тренером сети.")
+        await self.archive(["сеть"], f"🧭 {who(user)}: инструктор — {who(lead) if lead else 'нет (напрямую тренеру)'}"
+                                     f"\nИзменил: {who(actor)}", user)
 
     async def admin_contacted(self, shift: dict, text: str) -> None:
         """«Связаться с администратором» after the deadline: who, which shift and why, with a link to answer."""
@@ -912,6 +926,13 @@ class Notifier:
                 user["telegram_id"],
                 "Вы назначены тренером. В приложении появилась вкладка «Админ» — там ваша команда, "
                 "её смены и отчёты.",
+                ReplyKeyboardRemove(),
+            )
+        elif user["role"] == "instructor":
+            await self.send(
+                user["telegram_id"],
+                "Вы назначены инструктором. В приложении появилась вкладка «Админ» — там закреплённые за вами "
+                "сотрудники, их смены и отчёты.",
                 ReplyKeyboardRemove(),
             )
         else:

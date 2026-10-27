@@ -440,11 +440,16 @@ def mark_no_show(conn: sqlite3.Connection, shift_id: int, now: datetime) -> dict
 
 
 def reviewers(conn: sqlite3.Connection, user: dict) -> list[int]:
-    """Telegram ids of staff who decide on this employee's reports: owners, admins, the network's trainer."""
+    """Telegram ids of staff who decide on this employee's reports: owners, admins, the network's trainer,
+    the person's instructor."""
     ids = set(svc.admin_telegram_ids(conn))
     if user.get("network_id") is not None:
         ids |= {r[0] for r in conn.execute(
             """SELECT telegram_id FROM users WHERE role = 'trainer' AND status = 'approved'
                AND account_state != 'blocked' AND network_id = ?""", (user["network_id"],))}
+    if user.get("instructor_id"):
+        ids |= {r[0] for r in conn.execute(
+            """SELECT telegram_id FROM users WHERE id = ? AND role = 'instructor' AND status = 'approved'
+               AND account_state != 'blocked'""", (user["instructor_id"],))}
     ids.discard(user["telegram_id"])
     return sorted(ids)

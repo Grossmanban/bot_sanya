@@ -50,10 +50,12 @@ def listing(conn: sqlite3.Connection, viewer: dict, include_archived: bool = Fal
                         "telegram_id": trainer["telegram_id"], "is_owner": perms.is_owner(trainer)} if trainer else None,
             # rates are money: owners only (customer round B)
             **({"ladder": rates.parse_ladder(n["ladder"]), "ladder_period": n["ladder_period"],
-                "ladder_counts_trainer": bool(n["ladder_counts_trainer"])} if perms.can(viewer, "money") else {}),
+                "ladder_counts_trainer": bool(n["ladder_counts_trainer"]),
+                "instructor_ladder": rates.parse_ladder(n["instructor_ladder"]),
+                "instructor_ladder_period": n["instructor_ladder_period"]} if perms.can(viewer, "money") else {}),
             "members": [{"id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
                          "role": perms.role_of(u), "work_status": u["work_status"], "account_state": u["account_state"],
-                         "status_days": svc.status_days(u)}
+                         "status_days": svc.status_days(u), "instructor_id": u["instructor_id"]}
                         for u in people if not trainer or u["id"] != trainer["id"]],
         })
     return out
@@ -143,7 +145,9 @@ def set_member(conn: sqlite3.Connection, actor: dict, user_id: int, network_id: 
         led = conn.execute("SELECT id FROM networks WHERE trainer_id = ? AND status = 'active'", (user_id,)).fetchone()
         if led and led["id"] != network_id:
             conn.execute("UPDATE networks SET trainer_id = NULL WHERE id = ?", (led["id"],))
-        conn.execute("UPDATE users SET network_id = ? WHERE id = ?", (network_id, user_id))
+        # another network: the person leaves their instructor; an instructor's people go back to their trainer
+        conn.execute("UPDATE users SET network_id = ?, instructor_id = NULL WHERE id = ?", (network_id, user_id))
+        conn.execute("UPDATE users SET instructor_id = NULL WHERE instructor_id = ?", (user_id,))
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="NETWORK_MEMBER_SET", key=key,
                   old={"network": user["network_id"]}, new={"network": network_id})
     return svc.get_user(conn, user_id), True
@@ -181,7 +185,8 @@ def set_trainer(conn: sqlite3.Connection, actor: dict, network_id: int, user_id:
 
 
 def set_rates(conn: sqlite3.Connection, actor: dict, network_id: int, changes: dict, key: str) -> dict:
-    """Owner: the trainer's ladder (customer round B). Networks no longer have their own employees' rate (27.10)."""
+    """Owner: the trainer's and the instructors' ladders (customer round B, ТЗ 27.10 §25). Networks no longer have
+    their own employees' rate (27.10)."""
     from . import rates
 
     fields = {}
@@ -193,6 +198,12 @@ def set_rates(conn: sqlite3.Connection, actor: dict, network_id: int, changes: d
         fields["ladder_period"] = changes["ladder_period"]
     if "ladder_counts_trainer" in changes:
         fields["ladder_counts_trainer"] = int(bool(changes["ladder_counts_trainer"]))
+    if "instructor_ladder" in changes:
+        fields["instructor_ladder"] = rates.validate_ladder(changes["instructor_ladder"])
+    if "instructor_ladder_period" in changes:
+        if changes["instructor_ladder_period"] not in ("day", "week"):
+            raise ServiceError("Период лестницы — день или неделя", 422, "bad_period")
+        fields["instructor_ladder_period"] = changes["instructor_ladder_period"]
     if not fields:
         raise ServiceError("Нет изменений", 422, "no_changes")
     _check_key(key)
@@ -205,6 +216,42 @@ def set_rates(conn: sqlite3.Connection, actor: dict, network_id: int, changes: d
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="NETWORK_RATES_SET", key=key,
                   old={k: net[k] for k in fields}, new={"network": network_id, **fields})
     return get(conn, network_id)
+
+
+def set_instructor(conn: sqlite3.Connection, actor: dict, user_id: int, instructor_id: int | None,
+                   key: str) -> tuple[dict, bool]:
+    """ТЗ 27.10 §22: a person works under an instructor of their own network, or directly under the trainer (None).
+    The trainer keeps seeing everyone of the network; the instructor sees only their people."""
+    _check_key(key)
+    with transaction(conn):
+        user = svc.get_user(conn, user_id)
+        if user is None:
+            raise ServiceError("Пользователь не найден", 404, "not_found")
+        if _seen(conn, key):
+            return user, False
+        actor = _owner(conn, actor)
+        if instructor_id is not None:
+            instructor = svc.get_user(conn, instructor_id)
+            if instructor is None or perms.role_of(instructor) != perms.INSTRUCTOR or instructor["account_state"] == "blocked":
+                raise ServiceError("Инструктор не найден", 404, "not_found")
+            if user["network_id"] is None or instructor["network_id"] != user["network_id"]:
+                raise ServiceError("Инструктор должен быть из той же сети", 409, "other_network")
+            if perms.role_of(user) != perms.EMPLOYEE:
+                raise ServiceError("Инструктору назначают только сотрудников", 409, "not_employee")
+        if user["instructor_id"] == instructor_id:
+            return user, False
+        conn.execute("UPDATE users SET instructor_id = ? WHERE id = ?", (instructor_id, user_id))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="INSTRUCTOR_SET", key=key,
+                  old={"instructor": user["instructor_id"]}, new={"instructor": instructor_id})
+    return svc.get_user(conn, user_id), True
+
+
+def instructor_of(conn: sqlite3.Connection, user: dict) -> dict | None:
+    if not user.get("instructor_id"):
+        return None
+    row = conn.execute("""SELECT * FROM users WHERE id = ? AND role = 'instructor' AND status = 'approved'
+                          AND account_state != 'blocked'""", (user["instructor_id"],)).fetchone()
+    return dict(row) if row else None
 
 
 def trainer_of(conn: sqlite3.Connection, user: dict) -> dict | None:

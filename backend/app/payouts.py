@@ -123,20 +123,24 @@ class Rates:
     rate_lazy: int
     lazy_threshold: int
     trainer_commission: int
+    instructor_commission: int = pricing.DEFAULTS["instructor_commission"]
+    piece_cap: int = pricing.DEFAULTS["piece_cap"]
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "Rates":
         base = pricing.current()
         d = {**base, **{k: v for k, v in (d or {}).items() if v is not None}}
-        for k in ("rate_base", "rate_lazy", "lazy_threshold", "trainer_commission"):
+        keys = ("rate_base", "rate_lazy", "lazy_threshold", "trainer_commission", "instructor_commission", "piece_cap")
+        for k in keys:
             v = d[k]
             if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 100_000:
                 raise ServiceError("Ставки — целые числа от 0", 422, "bad_rates")
-        return cls(d["rate_base"], d["rate_lazy"], d["lazy_threshold"], d["trainer_commission"])
+        return cls(*(d[k] for k in keys))
 
     def as_dict(self) -> dict:
         return {"rate_base": self.rate_base, "rate_lazy": self.rate_lazy, "lazy_threshold": self.lazy_threshold,
-                "trainer_commission": self.trainer_commission}
+                "trainer_commission": self.trainer_commission, "instructor_commission": self.instructor_commission,
+                "piece_cap": self.piece_cap}
 
 
 def _approved(conn, user_ids: list[int], date_from: date, date_to: date) -> list[dict]:
@@ -221,9 +225,12 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
         own = book.user_rates(u["id"])
         lazy = split_lazy(personal, lazy_pool(conn, u["id"], own["lazy_threshold"], date_to), own)
         pieces_pay = lazy["pieces_pay"]
-        team, commission, share = 0, 0, []
+        team, commission, share, kind = 0, 0, [], None
         if u["id"] in led:
-            share = book.trainer_share(conn, led[u["id"]], date_from, date_to)
+            share, kind = book.trainer_share(conn, led[u["id"]], date_from, date_to), "trainer"
+        elif perms.role_of(u) == perms.INSTRUCTOR:
+            share, kind = book.instructor_share(conn, u["id"], date_from, date_to), "instructor"
+        if share:
             team = sum(d["volume"] for d in share)
             commission = sum(d["amount"] for d in share)
         base = pieces_pay + commission
@@ -244,6 +251,8 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             "pieces_pay": pieces_pay,
             "commission": commission,
             "commission_days": share,
+            "commission_kind": kind,  # trainer / instructor: whose ladder and which people
+            "delta": book.delta(),
             "rates": own,
             **lazy,
             "base_calc": base,

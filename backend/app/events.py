@@ -299,6 +299,8 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, star
         if not perms.is_staff(actor):
             raise ServiceError("Недостаточно прав", 403, "forbidden")
         if not perms.sees_everyone(actor):
+            if perms.role_of(actor) == perms.INSTRUCTOR:  # ТЗ 27.10 §22: not the whole network
+                raise ServiceError("События проводят тренеры, администраторы и владелец", 403, "forbidden")
             if network_id is None or network_id != actor.get("network_id"):
                 raise ServiceError("Тренер проводит события только для своей сети", 403, "forbidden")
         if network_id is not None and (networks.get(conn, network_id) or {}).get("status") != "active":

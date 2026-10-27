@@ -4,7 +4,9 @@ and are loaded here on start and on every settings change, so cards, stats and E
 «Налог на лень»: a day with fewer than lazy_threshold pieces is paid at rate_lazy instead of rate_base.
 """
 
-DEFAULTS = {"rate_base": 120, "rate_lazy": 100, "lazy_threshold": 20, "trainer_commission": 10}
+# piece_cap: the most a piece may cost together with the trainer's and the instructor's share (ТЗ 27.10 §25)
+DEFAULTS = {"rate_base": 120, "rate_lazy": 100, "lazy_threshold": 20, "trainer_commission": 10,
+            "instructor_commission": 10, "piece_cap": 150}
 _rates = dict(DEFAULTS)
 
 

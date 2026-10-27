@@ -35,14 +35,19 @@ export interface User {
   /** owners only: personal rate (null — the network's or the common) and «не применять налог на лень» */
   personal_rate?: number | null;
   lazy_exempt?: boolean;
+  /** owners only: a trainer's or an instructor's own rate per piece of their people (null — the ladder / common) */
+  personal_commission?: number | null;
+  /** ТЗ 27.10 §22: the instructor this person works under (null — directly under the trainer) */
+  instructor_id?: number | null;
 }
 
-export type Role = "owner" | "admin" | "trainer" | "employee";
+export type Role = "owner" | "admin" | "trainer" | "instructor" | "employee";
 
 export const ROLE_TITLES: Record<Role, string> = {
   owner: "Владелец",
   admin: "Администратор",
   trainer: "Тренер",
+  instructor: "Инструктор",
   employee: "Сотрудник",
 };
 
@@ -321,6 +326,7 @@ export interface NetworkMember {
   work_status: User["work_status"];
   account_state: User["account_state"];
   status_days?: number | null;
+  instructor_id?: number | null;
 }
 
 export interface Network {
@@ -333,6 +339,9 @@ export interface Network {
   ladder?: LadderStep[];
   ladder_period?: "day" | "week";
   ladder_counts_trainer?: boolean;
+  /** ТЗ 27.10 §25: the instructors' ladder of this network; empty — the common instructor rate */
+  instructor_ladder?: LadderStep[];
+  instructor_ladder_period?: "day" | "week";
 }
 
 /** «From N pieces → R ₽ per piece»: the reached step pays every piece. */
@@ -728,6 +737,9 @@ export interface ScheduleSettings {
   rate_lazy: number;
   lazy_threshold: number;
   trainer_commission: number;
+  instructor_commission: number;
+  /** ТЗ 27.10 §25: a piece costs at most this, the trainer and the instructor share what's above the common rate */
+  piece_cap: number;
   /** owners only: what the business gets per piece (the owner's earnings in payouts) */
   revenue_per_piece?: number;
 }
@@ -744,6 +756,8 @@ export interface PayoutRates {
   rate_lazy: number;
   lazy_threshold: number;
   trainer_commission: number;
+  instructor_commission: number;
+  piece_cap: number;
 }
 
 export interface PayoutRow {
@@ -767,7 +781,11 @@ export interface PayoutRow {
   pieces_pay: number;
   /** the trainer's ladder money for the network */
   commission: number;
-  commission_days?: { date: string; volume: number; step_volume: number; rate: number; amount: number }[];
+  /** step_rate — the ladder's rate, rate — what is paid within the shared delta */
+  commission_days?: { date: string; volume: number; step_volume: number; step_rate?: number; rate: number; amount: number }[];
+  commission_kind?: "trainer" | "instructor" | null;
+  /** ТЗ 27.10 §25: piece_cap − the common rate, shared by the trainer and the instructor */
+  delta?: number;
   rates?: { rate_base: number; rate_lazy: number; lazy_threshold: number };
   /** «налог на лень» (ТЗ 27.10 §21): min(P, L) pieces at the lazy rate, the rest at the full one */
   lazy_units: number;
@@ -1114,6 +1132,7 @@ export const api = {
       name?: string; trainer_id?: number; clear_trainer?: boolean; archive?: boolean;
       ladder?: LadderStep[]; ladder_period?: "day" | "week";
       ladder_counts_trainer?: boolean;
+      instructor_ladder?: LadderStep[]; instructor_ladder_period?: "day" | "week";
     }, key: string) =>
       patch<{ network: Network }>(`/api/admin/networks/${id}`, { ...body, idempotency_key: key }),
     setMemberNetwork: (userId: number, networkId: number | null, key: string) =>
@@ -1126,7 +1145,10 @@ export const api = {
     payoutExcel: (id: number) => post<{ ok: boolean }>(`/api/admin/payouts/${id}/excel`, {}),
     previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates }) =>
       post<{ rows: PayoutRow[]; rates: PayoutRates; summary: PayoutSummary }>("/api/admin/payouts/preview", body),
-    setUserRates: (userId: number, body: { personal_rate?: number | null; clear_personal_rate?: boolean; lazy_exempt?: boolean },
+    setInstructor: (userId: number, instructorId: number | null, key: string) =>
+      post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/instructor`, { instructor_id: instructorId, idempotency_key: key }),
+    setUserRates: (userId: number, body: { personal_rate?: number | null; clear_personal_rate?: boolean; lazy_exempt?: boolean;
+                     personal_commission?: number | null; clear_personal_commission?: boolean },
                    key: string) => post<{ user: User }>(`/api/admin/team/${userId}/rates`, { ...body, idempotency_key: key }),
     pieceDeduction: (body: { user_id: number; day: string; pieces: number; reason: string; media_file_id: string | null },
                      key: string) => post<{ items: Tx[] }>("/api/admin/finances/pieces", { ...body, idempotency_key: key }),

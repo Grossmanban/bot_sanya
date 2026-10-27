@@ -327,6 +327,8 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, kind: str, targ
                 raise ServiceError("Выберите сеть", 422, "network_required")
             if not perms.sees_everyone(actor) and actor.get("network_id") != network_id:
                 raise ServiceError("Тренер ставит цели только своей сети", 403, "forbidden")
+            if perms.role_of(actor) == perms.INSTRUCTOR:  # the network is wider than the instructor's people
+                raise ServiceError("Инструктор ставит цели только своим людям — личные или группой", 403, "forbidden")
             user_id = None
         else:
             if not perms.sees_everyone(actor):

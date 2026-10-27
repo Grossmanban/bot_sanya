@@ -37,6 +37,9 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "rate_lazy": ("100", "rub"),
     "lazy_threshold": ("20", "count"),
     "trainer_commission": ("10", "rub"),
+    # ТЗ 27.10 §24–25: instructors' common rate per piece of their people; a piece costs at most piece_cap in all
+    "instructor_commission": ("10", "rub"),
+    "piece_cap": ("150", "rub"),
     # customer round B: what the business gets per piece — the owner's earnings in the payout summary
     "revenue_per_piece": ("0", "rub"),
     # ТЗ 12.4: every Monday the past week is checked against the norm of work days (0 — no norm)
