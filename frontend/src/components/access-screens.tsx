@@ -4,7 +4,7 @@ import { Ban, Clock3, LoaderCircle, Lock, Send, TriangleAlert, UserPlus } from "
 import { Button } from "@/components/ui/button";
 import { webApp } from "@/lib/telegram";
 
-type Kind = "outside" | "unregistered" | "pending" | "rejected" | "blocked" | "error";
+type Kind = "outside" | "unregistered" | "invited" | "stale" | "pending" | "rejected" | "blocked" | "error";
 
 const COPY: Record<Kind, { icon: typeof Clock3; title: string; text: string }> = {
   outside: {
@@ -12,10 +12,17 @@ const COPY: Record<Kind, { icon: typeof Clock3; title: string; text: string }> =
     title: "Откройте из Telegram",
     text: "Приложение работает внутри Telegram. Откройте бота и нажмите кнопку «График».",
   },
-  unregistered: {
+  // ТЗ 27.10 §5: a stranger without an invitation — nothing to do here, no instructions
+  unregistered: { icon: Lock, title: "Нет доступа", text: "" },
+  invited: {
     icon: UserPlus,
-    title: "Сначала регистрация",
-    text: "Откройте бота, нажмите /start и отправьте заявку. Администратор её рассмотрит.",
+    title: "Вас пригласили",
+    text: "Заявка отправляется в чате с ботом: укажите фамилию и имя, администратор её рассмотрит.",
+  },
+  stale: {
+    icon: Lock,
+    title: "Ссылка неактуальна",
+    text: "Эта ссылка больше неактуальна. Пожалуйста, обратитесь к человеку, который вас пригласил, чтобы получить новую ссылку для регистрации.",
   },
   pending: {
     icon: Clock3,
@@ -51,10 +58,10 @@ export function AccessScreen({
       </div>
       <h1 className="mt-6 font-display text-2xl font-semibold">{title}</h1>
       <p className="mt-3 max-w-xs text-[15px] leading-relaxed text-muted-foreground">{message ?? text}</p>
-      {kind === "unregistered" && botUsername && (
+      {kind === "invited" && botUsername && (
         <Button
           className="mt-8 h-12 w-full max-w-xs rounded-2xl text-base"
-          onClick={() => webApp()?.openTelegramLink(`https://t.me/${botUsername}?start=reg`)}
+          onClick={() => webApp()?.openTelegramLink(`https://t.me/${botUsername}`)}
         >
           Открыть бота
         </Button>

@@ -50,7 +50,38 @@ export const ROLE_TITLES: Record<Role, string> = {
 export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
-  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines";
+  | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log";
+
+/** ТЗ 27.10 §6: an owner's invitation link */
+export interface Invite {
+  id: number;
+  kind: "ref" | "owner";
+  url: string | null;
+  label: string | null;
+  max_uses: number | null;
+  uses: number;
+  ttl_minutes: number;
+  expires_at: string;
+  created_at: string;
+  revoked_at: string | null;
+  state: "active" | "expired" | "revoked" | "used_up";
+  people: { telegram_id: number; used_at: string; user_id: number | null; name: string | null; status: string | null }[];
+}
+
+/** ТЗ 27.10 §5: a stranger knocked without a live link */
+export interface AccessAttempt {
+  id: number;
+  telegram_id: number;
+  kind: "no_link" | "bad_link" | "app_no_link";
+  param: string;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  first_at: string;
+  last_at: string;
+  count: number;
+  known: boolean;
+}
 
 export const isStaff = (u: User) => u.role !== "employee" && u.account_state !== "blocked";
 
@@ -64,6 +95,10 @@ export interface Pricing {
 
 export interface Me {
   registered: boolean;
+  /** a stranger (ТЗ 27.10 §5): how they may come in — by an employee's link, by an owner's invitation, or not at all */
+  entry?: "ref" | "owner" | null;
+  /** they came with a link that expired or was revoked */
+  stale_link?: boolean;
   user?: User;
   pricing?: Pricing;
   bot_username?: string | null;
@@ -659,6 +694,8 @@ export interface ScheduleSettings {
   feed_hide_after_days: number;
   /** recruiting: units of the internship and of the second stage (the referrer's bonuses) */
   internship_units: number;
+  /** ТЗ 27.10 §8: referral links (and their QR codes) change this often, minutes */
+  link_ttl_minutes: number;
   second_stage_units: number;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
@@ -924,8 +961,10 @@ export const api = {
   archive: () => request<{ events: LiveEvent[]; goals: Goal[] }>("/api/archive"),
   joinGoal: (id: number) => post<{ goal: Goal }>(`/api/goals/${id}/join`, {}),
   register: (form: ApplicationForm) => post<{ application: { status: ApplicationStatus } }>("/api/register", form),
-  referrals: () => request<{ code: string; link: string | null; items: Referral[];
-    targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
+  /** the link changes every `ttl_minutes` (ТЗ 27.10 §8): the old one and its QR stop working */
+  referrals: () => request<{ link: string | null; expires_at: string; seconds_left: number; ttl_minutes: number;
+    items: Referral[]; targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
+  referralQr: () => request<{ svg: string; link: string; expires_at: string; seconds_left: number }>("/api/me/referrals/qr"),
   myFinances: () => request<{ summary: MoneySummary; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -948,6 +987,16 @@ export const api = {
     post<{ ok: boolean }>(`/api/shifts/${id}/contact-admin`, { text, idempotency_key: key }),
 
   admin: {
+    invites: () => request<{ items: Invite[]; ttl_minutes: number }>("/api/admin/invites"),
+    createInvite: (body: { label: string; ttl_minutes: number; max_uses: number | null }, key: string) =>
+      post<{ invite: Invite; items: Invite[]; ttl_minutes: number }>("/api/admin/invites", { ...body, idempotency_key: key }),
+    revokeInvite: (id: number, key: string) =>
+      post<{ items: Invite[]; ttl_minutes: number }>(`/api/admin/invites/${id}/revoke`, { idempotency_key: key }),
+    inviteQr: (id: number) => request<{ svg: string; link: string }>(`/api/admin/invites/${id}/qr`),
+    rotateInvites: (key: string) =>
+      post<{ rotated: { ref: number; owner: number }; items: Invite[]; ttl_minutes: number }>("/api/admin/invites/rotate",
+        { idempotency_key: key }),
+    accessAttempts: () => request<{ items: AccessAttempt[] }>("/api/admin/access-attempts"),
     users: () => request<{ items: User[] }>("/api/admin/users"),
     points: () => request<{ items: Point[] }>("/api/admin/points"),
     createPoint: (name: string, capacity: number | null) => post<{ point: Point }>("/api/admin/points", { name, capacity }),

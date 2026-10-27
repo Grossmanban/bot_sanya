@@ -44,7 +44,7 @@ async def main() -> None:
     if bot is not None:
         dp = Dispatcher()
         dp.include_router(build_router(conn, notifier))
-        await setup_menu_button(bot)
+        tasks.append(asyncio.create_task(setup_menu_button(bot, conn)))
         tasks.append(asyncio.create_task(dp.start_polling(bot, handle_signals=False)))
         tasks.append(asyncio.create_task(run_scheduler(conn, notifier)))
 

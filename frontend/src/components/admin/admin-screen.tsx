@@ -37,8 +37,9 @@ import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
 import { ViolationsSection } from "./violations-section";
 import { OnboardingSection } from "./onboarding-section";
+import { AccessSection } from "./access-section";
 
-type Section = "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "raspred", label: "Распред", need: "raspred" },
@@ -55,6 +56,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "events", label: "События", need: "review" },
   { id: "networks", label: "Сети", need: "registrations" },
   { id: "points", label: "Точки", need: "points" },
+  { id: "access", label: "Доступ", need: "access_log" },
   { id: "broadcast", label: "Рассылка", need: "broadcast_network" },
   { id: "settings", label: "Настройки", need: "settings" },
 ];
@@ -145,6 +147,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
         {section === "goals" && <GoalsSection me={me} />}
         {section === "events" && <EventsAdmin me={me} />}
         {section === "points" && <PointsSection />}
+        {section === "access" && <AccessSection />}
         {section === "broadcast" && <BroadcastSection me={me} />}
         {section === "settings" && <SettingsSection />}
       </div>

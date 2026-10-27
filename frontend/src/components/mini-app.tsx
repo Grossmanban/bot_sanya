@@ -95,6 +95,9 @@ export function MiniApp() {
     body = <AccessScreen kind="error" message={fatal} onRetry={loadMe} />;
   } else if (!me) {
     body = <LoadingScreen />;
+  } else if (!me.registered && me.entry !== "ref") {
+    // ТЗ 27.10 §5–7: no live invitation — nothing here; an owner's invitation — the request is in the chat
+    body = <AccessScreen kind={me.entry === "owner" ? "invited" : me.stale_link ? "stale" : "unregistered"} botUsername={me.bot_username} />;
   } else if (!me.registered || !me.user || (me.user.status === "pending" && !me.application)) {
     // the questionnaire (the customer's module 3): a new person, or one returned to the reserve
     body = <Registration onSent={loadMe} botUsername={me.bot_username} />;

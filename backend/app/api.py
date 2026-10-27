@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 
 from . import app_settings, export, media, pricing
 from . import permissions as perms
-from . import broadcasts, day_actual, events, finance, goals, lifecycle, networks, payouts, rates, recruiting, reports, violations
+from . import broadcasts, day_actual, events, finance, goals, invites, lifecycle, networks, payouts, rates, recruiting
+from . import reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -32,6 +33,13 @@ class CreateShift(ShiftPayload):
 
 
 class KeyOnly(BaseModel):
+    idempotency_key: str
+
+
+class InviteBody(BaseModel):
+    label: str | None = None
+    ttl_minutes: int = 60
+    max_uses: int | None = 1
     idempotency_key: str
 
 
@@ -539,11 +547,28 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     # ------------------------------------------------------------ profile
 
+    def start_param(request: Request) -> str | None:
+        """startapp=… — Telegram signs it into initData together with the user."""
+        return (parse_qs(request.headers.get("x-telegram-init-data", "")).get("start_param") or [None])[0]
+
     @api.get("/me")
-    async def me(tg: dict = Depends(tg_user)):
+    async def me(request: Request, tg: dict = Depends(tg_user)):
         user = svc.ensure_admin(conn, tg["id"], tg.get("first_name", ""), tg.get("last_name", ""), tg.get("username"))
         if user is None:
-            return {"registered": False, "bot_username": app.state.bot_username}
+            # ТЗ 27.10 §5: a stranger without a live link sees nothing and is only logged
+            param = start_param(request)
+            link, st = invites.resolve(conn, param)
+            stale = False
+            if st == "active":
+                invites.use(conn, tg["id"], link)
+            elif st != "none":
+                stale = True
+                invites.log_attempt(conn, tg, "bad_link", param)
+            entry = invites.entry(conn, tg["id"])
+            if entry is None and not stale:
+                invites.log_attempt(conn, tg, "app_no_link")
+            return {"registered": False, "entry": entry, "stale_link": stale and entry is None,
+                    "bot_username": app.state.bot_username}
         application = recruiting.current(conn, user["id"])
         if user["status"] != "approved":
             # a candidate: the questionnaire (none yet / returned to the reserve) or where it stands
@@ -569,19 +594,65 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/register")
     async def register(body: ApplicationBody, request: Request, tg: dict = Depends(tg_user)):
         """The questionnaire from the Mini App. A referral comes as start_param=ref_<code> in the signed initData."""
-        params = parse_qs(request.headers.get("x-telegram-init-data", ""))
-        start_param = (params.get("start_param") or [None])[0]
-        user, application = recruiting.submit(conn, tg, body.model_dump(), start_param)
+        user, application = recruiting.submit(conn, tg, body.model_dump(), start_param(request))
         notifier.spawn(notifier.application_submitted(application))
         return {"application": {"status": application["status"]}}
 
     @api.get("/me/referrals")
     async def my_referrals(user: dict = Depends(current_user)):
-        code = recruiting.ref_code(conn, user)
-        bot = app.state.bot_username
-        return {"code": code, "link": f"https://t.me/{bot}?start=ref_{code}" if bot else None,
+        # ТЗ 27.10 §8–9: the link (and its QR) changes every `link_ttl_minutes`; the app shows the countdown
+        link = invites.ref_view(conn, user, app.state.bot_username)
+        return {"link": link["url"], "expires_at": link["expires_at"], "seconds_left": link["seconds_left"],
+                "ttl_minutes": link["ttl_minutes"],
                 "items": recruiting.referrals(conn, user),
                 "targets": {k: app_settings.get_all(conn)[k] for k in ("internship_units", "second_stage_units")}}
+
+    @api.get("/me/referrals/qr")
+    async def my_referral_qr(user: dict = Depends(current_user)):
+        link = invites.ref_view(conn, user, app.state.bot_username)
+        if not link["url"]:
+            raise svc.ServiceError("Бот ещё не подключён", 409, "no_bot")
+        return {"svg": invites.qr_svg(link["url"]), "link": link["url"], "expires_at": link["expires_at"],
+                "seconds_left": link["seconds_left"]}
+
+    # ------------------------------------------------------------ access (ТЗ 27.10 §5–8)
+
+    def invite_list() -> dict:
+        links, names = invites.owner_invites(conn)
+        return {"items": [invites.public(link, app.state.bot_username, names=names) for link in links],
+                "ttl_minutes": app_settings.get_all(conn)["link_ttl_minutes"]}
+
+    @api.get("/admin/invites")
+    async def admin_invites(_: dict = Depends(staff("invites"))):
+        return invite_list()
+
+    @api.post("/admin/invites")
+    async def admin_invite_create(body: InviteBody, admin: dict = Depends(staff("invites"))):
+        link = invites.create_owner_invite(conn, admin, body.label, body.ttl_minutes, body.max_uses, body.idempotency_key)
+        return {"invite": invites.public(link, app.state.bot_username), **invite_list()}
+
+    @api.post("/admin/invites/{link_id}/revoke")
+    async def admin_invite_revoke(link_id: int, body: KeyOnly, admin: dict = Depends(staff("invites"))):
+        invites.revoke(conn, admin, link_id, body.idempotency_key)
+        return invite_list()
+
+    @api.get("/admin/invites/{link_id}/qr")
+    async def admin_invite_qr(link_id: int, _: dict = Depends(staff("invites"))):
+        link = invites.get(conn, link_id)
+        if link is None or link["kind"] != "owner":
+            raise svc.ServiceError("Ссылка не найдена", 404, "not_found")
+        url = invites.url(app.state.bot_username, link)
+        if not url:
+            raise svc.ServiceError("Бот ещё не подключён", 409, "no_bot")
+        return {"svg": invites.qr_svg(url), "link": url}
+
+    @api.post("/admin/invites/rotate")
+    async def admin_invites_rotate(body: KeyOnly, admin: dict = Depends(staff("invites"))):
+        return {"rotated": invites.rotate_all(conn, admin, body.idempotency_key), **invite_list()}
+
+    @api.get("/admin/access-attempts")
+    async def admin_access_attempts(_: dict = Depends(staff("access_log"))):
+        return {"items": invites.attempts(conn)}
 
     @api.patch("/me/work-status")
     async def work_status(body: WorkStatus, user: dict = Depends(current_user)):

@@ -51,6 +51,8 @@ SCHEMA: dict[str, tuple[str, str]] = {
     # the customer's module 3: unpaid internship units, then work units for the referrer's second bonus
     "internship_units": ("20", "count"),
     "second_stage_units": ("50", "count"),
+    # ТЗ 27.10 §8: referral links and their QR codes change this often; the old one stops working
+    "link_ttl_minutes": ("60", "ttl"),
     "training_reminder_eve_time": ("20:00", "time"),
     "training_reminder_morning_time": ("08:00", "time"),
     # ТЗ №9: employees see who else works that day (off — only how many)
@@ -67,7 +69,7 @@ SCHEMA: dict[str, tuple[str, str]] = {
 def _parse(kind: str, raw: str):
     if kind == "bool":
         return raw == "1"
-    if kind in ("weekday", "minutes", "lead", "rub", "count", "days"):
+    if kind in ("weekday", "minutes", "lead", "rub", "count", "days", "ttl"):
         return int(raw)
     return raw
 
@@ -103,6 +105,10 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
             top = 100_000 if kind == "rub" else 1_000
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top:
                 raise ServiceError(f"Число от 0 до {top}", 422, "bad_setting")
+            raw = str(value)
+        elif kind == "ttl":
+            if isinstance(value, bool) or not isinstance(value, int) or not 5 <= value <= 10_080:
+                raise ServiceError("Срок ссылки — от 5 минут до 7 дней", 422, "bad_setting")
             raw = str(value)
         elif kind.startswith("choice:"):
             if value not in kind[7:].split("|"):

@@ -7,7 +7,7 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from app import finance, payouts, recruiting
+from app import finance, invites, payouts, recruiting
 from app import services as svc
 from app.api import create_app
 from app.auth import sign_init_data
@@ -15,6 +15,11 @@ from app.config import settings
 from app.timeutil import now_local
 
 from .test_features import FakeNotifier, run
+
+def invited(conn, referrer: dict, telegram_id: int) -> None:
+    """The candidate opened the referrer's live link in the bot (ТЗ 27.10 §9)."""
+    assert invites.use(conn, telegram_id, invites.current_ref(conn, referrer))
+
 
 FORM = {"full_name": "Сидоров Пётр Ильич", "age": 19, "metro": "Чкаловская", "min_days": 3, "training_days": [1, 3],
         "communication": 8, "truthful": True, "consent": True}
@@ -24,8 +29,11 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     friend = make_user(first="Аня")
     trainer = make_user(first="Тренер")
-    code = recruiting.ref_code(conn, friend)
-    assert recruiting.ref_code(conn, svc.get_user(conn, friend["id"])) == code  # stable
+    link = invites.current_ref(conn, friend)
+    assert invites.current_ref(conn, svc.get_user(conn, friend["id"]))["id"] == link["id"]  # the same within the hour
+    with pytest.raises(svc.ServiceError) as e:  # ТЗ 27.10 §5: no questionnaire without a live link
+        recruiting.submit(conn, {"id": 5001}, FORM)
+    assert e.value.code == "no_invite"
 
     # the questionnaire: validation, then the referral from the link
     with pytest.raises(svc.ServiceError) as e:
@@ -33,7 +41,7 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
     assert e.value.code == "consent_required"
     with pytest.raises(svc.ServiceError):
         recruiting.submit(conn, {"id": 5001}, {**FORM, "training_days": []})
-    user, app = recruiting.submit(conn, {"id": 5001, "username": "petya"}, FORM, f"ref_{code}")
+    user, app = recruiting.submit(conn, {"id": 5001, "username": "petya"}, FORM, f"ref_{link['token']}")
     assert (user["status"], user["last_name"], user["first_name"]) == ("pending", "Сидоров", "Пётр Ильич")
     assert app["referrer_id"] == friend["id"] and app["status"] == "new"
     with pytest.raises(svc.ServiceError) as e:  # one questionnaire at a time
@@ -101,6 +109,7 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
 
 def test_reject_contact_and_return_to_reserve(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    invited(conn, make_user(first="Аня"), 6001)
     user, app = recruiting.submit(conn, {"id": 6001, "username": "masha"}, {**FORM, "full_name": "Петрова Маша"})
     a = recruiting.contact(conn, owner, app["id"], "@manager_1")
     assert a["contact_manager"] == "manager_1"
@@ -129,20 +138,21 @@ def test_http_register_with_start_param_and_onboarding(conn, make_user):
     owner = {"X-Telegram-Init-Data": sign_init_data({"id": 999, "first_name": "Саня"}, settings.bot_token)}
     client.get("/api/me", headers=owner)
     friend = make_user(first="Аня")
-    code = recruiting.ref_code(conn, friend)
+    token = invites.current_ref(conn, friend)["token"]
     pairs = sign_init_data({"id": 7001, "first_name": "Пётр", "username": "pp"}, settings.bot_token)
     # start_param is signed together with the user (Telegram puts it into initData)
     from urllib.parse import parse_qsl, urlencode
 
     data = dict(parse_qsl(pairs))
     data.pop("hash")
-    data["start_param"] = f"ref_{code}"
+    data["start_param"] = f"ref_{token}"
     secret = hmac.new(b"WebAppData", settings.bot_token.encode(), hashlib.sha256).digest()
     check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
     data["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
     candidate = {"X-Telegram-Init-Data": urlencode(data)}
 
-    assert client.get("/api/me", headers=candidate).json()["registered"] is False
+    assert client.get("/api/me", headers=candidate).json() | {} == {"registered": False, "entry": "ref", "stale_link": False,
+                                                                   "bot_username": None}
     r = client.post("/api/register", json=FORM, headers=candidate)
     assert r.status_code == 200, r.text
     me = client.get("/api/me", headers=candidate).json()
@@ -154,7 +164,7 @@ def test_http_register_with_start_param_and_onboarding(conn, make_user):
     employee = {"X-Telegram-Init-Data": sign_init_data({"id": friend["telegram_id"], "first_name": "Аня"}, settings.bot_token)}
     assert client.get("/api/admin/onboarding", headers=employee).status_code == 403
     refs = client.get("/api/me/referrals", headers=employee).json()
-    assert refs["code"] == code and refs["items"][0]["status"] == "new"
+    assert refs["items"][0]["status"] == "new" and 0 < refs["seconds_left"] <= 3600 and refs["ttl_minutes"] == 60
 
 
 def test_cancel_training_tabs_and_a_corrected_stage(conn, make_user):
@@ -162,6 +172,9 @@ def test_cancel_training_tabs_and_a_corrected_stage(conn, make_user):
     a corrected count is explained to the person."""
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     trainer = make_user(first="Тренер")
+    friend = make_user(first="Аня")
+    invited(conn, friend, 6101)
+    invited(conn, friend, 6102)
     user, app = recruiting.submit(conn, {"id": 6101, "username": "kolya"}, {**FORM, "full_name": "Колин Коля"})
     day = now_local().date() + timedelta(days=1)
     recruiting.assign_training(conn, owner, app["id"], day, "11:00", "Европа", trainer["id"], svc.new_key())

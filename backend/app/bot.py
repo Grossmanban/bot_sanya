@@ -20,7 +20,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import broadcasts, day_actual, finance, recruiting, reports
+from . import broadcasts, day_actual, finance, invites, recruiting, reports
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -120,18 +120,42 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
                 text="📝 Заполнить анкету", web_app=WebAppInfo(url=settings.webapp_url))]])
         return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Регистрация", callback_data="register")]])
 
+    def tg_dict(tg) -> dict:
+        return {"id": tg.id, "username": tg.username, "first_name": tg.first_name, "last_name": tg.last_name}
+
+    async def stranger(message: Message, state: FSMContext, param: str | None) -> None:
+        """ТЗ 27.10 §5–7: no link — silence; an outdated link — one answer; a live one — the way in."""
+        tg = message.from_user
+        await state.clear()
+        link, st = invites.resolve(conn, param)
+        if st == "none":
+            if invites.entry(conn, tg.id) is None:
+                invites.log_attempt(conn, tg_dict(tg), "no_link")
+                return
+        elif st != "active" or not invites.use(conn, tg.id, link):
+            attempt = invites.log_attempt(conn, tg_dict(tg), "bad_link", param)
+            if invites.should_answer_stale(conn, attempt):
+                await message.answer(invites.STALE)
+            return
+        kind = link["kind"] if link else invites.entry(conn, tg.id)
+        if kind == "owner":
+            # an owner's invitation: just a surname and a name, then the admins decide (no training)
+            await message.answer("👋 Вас пригласили в команду. Чтобы отправить заявку, укажите фамилию и имя.",
+                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                     InlineKeyboardButton(text="Отправить заявку", callback_data="register")]]))
+            return
+        await message.answer("👋 Добро пожаловать! Чтобы присоединиться к команде, заполните короткую анкету.",
+                             reply_markup=questionnaire_keyboard())
+
     @router.message(CommandStart(), F.chat.type == "private")
     async def start(message: Message, state: FSMContext):
         tg = message.from_user
-        param = (message.text or "").split(maxsplit=1)[1:]  # /start ref_<code> — a referral link
-        if param and param[0].startswith("ref_"):
-            recruiting.remember_referral(conn, tg.id, param[0])
+        param = ((message.text or "").split(maxsplit=1)[1:] or [None])[0]  # /start ref_<token> / inv_<token>
         user = svc.ensure_admin(conn, tg.id, tg.first_name or "", tg.last_name or "", tg.username)
         if user is None:
-            await state.clear()
-            await message.answer("👋 Добро пожаловать! Чтобы присоединиться к команде, заполните короткую анкету.",
-                                 reply_markup=questionnaire_keyboard())
+            await stranger(message, state, param)
             return
+        await set_menu(message.bot, tg.id, user)
         svc.touch_username(conn, user, tg.username)
         if user["status"] == "pending":
             application = recruiting.current(conn, user["id"])
@@ -157,6 +181,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     async def register(call: CallbackQuery, state: FSMContext):
         if svc.get_user_by_tg(conn, call.from_user.id) is not None:
             await call.answer("Заявка уже существует", show_alert=True)
+            return
+        if invites.entry(conn, call.from_user.id) is None:  # checked on the server, not only by the button
+            await call.answer(invites.STALE, show_alert=True)
             return
         await state.set_state(Registration.name)
         await call.message.answer("Напишите фамилию и имя через пробел.\nНапример: <b>Иванов Иван</b>", parse_mode="HTML")
@@ -185,14 +212,21 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         data = await state.get_data()
         await state.clear()
         tg = call.from_user
+        way = invites.entry(conn, tg.id)
+        if way is None and svc.get_user_by_tg(conn, tg.id) is None:
+            await call.message.edit_reply_markup(reply_markup=None)
+            await call.answer(invites.STALE, show_alert=True)
+            return
         user, created = svc.create_registration(conn, tg.id, tg.username, data["first_name"], data["last_name"])
         await call.message.edit_reply_markup(reply_markup=None)
         if not created:
             await call.answer("Заявка уже отправлена")
             return
+        user = invites.registered(conn, tg.id, user)
         await call.message.answer("Заявка отправлена. Ожидайте решения администратора.")
         await call.answer()
-        await notifier.to_admins(notify.registration_text(user), notify.registration_keyboard(user["id"]))
+        await notifier.to_admins(notify.registration_text(user, invites.owner_invited(conn, tg.id)),
+                                 notify.registration_keyboard(user["id"]))
 
     @router.callback_query(F.data == "reg_send")
     async def registration_send_stale(call: CallbackQuery):
@@ -220,6 +254,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             parse_mode="HTML",
         )
         await call.answer(verdict_text)
+        await set_menu(call.bot, user["telegram_id"], user)
         await notifier.access_changed(user, "pending", open_app_keyboard(), actor)
 
     # ------------------------------------------------------------ urgent requests
@@ -804,7 +839,10 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     async def fallback(message: Message):
         user = svc.get_user_by_tg(conn, message.from_user.id)
         if user is None:
-            await message.answer("Вы ещё не зарегистрированы. Нажмите /start")
+            if invites.entry(conn, message.from_user.id) is None:  # a stranger: silence, only the log (§5)
+                invites.log_attempt(conn, tg_dict(message.from_user), "no_link")
+                return
+            await message.answer("Чтобы продолжить, нажмите /start")
         elif user["status"] == "pending":
             await message.answer("Ваша заявка на рассмотрении.")
         elif user["status"] == "approved" and user["account_state"] != "blocked":
@@ -814,13 +852,32 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     return router
 
 
-async def setup_menu_button(bot: Bot) -> None:
-    from aiogram.types import MenuButtonWebApp
+async def set_menu(bot: Bot, telegram_id: int, user: dict | None) -> None:
+    """The «График» button only in the chats of people who have access (ТЗ 27.10 §5: strangers get no menu)."""
+    from aiogram.types import MenuButtonDefault, MenuButtonWebApp
 
-    if settings.webapp_url.startswith("https://"):
-        try:
-            await bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(text="График", web_app=WebAppInfo(url=settings.webapp_url))
-            )
-        except Exception:
-            log.exception("could not set menu button")
+    if not settings.webapp_url.startswith("https://"):
+        return
+    has_access = user is not None and user["status"] != "rejected" and user["account_state"] != "blocked"
+    try:
+        await bot.set_chat_menu_button(
+            chat_id=telegram_id,
+            menu_button=MenuButtonWebApp(text="График", web_app=WebAppInfo(url=settings.webapp_url))
+            if has_access else MenuButtonDefault())
+    except Exception:
+        log.warning("could not set the menu button for %s", telegram_id)
+
+
+async def setup_menu_button(bot: Bot, conn: sqlite3.Connection | None = None) -> None:
+    """The default menu has no Mini App; people with access get it in their own chat."""
+    from aiogram.types import MenuButtonDefault
+
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+    except Exception:
+        log.exception("could not set menu button")
+    if conn is None:
+        return
+    for row in conn.execute("SELECT * FROM users WHERE status != 'rejected' AND account_state != 'blocked'").fetchall():
+        await set_menu(bot, row["telegram_id"], dict(row))
+        await asyncio.sleep(0.05)  # well under Telegram's limits

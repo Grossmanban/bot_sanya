@@ -906,6 +906,50 @@ ALTER TABLE payout_items ADD COLUMN rate_lazy INTEGER;
 """)
 
 
+# 26: access (ТЗ 27.10 §5–9): managed invitation links that expire and rotate, their uses, attempts of strangers
+MIGRATIONS.append("""
+CREATE TABLE invite_links (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL CHECK (kind IN ('ref','owner')),  -- an employee's referral link / an owner's invitation
+    token       TEXT NOT NULL UNIQUE,
+    user_id     INTEGER REFERENCES users(id),                   -- ref: the referrer, owner: who created it
+    label       TEXT,
+    max_uses    INTEGER,                                        -- NULL — any number of people
+    uses        INTEGER NOT NULL DEFAULT 0,
+    ttl_minutes INTEGER NOT NULL,
+    expires_at  TEXT NOT NULL,
+    revoked_at  TEXT,
+    revoked_by  INTEGER,
+    replaced_by INTEGER REFERENCES invite_links(id),
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX ix_invite_links_owner ON invite_links (kind, user_id, id);
+CREATE TABLE invite_uses (
+    link_id     INTEGER NOT NULL REFERENCES invite_links(id),
+    telegram_id INTEGER NOT NULL,
+    used_at     TEXT NOT NULL,
+    user_id     INTEGER REFERENCES users(id),
+    PRIMARY KEY (link_id, telegram_id)
+);
+CREATE TABLE access_attempts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    kind        TEXT NOT NULL,          -- no_link / bad_link / app_no_link
+    param       TEXT NOT NULL DEFAULT '',
+    username    TEXT,
+    first_name  TEXT,
+    last_name   TEXT,
+    first_at    TEXT NOT NULL,
+    last_at     TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 1,
+    answered    INTEGER NOT NULL DEFAULT 0,   -- «ссылка неактуальна» was sent (only once)
+    UNIQUE (telegram_id, kind, param)
+);
+CREATE INDEX ix_access_attempts_last ON access_attempts (last_at);
+ALTER TABLE referral_hits ADD COLUMN link_id INTEGER REFERENCES invite_links(id);
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

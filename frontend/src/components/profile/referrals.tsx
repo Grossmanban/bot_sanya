@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, Share2 } from "lucide-react";
+import { Check, Copy, LoaderCircle, QrCode, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -9,6 +9,7 @@ import { api, type Referral } from "@/lib/api";
 import { useLoad } from "@/lib/hooks";
 import { haptic, webApp } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
+import { LinkTimer, QrImage, useCountdown } from "../link-timer";
 
 const STATUS: Record<Referral["status"], { label: string; tone: string }> = {
   new: { label: "Анкета у кураторов", tone: "bg-muted text-muted-foreground" },
@@ -21,10 +22,27 @@ const STATUS: Record<Referral["status"], { label: string; tone: string }> = {
 
 /** «Мои рефералы» (the customer's module 3): my link and where everyone I invited is now. */
 export function Referrals() {
-  const { data } = useLoad(() => api.referrals(), []);
+  const { data, reload } = useLoad(() => api.referrals(), []);
   const [copied, setCopied] = useState(false);
+  const [qr, setQr] = useState<string | null>(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  // the link changes every hour: at zero the new one (and a new QR) is fetched, the old QR is hidden
+  const left = useCountdown(data?.seconds_left, () => { setQr(null); void reload(); });
   if (!data) return <Skeleton className="h-48 rounded-3xl" />;
   const link = data.link;
+
+  async function makeQr() {
+    setQrBusy(true);
+    try {
+      const res = await api.referralQr();
+      setQr(res.svg);
+      haptic("success");
+    } catch {
+      toast.error("Не удалось сделать QR-код");
+    } finally {
+      setQrBusy(false);
+    }
+  }
 
   async function copy() {
     if (!link) return;
@@ -50,6 +68,7 @@ export function Referrals() {
         {link ? (
           <>
             <p className="truncate rounded-2xl bg-muted/60 px-4 py-3 text-sm font-medium">{link.replace("https://", "")}</p>
+            <LinkTimer left={left} />
             <div className="grid grid-cols-2 gap-2">
               <Button variant="secondary" className="press h-11 rounded-xl" onClick={copy}>
                 {copied ? <Check /> : <Copy />} {copied ? "Готово" : "Копировать"}
@@ -59,6 +78,16 @@ export function Referrals() {
                 <Share2 /> Отправить
               </Button>
             </div>
+            {qr ? (
+              <div className="space-y-2 pt-1">
+                <QrImage svg={qr} />
+                <p className="text-center text-xs text-muted-foreground">QR ведёт на эту же ссылку и перестанет работать вместе с ней.</p>
+              </div>
+            ) : (
+              <Button variant="secondary" className="press h-11 w-full rounded-xl" disabled={qrBusy} onClick={makeQr}>
+                {qrBusy ? <LoaderCircle className="animate-spin" /> : <QrCode />} Сгенерировать QR-код
+              </Button>
+            )}
           </>
         ) : (
           <p className="text-sm text-muted-foreground">Ссылка появится, когда бот будет подключён.</p>

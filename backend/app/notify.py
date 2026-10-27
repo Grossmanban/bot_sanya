@@ -102,10 +102,13 @@ def _totals(conn, day: date) -> str:
 # ---------------------------------------------------------------- message builders
 
 
-def registration_text(user: dict) -> str:
+def registration_text(user: dict, invite: dict | None = None) -> str:
     username = f"@{escape(user['username'])}" if user["username"] else "нет"
+    via = ""
+    if invite is not None:  # ТЗ 27.10 §6: came with an owner's invitation
+        via = "\nПо приглашению владельца" + (f" «{escape(invite['label'])}»" if invite["label"] else "")
     return (
-        "📝 <b>Новая заявка на регистрацию</b>\n"
+        "📝 <b>Новая заявка на регистрацию</b>" + via + "\n"
         f"ФИО: {escape(svc.full_name(user))}\n"
         f"Username: {username}\n"
         f"Telegram ID: <code>{user['telegram_id']}</code>\n"

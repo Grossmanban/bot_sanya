@@ -1,7 +1,7 @@
 """Recruiting and onboarding (the customer's module 3).
 
-    referral link (t.me/<bot>?start=ref_<code>: the chat with the bot opens first, so the bot can write;
-    startapp=ref_<code> straight into the Mini App still counts)
+    referral link (t.me/<bot>?start=ref_<token>, see invites.py — it changes every hour; the chat with the bot
+    opens first, so the bot can write; startapp=ref_<token> straight into the Mini App still counts)
       → the questionnaire in the Mini App (an application, status `new`)
       → staff assign a training: date, time, place, trainer (`scheduled`); the candidate confirms with a button;
         reminders the evening before and in the morning
@@ -17,11 +17,10 @@ Nothing is deleted: a returned application stays in the history (`returned`), th
 """
 
 import json
-import secrets
 import sqlite3
 from datetime import date, datetime, time, timedelta
 
-from . import app_settings, finance
+from . import app_settings, finance, invites
 from . import permissions as perms
 from . import services as svc
 from .db import transaction
@@ -37,42 +36,7 @@ MAX_TEXT = 100
 
 
 # ---------------------------------------------------------------- referral links
-
-
-def ref_code(conn: sqlite3.Connection, user: dict) -> str:
-    """The person's own referral code (made on first use)."""
-    if user.get("ref_code"):
-        return user["ref_code"]
-    with transaction(conn):
-        row = conn.execute("SELECT ref_code FROM users WHERE id = ?", (user["id"],)).fetchone()
-        if row and row[0]:
-            return row[0]
-        while True:
-            code = secrets.token_hex(4)
-            if conn.execute("SELECT 1 FROM users WHERE ref_code = ?", (code,)).fetchone() is None:
-                break
-        conn.execute("UPDATE users SET ref_code = ? WHERE id = ?", (code, user["id"]))
-    return code
-
-
-def referrer_by_code(conn: sqlite3.Connection, code: str | None) -> dict | None:
-    code = (code or "").removeprefix("ref_").strip()
-    if not code:
-        return None
-    row = conn.execute("SELECT * FROM users WHERE ref_code = ? AND status = 'approved'", (code,)).fetchone()
-    return dict(row) if row else None
-
-
-def remember_referral(conn: sqlite3.Connection, telegram_id: int, code: str | None) -> bool:
-    """/start ref_<code> in the bot: kept until the person sends the questionnaire."""
-    ref = referrer_by_code(conn, code)
-    if ref is None or ref["telegram_id"] == telegram_id:
-        return False
-    with transaction(conn):
-        conn.execute("""INSERT INTO referral_hits (telegram_id, referrer_id, created_at) VALUES (?, ?, ?)
-                        ON CONFLICT(telegram_id) DO UPDATE SET referrer_id = excluded.referrer_id""",
-                     (telegram_id, ref["id"], now_iso()))
-    return True
+# Links are managed by invites.py (ТЗ 27.10 §8–9): a token that changes every hour; users.ref_code is history.
 
 
 # ---------------------------------------------------------------- the questionnaire
@@ -118,6 +82,10 @@ def submit(conn: sqlite3.Connection, tg: dict, form: dict, start_param: str | No
     communication = _int(form.get("communication"), 1, 10, "Оценка навыков — от 1 до 10")
     if form.get("consent") is not True or form.get("truthful") is not True:
         raise ServiceError("Нужны согласие на обработку данных и подтверждение достоверности", 422, "consent_required")
+    if start_param:  # startapp=ref_<token> straight into the Mini App: the same server check as /start
+        link, st = invites.resolve(conn, start_param)
+        if link is not None and link["kind"] == "ref" and st == "active":
+            invites.use(conn, tg["id"], link)
     with transaction(conn):
         user = svc.get_user_by_tg(conn, tg["id"])
         if user is not None:
@@ -128,12 +96,11 @@ def submit(conn: sqlite3.Connection, tg: dict, form: dict, start_param: str | No
             active = current(conn, user["id"])
             if active and active["status"] in OPEN:
                 raise ServiceError("Анкета уже отправлена — ждите сообщения от бота", 409, "already_sent")
-        ref = referrer_by_code(conn, start_param) if start_param else None
-        if ref is None:
-            hit = conn.execute("SELECT referrer_id FROM referral_hits WHERE telegram_id = ?", (tg["id"],)).fetchone()
-            ref = svc.get_user(conn, hit[0]) if hit else None
+        ref = invites.referred(conn, tg["id"])
         if ref is not None and ref["telegram_id"] == tg["id"]:
             ref = None
+        if user is None and ref is None:  # ТЗ 27.10 §5: the questionnaire only by an employee's live link
+            raise ServiceError(invites.STALE, 403, "no_invite")
         last, first = parts[0], " ".join(parts[1:])
         if user is None:
             cur = conn.execute("""INSERT INTO users (telegram_id, username, first_name, last_name, created_at, referrer_id)
@@ -144,6 +111,7 @@ def submit(conn: sqlite3.Connection, tg: dict, form: dict, start_param: str | No
             user_id = user["id"]
             conn.execute("UPDATE users SET first_name = ?, last_name = ?, referrer_id = COALESCE(referrer_id, ?) WHERE id = ?",
                          (first[:100], last[:100], ref["id"] if ref else None, user_id))
+        invites.mark_registered(conn, tg["id"], user_id)
         referrer_id = conn.execute("SELECT referrer_id FROM users WHERE id = ?", (user_id,)).fetchone()[0]
         cur = conn.execute(
             """INSERT INTO applications (user_id, full_name, age, metro, min_days, training_days, communication,

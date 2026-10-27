@@ -363,6 +363,19 @@ export function SettingsSection() {
           ))}
         </div>
       </section>
+      <section className="flex items-center justify-between gap-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <span className="min-w-0">
+          <span className="block font-medium">Реферальные ссылки меняются</span>
+          <span className="block text-sm text-muted-foreground">
+            Старая ссылка и её QR-код перестают работать — у сотрудника в «Мои рефералы» таймер до смены.
+          </span>
+        </span>
+        <select aria-label="Как часто меняются ссылки" className="h-10 rounded-xl border-0 bg-muted px-3 outline-none"
+                value={cfg.link_ttl_minutes} onChange={(e) => set({ link_ttl_minutes: Number(e.target.value) })}>
+          {[[30, "раз в 30 мин"], [60, "раз в час"], [180, "раз в 3 ч"], [720, "раз в 12 ч"], [1440, "раз в сутки"], [10080, "раз в неделю"]]
+            .map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      </section>
       <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!dirty || !!busy} onClick={save}>
         {busy && <LoaderCircle className="animate-spin" />} {dirty ? "Сохранить настройки" : "Всё сохранено"}
       </Button>
