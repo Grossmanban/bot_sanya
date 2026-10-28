@@ -23,6 +23,7 @@ import { haptic, openProfile, webApp } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
+import { ReasonChips } from "../reason-chips";
 import { TxForm } from "../finance/money";
 
 export function TeamSection({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
@@ -33,7 +34,9 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
   if (!data) return <Skeleton className="h-80 rounded-3xl" />;
 
   const live = (u: User) => u.status === "approved" && u.account_state !== "blocked";
-  const pending = data.items.filter((u) => u.status === "pending");
+  // ТЗ 28.10 §14: a candidate with a questionnaire is decided in «Онбординг» — not counted or shown here twice
+  const pending = data.items.filter((u) => u.status === "pending" && !u.candidate);
+  const candidates = data.items.filter((u) => u.status === "pending" && u.candidate).length;
   const leads = data.items.filter((u) => live(u) && u.role !== "employee");
   const staff = data.items.filter((u) => live(u) && u.role === "employee");
   const blocked = data.items.filter((u) => u.status === "approved" && u.account_state === "blocked");
@@ -64,6 +67,11 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
         </section>
       )}
 
+      {canDecide && candidates > 0 && (
+        <p className="px-1 text-sm text-muted-foreground">
+          Кандидатов с анкетой: {candidates} — их заявки решаются в «Онбординге».
+        </p>
+      )}
       {canDecide && pending.length > 0 && (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">
@@ -419,11 +427,14 @@ function MemberSheet({
               )}
 
               <div className="mt-6 space-y-2.5">
-                {user.status === "pending" && canDecide && (
+                {user.status === "pending" && user.candidate && (
+                  <p className="text-center text-sm text-muted-foreground">Кандидат с анкетой — решение в «Онбординге».</p>
+                )}
+                {user.status === "pending" && canDecide && !user.candidate && (
                   <>
                     <Button className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={!!busy}
                             onClick={() => act("allow", (k) => api.admin.setAccess(user.id, true, k), "Заявка принята")}>
-                      {busy === "allow" && <LoaderCircle className="animate-spin" />} Принять в команду
+                      {busy === "allow" && <LoaderCircle className="animate-spin" />} Открыть доступ
                     </Button>
                     <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
                             onClick={() => act("deny", (k) => api.admin.setAccess(user.id, false, k), "Заявка отклонена")}>
@@ -453,6 +464,7 @@ function MemberSheet({
                 {pausing && (
                   <div className="row-in space-y-2.5 rounded-2xl bg-wait-soft p-4">
                     <p className="text-sm font-semibold text-wait">Пауза: новые смены недоступны, статус — «Не работаю»</p>
+                    <ReasonChips kind="pause" value={reason} onPick={setReason} />
                     <textarea rows={2} autoFocus value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))}
                               placeholder="Причина, например «больничный до 25.10»"
                               className="w-full resize-none rounded-xl border-0 bg-card px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
@@ -500,6 +512,7 @@ function MemberSheet({
               История и деньги сохранятся, разблокировать можно в любой момент.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <ReasonChips kind="block" value={reason} onPick={setReason} />
           <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} placeholder="Причина (обязательно, видна в архиве)"
                     className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
           <AlertDialogFooter>

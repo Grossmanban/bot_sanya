@@ -1002,6 +1002,15 @@ class Notifier:
         await self.archive(["сеть"], f"🧭 {who(user)}: инструктор — {who(lead) if lead else 'нет (напрямую тренеру)'}"
                                      f"\nИзменил: {who(actor)}", user)
 
+    async def day_marked_by_manager(self, shift: dict, actor: dict) -> None:
+        """«День»: the person learns that their manager marked the day for them."""
+        user = svc.get_user(self.conn, shift["user_id"])
+        what = ("выходной" if shift["status"] == "pre_declared_off" else
+                f"смена {shift['start_time']}–{shift['end_time']}, {escape(shift['location'] or '')}, {shift['volume']} шт.")
+        await self.send(user["telegram_id"], f"📅 {role_title(actor)} {escape(svc.full_name(actor))} отметил(а) вам "
+                                             f"{ddmm_wd(_day(shift))}: {what}. Подробности — в приложении.", _open_schedule())
+        await self.archive(["график"], f"📅 {who(user)}: {ddmm_wd(_day(shift))} — {what}\nОтметил: {who(actor)}", user)
+
     async def admin_contacted(self, shift: dict, text: str) -> None:
         """«Связаться с администратором» after the deadline: who, which shift and why, with a link to answer."""
         user = svc.get_user(self.conn, shift["user_id"])
@@ -1012,6 +1021,10 @@ class Notifier:
         await self.to_managers(user, f"📨 <b>Сотрудник просит изменить смену</b>\n{who(user)}\n"
                                      f"Смена {ddmm_wd(_day(shift))}: {plan}\n💬 {escape(text)}\n"
                                      "Смена не изменена — если согласны, поправьте её в приложении, раздел «День».")
+
+    async def urgent_expired(self, shift: dict) -> None:
+        user = svc.get_user(self.conn, shift["user_id"])
+        await self.send(user["telegram_id"], f"⌛ Срочная заявка на {ddmm(_day(shift))} закрыта: день прошёл, решения не было.")
 
     async def urgent_decided(self, shift: dict, approved: bool) -> None:
         user = svc.get_user(self.conn, shift["user_id"])

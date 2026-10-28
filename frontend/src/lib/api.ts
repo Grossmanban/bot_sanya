@@ -25,6 +25,8 @@ export interface User {
   /** network name (team listing) */
   network?: string | null;
   is_owner?: boolean;
+  /** pending with an open questionnaire: decided in «Онбординг» (team listing) */
+  candidate?: boolean;
   created_at?: string;
   notify_reminders?: boolean;
   /** since when the current work status is on, and how many days that is */
@@ -595,14 +597,49 @@ export interface QueueItem {
   unit_rate?: number | null;
 }
 
+/** ТЗ 28.10 §14: open requests the viewer may decide, one count per request (keys they can't decide are 0). */
 export type ReportCounts = {
   review: number;
   no_show: number;
   actual_missing?: number;
+  actual_overdue?: number;
   fines_pending?: number;
   fines_draft?: number;
   violations?: number;
+  registrations?: number;
+  onboarding_new?: number;
+  internship_review?: number;
+  urgent?: number;
+  unmarked?: number;
+  events_pending?: number;
+  alice_moderation?: number;
+  alice_failed?: number;
+  total?: number;
 };
+
+export interface ReasonKind {
+  kind: string;
+  title: string;
+  items: { id: number; text: string; position: number }[];
+}
+
+export interface MessageText {
+  key: string;
+  title: string;
+  text: string;
+  default: string;
+  edited: boolean;
+  placeholders: string[];
+  updated_at: string | null;
+}
+
+export interface UnmarkedPerson {
+  user_id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+  network: string | null;
+}
 
 /** ТЗ 12.4: a week below the norm of work days, waiting for «штраф» or «оправдание». */
 export interface Violation {
@@ -1074,6 +1111,7 @@ const upload = <T>(path: string, file: Blob | null) =>
 
 const post = <T>(path: string, body: object) => request<T>(path, { method: "POST", body: JSON.stringify(body) });
 const patch = <T>(path: string, body: object) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+const put = <T>(path: string, body: object) => request<T>(path, { method: "PUT", body: JSON.stringify(body) });
 
 type ShiftResponse = { shift: Shift | null; changed: boolean };
 
@@ -1245,7 +1283,7 @@ export const api = {
       post<{ ok: boolean }>("/api/admin/export", { date_from, date_to, user_id }),
     reports: (kind: QueueKind, day?: string) =>
       request<{ items: QueueItem[]; counts: ReportCounts }>(`/api/admin/reports?kind=${kind}${day ? `&day=${day}` : ""}`),
-    dayActuals: () => request<{ items: DayActual[]; missing: string[] }>("/api/admin/day-actuals"),
+    dayActuals: () => request<{ items: DayActual[]; missing: string[]; overdue?: string[] }>("/api/admin/day-actuals"),
     setDayActual: (day: string, actual: number, key: string) =>
       post<{ changed: boolean; met: boolean; approved: number; fined: { shift_id: number; amount: number }[] }>(
         `/api/admin/day-actuals/${day}`, { actual, idempotency_key: key }),
@@ -1348,7 +1386,18 @@ export const api = {
       },
       key: string,
     ) => post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/payouts", { ...body, idempotency_key: key }),
-    reportCounts: () => request<ReportCounts>("/api/admin/reports/counts"),
+    reportCounts: () => request<ReportCounts>("/api/admin/pending"),
+    reasons: () => request<{ kinds: ReasonKind[] }>("/api/reasons"),
+    addReason: (kind: string, text: string, key: string) =>
+      post<{ kinds: ReasonKind[] }>("/api/admin/reasons", { kind, text, idempotency_key: key }),
+    editReason: (id: number, body: { text?: string; delete?: boolean }, key: string) =>
+      patch<{ kinds: ReasonKind[] }>(`/api/admin/reasons/${id}`, { ...body, idempotency_key: key }),
+    texts: () => request<{ items: MessageText[] }>("/api/admin/texts"),
+    saveText: (key: string, text: string | null, idem: string) =>
+      put<{ items: MessageText[] }>(`/api/admin/texts/${key}`, { text, idempotency_key: idem }),
+    markDay: (day: string, body: { user_id: number; kind: "off" | "shift"; start_time?: string; end_time?: string;
+      volume?: number; location?: string }, key: string) =>
+      post<{ shift: Shift; changed: boolean }>(`/api/admin/day/${day}/mark`, { ...body, idempotency_key: key }),
     violations: (status: "pending" | "resolved") =>
       request<{ items: Violation[]; pending: number; quota: number; personal: boolean }>(`/api/admin/violations?status=${status}`),
     scanViolations: () => post<{ created: number }>("/api/admin/violations/scan", {}),
@@ -1377,7 +1426,8 @@ export const api = {
     setNorm: (userId: number, norm: number | null, key: string) =>
       post<{ user: User }>(`/api/admin/team/${userId}/norm`, { norm, idempotency_key: key }),
     day: (day: string) =>
-      request<{ date: string; items: AdminShift[]; total_count: number; total_volume: number }>(`/api/admin/day?day=${day}`),
+      request<{ date: string; items: AdminShift[]; total_count: number; total_volume: number; unmarked: UnmarkedPerson[];
+        can_mark: boolean }>(`/api/admin/day?day=${day}`),
     stats: (userId: number, from: string, to: string) =>
       request<Stats>(`/api/admin/stats?user_id=${userId}&from=${from}&to=${to}`),
     penalties: (params: { userId?: number; from?: string; to?: string }) => {

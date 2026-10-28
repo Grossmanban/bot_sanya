@@ -11,6 +11,7 @@ import { WEEKDAYS, plural } from "@/lib/format";
 import { useCan } from "@/lib/caps";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
+import { ReasonsCard, TextsCard } from "./templates-section";
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
@@ -408,6 +409,8 @@ export function SettingsSection() {
       </Button>
       {canRates && <RatesCard cfg={cfg} set={set} />}
       <ArchiveCard archive={data.archive} />
+      <ReasonsCard />
+      <TextsCard />
     </div>
   );
 }

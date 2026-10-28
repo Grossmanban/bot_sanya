@@ -9,6 +9,7 @@ import { useCan } from "@/lib/caps";
 import { addDays, dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile, tapHaptic } from "@/lib/telegram";
+import { useReasons } from "@/lib/reasons";
 import { cn } from "@/lib/utils";
 import { deadlineText } from "../report/report-block";
 import { PhotoPicker, PhotoThumb } from "../report/photo";
@@ -300,7 +301,8 @@ function Approve({ shiftId, onDone }: { shiftId: number; onDone: () => void }) {
 
 const area = "w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 
-function Reasons({ list, value, onPick }: { list: string[]; value: string; onPick: (r: string) => void }) {
+function Reasons({ kind, list: fallback, value, onPick }: { kind: string; list: string[]; value: string; onPick: (r: string) => void }) {
+  const list = useReasons(kind, fallback);  // the editable templates (ТЗ 28.10 §2)
   return (
     <div className="flex flex-wrap gap-1.5">
       {list.map((r) => (
@@ -349,7 +351,7 @@ function FineForm({ subject, onDone }: { subject: ReportSubject; onDone: () => v
   return (
     <Panel>
       <FineUnits value={amount} onChange={setAmount} rate={subject.unit_rate} tone="soft" />
-      <Reasons list={noShow ? REASONS.no_show : REASONS.fine} value={reason} onPick={setReason} />
+      <Reasons kind={noShow ? "no_show_fine" : "report_fine"} list={noShow ? REASONS.no_show : REASONS.fine} value={reason} onPick={setReason} />
       <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 500))} placeholder="Причина штрафа" className={area} />
       <Button className="press h-11 w-full rounded-xl bg-cancel font-semibold text-white hover:bg-cancel/90" disabled={!!busy || !n || !reason.trim()}
               onClick={async () => {
@@ -373,7 +375,7 @@ function ExcuseForm({ shiftId, onDone }: { shiftId: number; onDone: () => void }
   const { busy, run } = useAction();
   return (
     <Panel>
-      <Reasons list={REASONS.excuse} value={reason} onPick={setReason} />
+      <Reasons kind="no_show_excuse" list={REASONS.excuse} value={reason} onPick={setReason} />
       <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 500))} placeholder="Причина" className={area} />
       <Button className="press h-11 w-full rounded-xl font-semibold" disabled={!!busy || !reason.trim()}
               onClick={async () => {

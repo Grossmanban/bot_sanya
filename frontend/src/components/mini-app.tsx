@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
 import { getThemePref, initData, setBotUsername, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
 import { ThemeContext } from "@/lib/theme";
+import { usePending } from "@/lib/pending";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
 import { ApplicationStatus, Registration } from "./register/register";
@@ -93,6 +94,9 @@ export function MiniApp() {
   useScrollMemory(`tab:${shown}`, !!me?.user && shown !== "admin");
 
   const updateUser = useCallback((user: User) => setMe((m) => (m ? { ...m, user } : m)), []);
+  // ТЗ 28.10 §14: the sum of open requests on the staff tab (only what this person may decide)
+  const pending = usePending(!!me?.user && isStaff(me.user) && me.user.status === "approved");
+  const pendingTotal = pending?.total ?? 0;
 
   const go = (id: Tab) => {
     tapHaptic();
@@ -127,6 +131,7 @@ export function MiniApp() {
       && (t.id !== "work" || (me.products?.length ?? 0) > 0))
       .map((t) => (t.id === "admin" ? { ...t, label: STAFF_TAB[user.role] } : t));
     const working = user.work_status === "working";
+    const badge = (id: Tab) => (id === "admin" ? pendingTotal : 0);
     // a remembered tab that is gone now (no events any more, no admin rights) falls back to the schedule
     const tab = tabs.some((t) => t.id === shown) ? shown : "schedule";
     const activeIndex = tabs.findIndex((t) => t.id === tab);
@@ -148,6 +153,10 @@ export function MiniApp() {
               >
                 <Icon className="size-5" strokeWidth={1.9} />
                 {label}
+                {badge(id) > 0 && (
+                  <span className={cn("ml-auto inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
+                    tab === id ? "bg-white/20" : "bg-cancel text-white")}>{badge(id)}</span>
+                )}
               </button>
             ))}
           </nav>
@@ -225,7 +234,14 @@ export function MiniApp() {
                   tab === id ? "text-primary-foreground" : "text-muted-foreground",
                 )}
               >
-                <Icon className="size-[22px]" strokeWidth={tab === id ? 2.1 : 1.8} />
+                <span className="relative">
+                  <Icon className="size-[22px]" strokeWidth={tab === id ? 2.1 : 1.8} />
+                  {badge(id) > 0 && (
+                    <span className="absolute -top-1.5 left-3.5 inline-grid h-4 min-w-4 place-items-center rounded-full bg-cancel px-1 text-[10px] leading-4 font-bold text-white tabular">
+                      {badge(id) > 99 ? "99+" : badge(id)}
+                    </span>
+                  )}
+                </span>
                 {label}
               </button>
             ))}

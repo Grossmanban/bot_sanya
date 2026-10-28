@@ -13,6 +13,7 @@ import { useAction, useLoad } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
+import { useReasons } from "@/lib/reasons";
 import { Avatar } from "../avatar";
 import { FineUnits } from "../finance/money";
 import { Uploads } from "../finance/payouts-section";
@@ -230,6 +231,7 @@ function DecisionDrawer({ open, onClose, onDone }: {
 function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive"; onDone: () => void }) {
   const fine = mode === "fine";
   const direct = useCan("fine_direct");
+  const excuses = useReasons("excuse", EXCUSES);  // the editable templates (ТЗ 28.10 §2)
   const [amount, setAmount] = useState(fine && v.suggested_units ? String(v.suggested_units) : "");
   const [comment, setComment] = useState(fine ? v.default_comment : "");
   const [files, setFiles] = useState<string[]>([]);
@@ -269,7 +271,7 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
         <p className="mb-2 text-sm font-semibold">{fine ? "Причина" : "Почему прощаете (по желанию)"}</p>
         {!fine && (
           <div className="mb-2 flex flex-wrap gap-1.5">
-            {EXCUSES.map((e) => (
+            {excuses.map((e) => (
               <button key={e} onClick={() => { tapHaptic(); setComment(e); }}
                       className={cn("press rounded-xl px-3 py-1.5 text-sm", comment === e ? "bg-primary text-primary-foreground" : "bg-muted")}>{e}</button>
             ))}

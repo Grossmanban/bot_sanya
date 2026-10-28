@@ -33,6 +33,10 @@ export function DayActualSection({ onChanged }: { onChanged: () => void }) {
         )}
       </section>
 
+      {(data.overdue?.length ?? 0) > 0 && (
+        <Overdue days={data.overdue!} onSaved={async () => { await reload(); onChanged(); }} />
+      )}
+
       {data.items.length === 0 ? (
         <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift">За последние две недели смен не было.</p>
       ) : (
@@ -46,6 +50,38 @@ export function DayActualSection({ onChanged }: { onChanged: () => void }) {
         </ul>
       )}
     </div>
+  );
+}
+
+/** В56: days older than two weeks still without the global actual — «просрочено», entered here one by one. */
+function Overdue({ days, onSaved }: { days: string[]; onSaved: () => void }) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const { busy, run } = useAction();
+  return (
+    <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <h3 className="flex items-center gap-2 font-semibold text-cancel"><TriangleAlert className="size-4" /> Просрочено: {days.length}</h3>
+      <p className="mt-1 text-sm text-muted-foreground">Старше двух недель, общий факт так и не введён.</p>
+      <ul className="mt-3 space-y-2">
+        {days.map((d) => (
+          <li key={d} className="flex items-center gap-2">
+            <span className="w-28 shrink-0 text-sm font-medium">{dayMonth(d)}</span>
+            <input inputMode="numeric" placeholder="шт." value={values[d] ?? ""}
+                   onChange={(e) => setValues({ ...values, [d]: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+                   className="h-10 min-w-0 flex-1 rounded-xl border-0 bg-muted px-3 outline-none focus:ring-2 focus:ring-ring/25" />
+            <Button className="press h-10 shrink-0 rounded-xl" disabled={!!busy || !values[d]}
+                    onClick={async () => {
+                      try {
+                        if (await run(d, (k) => api.admin.setDayActual(d, Number(values[d]), k), "Сохранено")) onSaved();
+                      } catch {
+                        /* toast shown */
+                      }
+                    }}>
+              {busy === d && <LoaderCircle className="animate-spin" />} Ввести
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

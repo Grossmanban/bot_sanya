@@ -49,6 +49,7 @@ export function useAction() {
       try {
         const result = await fn(key);
         keys.current = {};
+        void import("./pending").then((m) => m.refreshPending());  // a decision changes the «ждут решения» counts
         haptic("success");
         if (success) toast.success(success);
         return result;

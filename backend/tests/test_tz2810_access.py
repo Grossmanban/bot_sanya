@@ -11,7 +11,7 @@ from app import alice, bot, networks, notify, products, reports, violations
 from app import services as svc
 from app.api import create_app
 from app.notify import Notifier
-from app.timeutil import week_start
+from app.timeutil import today_local, week_start
 
 from .test_api import headers, key
 from .test_features import P, TODAY, run, shift
@@ -215,7 +215,7 @@ def test_not_working_blocks_work_actions_on_the_server(conn, make_user):
 
 def test_not_working_skips_the_weekly_norm_but_switching_off_later_does_not_dodge_it(conn, make_user):
     svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
-    today = date.today()
+    today = today_local()
     week = week_start(today) - timedelta(days=7)
     old = (week - timedelta(days=30)).isoformat() + "T10:00:00+03:00"
     off, late, on = make_user(first="Выкл"), make_user(first="Поздно"), make_user(first="Вкл")
@@ -232,8 +232,8 @@ def test_not_working_gets_no_goal_announcements(conn, make_user):
 
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     on, off = make_user(first="Вкл"), make_user(first="Выкл", working=False)
-    goal = goals.create(conn, owner, title="Неделя", kind="team", target=100, date_from=date.today(),
-                        date_to=date.today() + timedelta(days=6), key=svc.new_key())
+    goal = goals.create(conn, owner, title="Неделя", kind="team", target=100, date_from=today_local(),
+                        date_to=today_local() + timedelta(days=6), key=svc.new_key())
     rec = Recorder()
     run(Notifier(rec, conn).goal_created(goal))
     chats = {c for c, _ in rec.sent}

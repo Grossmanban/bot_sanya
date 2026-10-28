@@ -11,7 +11,7 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import alice, notify, products, reports, violations
+from . import alice, notify, pending, products, reports, templates, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -51,6 +51,28 @@ class ContactAdminBody(BaseModel):
 
 class DateKey(BaseModel):
     shift_date: str
+    idempotency_key: str
+
+
+class ReasonBody(BaseModel):
+    kind: str | None = None
+    text: str | None = None
+    delete: bool = False
+    idempotency_key: str
+
+
+class TextBody(BaseModel):
+    text: str | None = None  # None — back to the default
+    idempotency_key: str
+
+
+class DayMark(BaseModel):
+    user_id: int
+    kind: str  # off | shift
+    start_time: str | None = None
+    end_time: str | None = None
+    volume: int | None = None
+    location: str | None = None
     idempotency_key: str
 
 
@@ -1144,7 +1166,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             people = [u for u in people if u["status"] == "approved"]
         nets = networks.names(conn)
         money = perms.can(admin, "money")
-        items = [{**public_user(u), "network": nets.get(u["network_id"]), **(money_fields(u) if money else {})}
+        items = [{**public_user(u), "network": nets.get(u["network_id"]), **(money_fields(u) if money else {}),
+                  "candidate": u["status"] == "pending" and svc.is_candidate(conn, u["id"])}
                  for u in visible(admin, people)]
         return {"items": items, "bot_username": app.state.bot_username}
 
@@ -1354,7 +1377,21 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if only is not None:
             counted = [i for i in items if i["status"] in svc.ACTIVE]
             count, volume = len(counted), sum(i["volume"] or 0 for i in counted)
-        return {"date": d.isoformat(), "items": items, "total_count": count, "total_volume": volume}
+        nets = networks.names(conn)
+        # customer 28.10: who hasn't marked this day (no shift, no day off) — visible and fixable right here
+        unmarked = [{"user_id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
+                     "network": nets.get(u["network_id"])} for u in pending.unmarked(conn, admin, d)]
+        return {"date": d.isoformat(), "items": items, "total_count": count, "total_volume": volume,
+                "unmarked": unmarked, "can_mark": d >= today}
+
+    @api.post("/admin/day/{day}/mark")
+    async def admin_day_mark(day: str, body: DayMark, admin: dict = Depends(staff("schedule"))):
+        payload = None if body.kind == "off" else {"start_time": body.start_time, "end_time": body.end_time,
+                                                    "volume": body.volume, "location": body.location}
+        result = svc.admin_mark_day(conn, admin, body.user_id, svc.parse_date(day), body.kind, payload, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.day_marked_by_manager(result.shift, admin))
+        return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
 
     @api.get("/admin/stats")
     async def admin_stats(user_id: int, date_from: str = Query(..., alias="from"), date_to: str = Query(..., alias="to"),
@@ -1411,16 +1448,36 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                  or perms.is_owner(admin)]
         return {"items": items, "counts": reports.counts(conn, only)}
 
+    # ------------------------------------------------------------ reason templates and bot texts (ТЗ 28.10 §2, В1–В2)
+
+    @api.get("/reasons")
+    async def reason_list(admin: dict = Depends(admin_user)):
+        return {"kinds": templates.reason_catalog(conn)}
+
+    @api.post("/admin/reasons")
+    async def reason_add(body: ReasonBody, admin: dict = Depends(staff("settings"))):
+        templates.add_reason(conn, admin, body.kind or "", body.text or "", body.idempotency_key)
+        return {"kinds": templates.reason_catalog(conn)}
+
+    @api.patch("/admin/reasons/{reason_id}")
+    async def reason_edit(reason_id: int, body: ReasonBody, admin: dict = Depends(staff("settings"))):
+        templates.edit_reason(conn, admin, reason_id, body.text, body.delete, body.idempotency_key)
+        return {"kinds": templates.reason_catalog(conn)}
+
+    @api.get("/admin/texts")
+    async def text_list(admin: dict = Depends(staff("settings"))):
+        return {"items": templates.text_catalog(conn)}
+
+    @api.put("/admin/texts/{text_key}")
+    async def text_save(text_key: str, body: TextBody, admin: dict = Depends(staff("settings"))):
+        templates.save_text(conn, admin, text_key, body.text, body.idempotency_key)
+        return {"items": templates.text_catalog(conn)}
+
     @api.get("/admin/reports/counts")
+    @api.get("/admin/pending")
     async def admin_report_counts(admin: dict = Depends(admin_user)):
-        out = reports.counts(conn, visible_ids(admin)) if perms.can(admin, "review") else {"review": 0, "no_show": 0}
-        out["actual_missing"] = len(day_actual.missing_days(conn)) if perms.can(admin, "global_actual") else 0
-        only = visible_ids(admin)
-        out["fines_pending"] = (len(finance.journal(conn, only=only, statuses=("pending_admin_approval",)))
-                                if perms.can(admin, "approve_fines") else 0)
-        out["fines_draft"] = len(finance.journal(conn, only=only, statuses=("draft",))) if perms.can(admin, "fine_direct") else 0
-        out["violations"] = violations.pending_count(conn, admin) if perms.can(admin, "review") else 0
-        return out
+        """ТЗ 28.10 §14: every open request the viewer may decide — one count per request, same rules as the lists."""
+        return pending.counts(conn, admin)
 
     # ------------------------------------------------------------ schedule violations (ТЗ 12.4)
 
@@ -1979,7 +2036,9 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/day-actuals")
     async def admin_day_actuals(_: dict = Depends(staff("global_actual"))):
-        return {"items": day_actual.overview(conn), "missing": [d.isoformat() for d in day_actual.missing_days(conn)]}
+        return {"items": day_actual.overview(conn), "missing": [d.isoformat() for d in day_actual.missing_days(conn)],
+                # В56: older than two weeks and still without the global actual — «просрочено», shown apart
+                "overdue": [d.isoformat() for d in pending.overdue_actual_days(conn, today_local())]}
 
     @api.post("/admin/day-actuals/{day}")
     async def admin_set_day_actual(day: str, body: ActualBody, owner: dict = Depends(staff("global_actual"))):

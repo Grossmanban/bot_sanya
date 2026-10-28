@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { api, type Lifecycle } from "@/lib/api";
 import { useAction } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
+import { useReasons } from "@/lib/reasons";
 import { PhotoPicker, PhotoThumb, VideoPicker, VideoThumb } from "./report/photo";
 
 /** Shared by goals and events once they run (ТЗ №20, №22). */
@@ -231,7 +232,9 @@ export function NotifyDialog({ fields, onChoose, onCancel }: {
 }
 
 /** A reason with quick presets (annul a result, take a completion back). */
-export function ReasonInput({ value, onChange, presets }: { value: string; onChange: (v: string) => void; presets: string[] }) {
+export function ReasonInput({ value, onChange, presets: fallback, kind = "annul" }: { value: string; onChange: (v: string) => void;
+  presets: string[]; kind?: string }) {
+  const presets = useReasons(kind, fallback);  // the editable templates (ТЗ 28.10 §2)
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">

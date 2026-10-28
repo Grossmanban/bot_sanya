@@ -93,6 +93,10 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
         ran.append("report_reminder")
     if await no_shows(conn, notifier, now, since):
         ran.append("no_show")
+    # ТЗ 28.10 §14: an urgent request for a day that has passed can't be decided any more — it closes by itself
+    for shift in svc.expire_urgent(conn, today):
+        ran.append("urgent_expired")
+        await notifier.urgent_expired(shift)
     for event in events.finish_due(conn, now):
         ran.append("event_finished")
         if event["visibility"] != "hidden":  # a hidden event finishes quietly

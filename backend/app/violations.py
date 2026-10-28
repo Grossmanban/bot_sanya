@@ -150,10 +150,12 @@ def listing(conn: sqlite3.Connection, viewer: dict, status: str = "pending", lim
         sql = f"SELECT * FROM attendance_violations WHERE status = '{status}' ORDER BY week_start_date, id LIMIT ?"
     nets = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM networks")}
     out = []
-    for v in conn.execute(sql, (limit,)):
+    for v in conn.execute(sql.replace(" LIMIT ?", "")):  # rights first, then the limit: the list matches the count
         v = dict(v)
         if perms.can(viewer, "review", svc.get_user(conn, v["user_id"])):
             out.append(public(conn, v, nets))
+            if len(out) >= limit:
+                break
     return out
 
 

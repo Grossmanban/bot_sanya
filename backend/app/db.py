@@ -1109,6 +1109,31 @@ ALTER TABLE broadcasts ADD COLUMN signature TEXT;
 """)
 
 
+def _templates(conn: sqlite3.Connection) -> None:
+    """Migration 31 — ТЗ 28.10 §2 (В1, В2): editable reason templates (seeded with the presets that lived in the
+    code) and editable bot texts (a row only for a text someone changed)."""
+    conn.execute("""CREATE TABLE reason_templates (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT NOT NULL,
+        text        TEXT NOT NULL,
+        position    INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        created_by  INTEGER,
+        deleted_at  TEXT)""")
+    conn.execute("CREATE INDEX ix_reason_templates_kind ON reason_templates (kind, position)")
+    conn.execute("""CREATE TABLE message_texts (
+        key         TEXT PRIMARY KEY,
+        text        TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        updated_by  INTEGER)""")
+    from .templates import seed_reasons
+
+    seed_reasons(conn)
+
+
+MIGRATIONS.append(_templates)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

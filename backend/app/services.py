@@ -230,6 +230,15 @@ def create_registration(conn, telegram_id: int, username: str | None, first_name
     return get_user(conn, cur.lastrowid), True
 
 
+def is_candidate(conn, user_id: int) -> bool:
+    """A pending person with an open questionnaire: decided in «Онбординг», not in «Команда» (ТЗ 28.10 §14)."""
+    return conn.execute("SELECT 1 FROM applications WHERE user_id = ? AND status IN ('new','scheduled')",
+                        (user_id,)).fetchone() is not None
+
+
+CANDIDATE = "Это кандидат с анкетой — решение принимается в «Онбординге»"
+
+
 def decide_registration(conn, user_id: int, approve: bool, admin_tg: int) -> tuple[dict, bool]:
     with transaction(conn):
         user = get_user(conn, user_id)
@@ -237,6 +246,8 @@ def decide_registration(conn, user_id: int, approve: bool, admin_tg: int) -> tup
             raise ServiceError("Пользователь не найден", 404, "not_found")
         if user["status"] != "pending":
             return user, False
+        if is_candidate(conn, user_id):
+            raise ServiceError(CANDIDATE, 409, "candidate")
         conn.execute(
             """UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working',
                                 work_status_at = decided_at, notify_reminders = 0 WHERE id = ?""",
@@ -364,6 +375,8 @@ def set_access(conn, actor: dict, user_id: int, allow: bool, key: str) -> tuple[
         target = "approved" if allow else "rejected"
         if user["status"] == target:
             return user, False
+        if user["status"] == "pending" and is_candidate(conn, user_id):
+            raise ServiceError(CANDIDATE, 409, "candidate")
         conn.execute(
             """UPDATE users SET status = ?, decided_at = ?, decided_by = ?, work_status = 'not_working',
                                 work_status_at = decided_at, notify_reminders = 0 WHERE id = ?""",
@@ -891,6 +904,62 @@ def pre_declare_off(conn, user: dict, day: date, key: str, today: date | None = 
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="PRE_DECLARED_OFF_SET",
                   key=key, shift_id=cur.lastrowid, new={"date": day.isoformat()})
     return Result(get_shift(conn, cur.lastrowid), True, "PRE_DECLARED_OFF_SET")
+
+
+def expire_urgent(conn, today: date) -> list[dict]:
+    """Urgent requests «на сегодня» nobody decided by the end of that day: closed as not confirmed (once)."""
+    out = []
+    with transaction(conn):
+        for row in conn.execute("SELECT * FROM shifts WHERE status = 'awaiting_approval' AND shift_date < ?",
+                                (today.isoformat(),)).fetchall():
+            conn.execute("UPDATE shifts SET status = 'rejected_by_admin', updated_at = ? WHERE id = ? AND status = 'awaiting_approval'",
+                         (now_iso(), row["id"]))
+            log_event(conn, user_id=row["user_id"], actor_id=0, event_type="SHIFT_URGENT_EXPIRED", key=new_key(),
+                      shift_id=row["id"], old={"status": "awaiting_approval"}, new={"status": "rejected_by_admin"})
+            out.append(get_shift(conn, row["id"]))
+    return out
+
+
+def admin_mark_day(conn, admin: dict, user_id: int, day: date, kind: str, payload: dict | None, key: str,
+                   today: date | None = None) -> Result:
+    """«День» (customer, 28.10): a manager marks someone who hasn't marked the day — a day off or a shift — in one
+    tap, right from the list of the unmarked. Not for past days; the person's own record always wins."""
+    if kind not in ("off", "shift"):
+        raise ServiceError("Выходной или смена", 422, "bad_kind")
+    _check_key(key)
+    today = today or today_local()
+    data = validate_payload(**(payload or {})) if kind == "shift" else None
+    with transaction(conn):
+        if _seen(conn, key):
+            return Result(get_user_shift_on(conn, user_id, day), False)
+        admin = _fresh_actor(conn, admin)
+        user = get_user(conn, user_id)
+        if user is None or user["status"] != "approved" or user["account_state"] == "blocked":
+            raise ServiceError("Сотрудник не найден или заблокирован", 404, "not_found")
+        if not perms.can(admin, "schedule", user):
+            raise ServiceError("Нет прав на этого сотрудника", 403, "forbidden")
+        if day < today:
+            raise ServiceError("Прошедший день отметить нельзя", 409, "past_date")
+        if get_user_shift_on(conn, user_id, day) is not None:
+            raise ServiceError("У сотрудника уже есть запись на этот день — обновите список", 409, "already_exists")
+        stamp = now_iso()
+        if kind == "off":
+            cur = conn.execute("""INSERT INTO shifts (user_id, shift_date, status, created_at, updated_at)
+                                  VALUES (?, ?, 'pre_declared_off', ?, ?)""", (user_id, day.isoformat(), stamp, stamp))
+            event = "ADMIN_DAY_OFF_SET"
+        else:
+            data["location"] = check_point(conn, day, data["location"])
+            training = bool(user.get("trainee_since") and not user.get("trainee_done_at"))
+            cur = conn.execute(
+                """INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, is_urgent,
+                                       created_at, updated_at, training)
+                   VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)""",
+                (user_id, day.isoformat(), data["start_time"], data["end_time"], data["volume"], data["location"],
+                 stamp, stamp, int(training)))
+            event = "ADMIN_SHIFT_CREATED"
+        log_event(conn, user_id=user_id, actor_id=admin["telegram_id"], event_type=event, key=key,
+                  shift_id=cur.lastrowid, new={"date": day.isoformat(), **(data or {})})
+    return Result(get_shift(conn, cur.lastrowid), True, event)
 
 
 def clear_pre_declare_off(conn, user: dict, shift_id: int, key: str, today: date | None = None,

@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import alice, broadcasts, day_actual, finance, groups, invites, recruiting, reports
+from . import alice, broadcasts, day_actual, finance, groups, invites, pending, recruiting, reports, templates
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -59,13 +59,8 @@ class DecisionInput(StatesGroup):
     reason = State()
 
 
-# quick reasons offered as buttons when a decision needs a comment
-REASONS = {
-    "return": [],
-    "fine": ["Не выполнена норма", "Скриншот не подтверждает результат"],
-    "ns_fine": ["Не сдан отчёт о смене", "Не вышел на смену"],
-    "ns_excuse": ["Уважительная причина", "Смена не состоялась"],
-}
+# quick reasons offered as buttons when a decision needs a comment — the editable templates (ТЗ 28.10 §2, В2)
+REASON_KIND = {"return": None, "fine": "report_fine", "ns_fine": "no_show_fine", "ns_excuse": "no_show_excuse"}
 
 
 WELCOME = ("Добро пожаловать в систему!\n\nСовет: в приложении → «Профиль» → «Быстрый доступ» можно добавить "
@@ -466,7 +461,8 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
                       "ns_fine": f"💸 Штраф {amount} ед.", "ns_excuse": "🤝 Без штрафа"}[kind]
 
     async def ask_reason(message: Message, state: FSMContext, kind: str) -> None:
-        presets = REASONS[kind]
+        presets = templates.reasons(conn, REASON_KIND[kind])[:8] if REASON_KIND[kind] else []
+        await state.update_data(presets=presets)  # the button keeps meaning what it showed, even if edited meanwhile
         await state.set_state(DecisionInput.reason)
         markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=r, callback_data=f"rsn:{i}")]
                                                        for i, r in enumerate(presets)]) if presets else None
@@ -522,7 +518,11 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     @router.callback_query(StateFilter(DecisionInput.reason), F.data.startswith("rsn:"))
     async def decision_reason_preset(call: CallbackQuery, state: FSMContext):
         data = await state.get_data()
-        reason = REASONS[data["kind"]][int(call.data.split(":")[1])]
+        try:
+            reason = data.get("presets", [])[int(call.data.split(":")[1])]
+        except (IndexError, ValueError):
+            await call.answer("Кнопка устарела — напишите причину текстом", show_alert=True)
+            return
         text = await finish_decision(call.from_user.id, state, reason)
         await call.message.edit_text(f"{escape(reason)}\n\n<b>{escape(text)}</b>", parse_mode="HTML")
         await call.answer()
@@ -580,6 +580,15 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             lines.append(f"{'🔴' if p['balance'] < 0 else '🟢' if p['balance'] > 0 else '⚪'} {link}: "
                          f"<b>{sign}{abs(p['balance'])} ₽</b> ({', '.join(parts)})")
         await message.answer("\n".join(lines[:80]), parse_mode="HTML", reply_markup=open_app_keyboard())
+
+    @router.message(Command("pending"), F.chat.type == "private")
+    async def pending_cmd(message: Message):
+        """ТЗ 28.10 §4, §14 (В10): what waits for this person's decision — the same counts as the app's badges."""
+        actor = svc.get_user_by_tg(conn, message.from_user.id)
+        if actor is None or not perms.is_staff(actor):
+            return
+        await message.answer(pending.summary_text(pending.counts(conn, actor)), parse_mode="HTML",
+                             reply_markup=open_app_keyboard())
 
     @router.callback_query(F.data.startswith("fx:"))
     async def fine_decision(call: CallbackQuery):

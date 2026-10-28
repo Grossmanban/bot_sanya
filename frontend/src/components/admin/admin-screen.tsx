@@ -1,11 +1,11 @@
 "use client";
 
-import { useMemo, useState, type CSSProperties } from "react";
-import { Check, Copy, RefreshCw, Search } from "lucide-react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { Check, Copy, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type AdminShift, type Capability, type StatsItem, type User } from "@/lib/api";
+import { api, type AdminShift, type Capability, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
 import {
   STATUS_META,
   WEEKDAYS_SHORT,
@@ -17,9 +17,10 @@ import {
   timeRange,
   WEEKDAYS,
 } from "@/lib/format";
-import { moscowToday, useLoad } from "@/lib/hooks";
-import { haptic, tapHaptic } from "@/lib/telegram";
+import { moscowToday, useAction, useLoad } from "@/lib/hooks";
+import { haptic, openProfile, tapHaptic } from "@/lib/telegram";
 import { CapsContext } from "@/lib/caps";
+import { refreshPending, sectionCount, usePending } from "@/lib/pending";
 import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
@@ -80,9 +81,11 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
   useScrollMemory(`admin:${section}`);
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
-  const counts = useLoad(() => api.admin.reportCounts(), [version, section]);
-  const waiting = (counts.data?.review ?? 0) + (counts.data?.no_show ?? 0);
-  const money = (counts.data?.fines_pending ?? 0) + (counts.data?.fines_draft ?? 0);
+  // ТЗ 28.10 §14: one shared, auto-refreshing set of counts (the bottom tab shows their sum)
+  const counts = usePending(true);
+  useEffect(() => {
+    void refreshPending();
+  }, [version, section]);
 
   return (
     <CapsContext.Provider value={caps}>
@@ -105,28 +108,10 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
               )}
             >
               {s.label}
-              {s.id === "actual" && (counts.data?.actual_missing ?? 0) > 0 && (
+              {sectionCount(counts, s.id) > 0 && (
                 <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
-                  section === s.id ? "bg-white/20" : "bg-wait text-white")}>
-                  {counts.data?.actual_missing}
-                </span>
-              )}
-              {s.id === "penalties" && money > 0 && (
-                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
-                  section === s.id ? "bg-white/20" : "bg-wait text-white")}>
-                  {money}
-                </span>
-              )}
-              {s.id === "discipline" && (counts.data?.violations ?? 0) > 0 && (
-                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
-                  section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
-                  {counts.data?.violations}
-                </span>
-              )}
-              {s.id === "reports" && waiting > 0 && (
-                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
-                  section === s.id ? "bg-white/20" : "bg-cancel text-white")}>
-                  {waiting}
+                  section === s.id ? "bg-white/20" : ["reports", "discipline"].includes(s.id) ? "bg-cancel text-white" : "bg-wait text-white")}>
+                  {sectionCount(counts, s.id)}
                 </span>
               )}
             </button>
@@ -304,7 +289,7 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
 function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
   const today = moscowToday();
   const [day, setDay] = useState(() => addDays(today, 1));
-  const { data, loading } = useLoad(() => api.admin.day(day), [day, version]);
+  const { data, loading, reload } = useLoad(() => api.admin.day(day), [day, version]);
   const chips = [
     { label: "Сегодня", value: today },
     { label: "Завтра", value: addDays(today, 1) },
@@ -329,6 +314,9 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
       <p className="mt-1 text-[15px] text-muted-foreground">
         {data ? `Выходят ${data.total_count} ${plural(data.total_count, "человек", "человека", "человек")}, ${data.total_volume} шт.` : " "}
       </p>
+      {data && data.date === day && data.unmarked.length > 0 && (
+        <Unmarked day={day} people={data.unmarked} canMark={data.can_mark} onDone={reload} />
+      )}
 
       {loading && !data ? (
         <Skeleton className="mt-5 h-32 rounded-2xl" />
@@ -371,6 +359,68 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
         </>
       )}
     </section>
+  );
+}
+
+/** Customer 28.10: who hasn't marked the day (no shift, no day off) — a manager marks it for them right here. */
+function Unmarked({ day, people, canMark, onDone }: { day: string; people: UnmarkedPerson[]; canMark: boolean; onDone: () => void }) {
+  const [form, setForm] = useState<{ user: UnmarkedPerson; start: string; end: string; volume: string; location: string } | null>(null);
+  const { busy, run } = useAction();
+  const mark = async (person: UnmarkedPerson, kind: "off" | "shift") => {
+    try {
+      await run(`${kind}-${person.user_id}`, (k) => api.admin.markDay(day, kind === "off" ? { user_id: person.user_id, kind } : {
+        user_id: person.user_id, kind, start_time: form!.start, end_time: form!.end, volume: Number(form!.volume), location: form!.location,
+      }, k), kind === "off" ? "Отмечен выходной" : "Записан в график");
+      setForm(null);
+      onDone();
+    } catch {
+      /* toast shown */
+    }
+  };
+  return (
+    <div className="mt-5 rounded-2xl bg-wait-soft p-4">
+      <p className="font-semibold text-wait">Не отметили этот день: {people.length}</p>
+      <p className="mt-0.5 text-sm text-muted-foreground">
+        Ни смены, ни выходного. {canMark ? "Можно отметить за человека — он получит сообщение." : "День прошёл."}
+      </p>
+      <ul className="mt-3 space-y-2">
+        {people.map((p) => (
+          <li key={p.user_id} className="rounded-xl bg-card p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button className="min-w-0 flex-1 truncate text-left font-medium underline-offset-2 hover:underline"
+                      onClick={() => openProfile(p.username, p.telegram_id, p.name)}>
+                {p.name}{p.network && <span className="font-normal text-muted-foreground"> · {p.network}</span>}
+              </button>
+              {canMark && (
+                <span className="flex shrink-0 gap-1.5">
+                  <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy}
+                          onClick={() => mark(p, "off")}>Выходной</Button>
+                  <Button size="sm" className="press h-9 rounded-lg" disabled={!!busy}
+                          onClick={() => setForm(form?.user.user_id === p.user_id ? null
+                            : { user: p, start: "10:00", end: "18:00", volume: "", location: "" })}>В график</Button>
+                </span>
+              )}
+            </div>
+            {form?.user.user_id === p.user_id && (
+              <div className="row-in mt-3 grid grid-cols-2 gap-2">
+                <input type="time" aria-label="С" className={cn(field, "h-10")} value={form.start}
+                       onChange={(e) => setForm({ ...form, start: e.target.value })} />
+                <input type="time" aria-label="До" className={cn(field, "h-10")} value={form.end}
+                       onChange={(e) => setForm({ ...form, end: e.target.value })} />
+                <input inputMode="numeric" placeholder="Объём, шт." className={cn(field, "h-10")} value={form.volume}
+                       onChange={(e) => setForm({ ...form, volume: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
+                <input placeholder="Точка" className={cn(field, "h-10")} value={form.location}
+                       onChange={(e) => setForm({ ...form, location: e.target.value.slice(0, 100) })} />
+                <Button className="press col-span-2 h-10 rounded-xl" disabled={!!busy || !form.volume || !form.location.trim()}
+                        onClick={() => mark(p, "shift")}>
+                  {busy === `shift-${p.user_id}` && <LoaderCircle className="animate-spin" />} Записать
+                </Button>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

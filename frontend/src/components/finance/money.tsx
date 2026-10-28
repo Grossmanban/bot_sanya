@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Gift, HeartHandshake, LoaderCircle, MinusCircle, Receipt, Undo2 } from "lucide-react";
 import { toast } from "sonner";
+import { useReasons } from "@/lib/reasons";
 import { Button } from "@/components/ui/button";
 import { api, type Balance, type MoneySummary, type Tx, type TxType } from "@/lib/api";
 import { useCan } from "@/lib/caps";
@@ -282,6 +283,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
     canMoney && "deduction",
   ].filter(Boolean)) as ("fine" | "bonus" | "deduction")[];
   const [type, setType] = useState<"fine" | "bonus" | "deduction">(types.includes(initial) ? initial : types[0]);
+  const quick = useReasons(type, QUICK_REASONS[type] ?? []);  // the editable templates (ТЗ 28.10 §2)
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [photo, setPhoto] = useState<Blob | null>(null);
@@ -378,7 +380,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
       </div>
       )}
       <div className="flex flex-wrap gap-1.5">
-        {QUICK_REASONS[type].map((r) => (
+        {quick.map((r) => (
           <button key={r} onClick={() => setReason(r)}
                   className={cn("press rounded-full px-3 py-1.5 text-xs font-semibold", reason === r ? "bg-primary text-primary-foreground" : "bg-muted")}>
             {r}
