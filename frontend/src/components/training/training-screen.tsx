@@ -10,16 +10,36 @@ import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { CancelCounter, ReasonForm, StageBadge, TrainingLine, field, requestLines } from "./shared";
+import { ManualsReader } from "./manuals";
 
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 
-/** ТЗ 28.10 §3–§4: «Обучение» — the candidates this person trains, their stage, and requests to the admins. */
-export function TrainingScreen() {
-  const { data, reload } = useLoad(() => api.training(), []);
-  if (!data) return <Skeleton className="mx-auto h-64 max-w-2xl rounded-3xl" />;
+/** ТЗ 28.10 §3, §12: «Обучение» — the trainer's candidates and/or the manuals given to this person. */
+export function TrainingScreen({ trainer, manuals }: { trainer: boolean; manuals: number }) {
+  const [part, setPart] = useState<"candidates" | "manuals">(trainer ? "candidates" : "manuals");
   return (
     <div className="mx-auto max-w-2xl space-y-4">
       <h1 className="font-display text-2xl font-semibold">Обучение</h1>
+      {trainer && manuals > 0 && (
+        <div className="flex gap-1 rounded-2xl bg-card p-1 shadow-lift">
+          {([["candidates", "Кандидаты"], ["manuals", "Методички"]] as const).map(([k, label]) => (
+            <button key={k} onClick={() => setPart(k)}
+                    className={cn("press h-10 flex-1 rounded-xl text-sm font-semibold", part === k ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+      {part === "manuals" && manuals > 0 ? <ManualsReader /> : trainer ? <Candidates /> : <ManualsReader />}
+    </div>
+  );
+}
+
+function Candidates() {
+  const { data, reload } = useLoad(() => api.training(), []);
+  if (!data) return <Skeleton className="h-64 rounded-3xl" />;
+  return (
+    <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         Ваши кандидаты. Начать, отменить, перенести обучение или отказать — запросом: решение принимает администратор,
         до решения всё остаётся как было.

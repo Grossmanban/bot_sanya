@@ -11,7 +11,7 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import alice, notify, pending, products, profiles, reports, templates, training, violations
+from . import alice, manuals, notify, pending, products, profiles, reports, templates, training, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -76,6 +76,35 @@ class GroupMode(BaseModel):
 class NotNewbie(BaseModel):
     user_id: int
     value: bool
+    idempotency_key: str
+
+
+class GlobalLink(BaseModel):
+    title: str | None = None
+    url: str | None = None
+    active: bool = True
+
+
+class ManualBody(BaseModel):
+    title: str | None = None
+    idempotency_key: str
+
+
+class ManualSection(BaseModel):
+    id: int | None = None
+    title: str = ""
+    html: str = ""
+
+
+class ManualSections(BaseModel):
+    sections: list[ManualSection]
+    note: str | None = None
+    idempotency_key: str
+
+
+class ManualAccess(BaseModel):
+    manual_id: int | None = None
+    allow: bool
     idempotency_key: str
 
 
@@ -747,6 +776,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "products": products.of_user(conn, user["id"]),
             # ТЗ 28.10 §3, §8: «Обучение» — the trainer of a candidate or a grant by an admin
             "training": training.has_access(conn, user),
+            # ТЗ 28.10 §12: «Методички» in «Обучение» while at least one is given (the tab shows for them too, В33)
+            "manuals": len(manuals.available(conn, user)),
+            # ТЗ 28.10 §10: the button to another bot — only when it's created, active and valid
+            "global_link": (lambda g: {"title": g["title"], "url": g["url"]} if g and g.get("active") else None)(
+                app_settings.global_link(conn)),
             # a trainee's shifts are training ones and not paid
             "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user)},
             "bot_username": app.state.bot_username,
@@ -2242,6 +2276,97 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if changed:
             notifier.spawn(notifier.finish_requested(a))
         return app_out(app_id)
+
+    # ------------------------------------------------------------ manuals (ТЗ 28.10 §12)
+
+    @api.get("/admin/global-link")
+    async def admin_global_link(_: dict = Depends(staff("settings"))):
+        return {"link": app_settings.global_link(conn)}
+
+    @api.put("/admin/global-link")
+    async def admin_global_link_save(body: GlobalLink, admin: dict = Depends(staff("settings"))):
+        old = app_settings.global_link(conn)
+        link = app_settings.set_global_link(conn, body.title, body.url, body.active)
+        with transaction(conn):
+            svc.log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="GLOBAL_LINK_SAVED",
+                          key=svc.new_key(), old=old, new=link)
+        return {"link": link}
+
+    @api.delete("/admin/global-link")
+    async def admin_global_link_delete(admin: dict = Depends(staff("settings"))):
+        old = app_settings.global_link(conn)
+        app_settings.delete_global_link(conn)
+        with transaction(conn):
+            svc.log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="GLOBAL_LINK_DELETED",
+                          key=svc.new_key(), old=old)
+        return {"link": None}
+
+    @api.get("/admin/manuals")
+    async def admin_manuals(_: dict = Depends(staff("manuals"))):
+        return {"items": manuals.listing(conn)}
+
+    @api.post("/admin/manuals")
+    async def admin_manual_create(body: ManualBody, admin: dict = Depends(staff("manuals"))):
+        m = manuals.create(conn, admin, body.title or "", body.idempotency_key)
+        return {"manual": manuals.view_admin(conn, m["id"]), "items": manuals.listing(conn)}
+
+    @api.get("/admin/manuals/{manual_id}")
+    async def admin_manual(manual_id: int, _: dict = Depends(staff("manuals"))):
+        return {"manual": manuals.view_admin(conn, manual_id)}
+
+    @api.patch("/admin/manuals/{manual_id}")
+    async def admin_manual_rename(manual_id: int, body: ManualBody, admin: dict = Depends(staff("manuals"))):
+        manuals.rename(conn, admin, manual_id, body.title or "", body.idempotency_key)
+        return {"manual": manuals.view_admin(conn, manual_id)}
+
+    @api.post("/admin/manuals/{manual_id}/delete")
+    async def admin_manual_delete(manual_id: int, body: KeyOnly, admin: dict = Depends(staff("manuals"))):
+        manuals.delete(conn, admin, manual_id, body.idempotency_key)
+        return {"items": manuals.listing(conn)}
+
+    @api.put("/admin/manuals/{manual_id}/sections")
+    async def admin_manual_sections(manual_id: int, body: ManualSections, admin: dict = Depends(staff("manuals"))):
+        return {"manual": manuals.save_sections(conn, admin, manual_id, [x.model_dump() for x in body.sections],
+                                                body.idempotency_key, body.note)}
+
+    @api.post("/admin/manuals/{manual_id}/upload")
+    async def admin_manual_upload(manual_id: int, request: Request, idempotency_key: str, admin: dict = Depends(staff("manuals"))):
+        raw = await request.body()
+        if len(raw) > manuals.MAX_HTML:
+            raise svc.ServiceError("Файл слишком большой (до 2 МБ)", 413, "too_big")
+        html = raw.decode("utf-8", errors="replace")
+        return {"manual": manuals.upload(conn, admin, manual_id, html, idempotency_key)}
+
+    @api.get("/admin/users/{user_id}/manuals")
+    async def admin_user_manuals(user_id: int, _: dict = Depends(staff("manuals"))):
+        return {"items": manuals.assigned(conn, user_id)}
+
+    @api.post("/admin/users/{user_id}/manuals")
+    async def admin_user_manual_set(user_id: int, body: ManualAccess, admin: dict = Depends(staff("manuals"))):
+        return {"items": manuals.set_access(conn, admin, user_id, body.manual_id, body.allow, body.idempotency_key)}
+
+    @api.get("/manuals")
+    async def my_manuals(user: dict = Depends(current_user)):
+        return {"items": manuals.my_list(conn, user)}
+
+    @api.get("/manuals/{manual_id}")
+    async def my_manual(manual_id: int, user: dict = Depends(current_user)):
+        return {"manual": manuals.read_view(conn, user, manual_id)}
+
+    @api.post("/manuals/{manual_id}/sections/{section_id}/read")
+    async def my_manual_read(manual_id: int, section_id: int, user: dict = Depends(current_user)):
+        return {"manual": manuals.mark_read(conn, user, manual_id, section_id)}
+
+    @api.get("/media/manualimg/{image_id}")
+    async def manual_image(image_id: int, exp: int, sig: str):
+        """A picture of a manual: only by a short-lived link given to someone who may read it."""
+        if not media.verify(image_id, exp, sig, kind="manualimg"):
+            raise svc.ServiceError("Ссылка устарела", 403, "bad_link")
+        path = manuals.image_path(conn, image_id)
+        if path is None:
+            raise svc.ServiceError("Картинка недоступна", 404, "not_found")
+        return FileResponse(path, media_type=media.TYPES.get(path.suffix.lstrip("."), "image/gif"),
+                            headers={"Cache-Control": "private, max-age=600"})
 
     @api.get("/media/avatar/{user_id}")
     async def avatar(user_id: int, exp: int, sig: str):

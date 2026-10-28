@@ -1252,6 +1252,61 @@ def _profiles(conn: sqlite3.Connection) -> None:
 
 MIGRATIONS.append(_profiles)
 
+# 35 — ТЗ 28.10 §12: manuals in «Обучение» — sections, versions, pictures kept on the server, per-person access
+# and per-section reading progress (a section edited since — unread again)
+MIGRATIONS.append("""
+CREATE TABLE manuals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    version     INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    created_by  INTEGER NOT NULL,
+    deleted_at  TEXT
+);
+CREATE TABLE manual_sections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    manual_id   INTEGER NOT NULL REFERENCES manuals(id),
+    position    INTEGER NOT NULL,
+    title       TEXT NOT NULL,
+    html        TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    deleted_at  TEXT
+);
+CREATE TABLE manual_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    manual_id   INTEGER NOT NULL REFERENCES manuals(id),
+    version     INTEGER NOT NULL,
+    snapshot    TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    created_by  INTEGER,
+    note        TEXT
+);
+CREATE TABLE manual_images (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    manual_id   INTEGER NOT NULL REFERENCES manuals(id),
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE manual_access (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    manual_id   INTEGER NOT NULL REFERENCES manuals(id),
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    granted_at  TEXT NOT NULL,
+    granted_by  INTEGER,
+    revoked_at  TEXT,
+    revoked_by  INTEGER
+);
+CREATE UNIQUE INDEX ux_manual_access_live ON manual_access (manual_id, user_id) WHERE revoked_at IS NULL;
+CREATE TABLE manual_progress (
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    section_id  INTEGER NOT NULL REFERENCES manual_sections(id),
+    hash        TEXT NOT NULL,
+    read_at     TEXT NOT NULL,
+    PRIMARY KEY (user_id, section_id)
+);
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

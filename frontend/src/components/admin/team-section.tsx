@@ -407,6 +407,7 @@ function MemberSheet({
                 <PersonalRates key={user.id} user={user} onUpdated={onUpdated} />
               )}
               {approved && caps.includes("products") && <ProductAccess key={`p-${user.id}`} user={user} />}
+              {approved && caps.includes("manuals") && <ManualAccess key={`m-${user.id}`} userId={user.id} />}
               {approved && caps.includes("registrations") && <TrainingAccess key={`t-${user.id}`} user={user} onChanged={() => onUpdated(user)} />}
 
               {canRole && (
@@ -755,6 +756,38 @@ function PersonData({ userId }: { userId: number }) {
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+/** ТЗ 28.10 §12: which manuals this person reads in «Обучение»; one by one or all back at once. */
+function ManualAccess({ userId }: { userId: number }) {
+  const { data, setData } = useLoad(() => api.admin.userManuals(userId), [userId]);
+  const { busy, run } = useAction();
+  if (!data || data.items.length === 0) return null;
+  const set = async (manualId: number | null, allow: boolean, ok: string) => {
+    try {
+      const res = await run(`m${manualId}`, (k) => api.admin.setUserManual(userId, manualId, allow, k), ok);
+      if (res) setData(res);
+    } catch {
+      /* toast shown */
+    }
+  };
+  const any = data.items.some((m) => m.assigned);
+  return (
+    <div className="mt-4 space-y-2 rounded-2xl bg-muted/50 px-4 py-3">
+      <span className="block text-[15px] font-semibold">Методички</span>
+      {data.items.map((m) => (
+        <label key={m.id} className="flex cursor-pointer items-center gap-3">
+          <span className="min-w-0 flex-1 text-[15px] break-words">{m.title}</span>
+          <Switch checked={m.assigned} disabled={!!busy} onCheckedChange={(v) => set(m.id, v, v ? "Методичка выдана" : "Доступ к методичке закрыт")} />
+        </label>
+      ))}
+      {any && (
+        <button className="text-xs font-semibold text-cancel" disabled={!!busy} onClick={() => set(null, false, "Все методички закрыты")}>
+          Закрыть все
+        </button>
       )}
     </div>
   );

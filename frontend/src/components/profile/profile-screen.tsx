@@ -128,7 +128,7 @@ export function ProfileScreen({
       </div>
 
       <div className="min-w-0 space-y-4">
-        <QuickAccess botUsername={botUsername} />
+        <QuickAccess botUsername={botUsername} onInvite={() => setView("referrals")} />
 
         <label className="flex cursor-pointer items-center gap-4 rounded-3xl bg-card p-5 shadow-lift md:px-6">
           <span className="grid size-10 place-items-center rounded-xl bg-muted">

@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Briefcase, CalendarDays, GraduationCap, ShieldCheck, Trophy, UserRound } from "lucide-react";
+import { Briefcase, CalendarDays, ExternalLink, GraduationCap, ShieldCheck, Trophy, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
-import { getThemePref, initData, setBotUsername, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
+import { getThemePref, initData, openTelegramLinkSafe, setBotUsername, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
 import { ThemeContext } from "@/lib/theme";
 import { usePending } from "@/lib/pending";
 import { cn } from "@/lib/utils";
@@ -40,6 +40,16 @@ const STAFF_TAB: Record<User["role"], string> = { owner: "Админ", admin: "�
 // role colours in the header (ТЗ №1): owner, admin, trainer, employee
 const ROLE_DOT: Record<User["role"], string> = { owner: "bg-final", admin: "bg-primary", trainer: "bg-wait",
   instructor: "bg-wait", employee: "bg-go" };
+
+/** ТЗ 28.10 §10: the one button to another bot or Mini App, next to the role; a long title is cut, never wraps. */
+function GlobalLink({ link, className }: { link: { title: string; url: string }; className?: string }) {
+  return (
+    <button type="button" onClick={(e) => { e.stopPropagation(); tapHaptic(); openTelegramLinkSafe(link.url); }}
+            className={cn("press inline-flex max-w-[42vw] shrink-0 items-center gap-1 rounded-full bg-primary px-2.5 py-0.5 text-[11px] font-semibold text-primary-foreground", className)}>
+      <span className="truncate">{link.title}</span><ExternalLink className="size-3 shrink-0" />
+    </button>
+  );
+}
 
 export function Wordmark({ className }: { className?: string }) {
   return <span className={cn("font-display font-semibold tracking-tight lowercase", className)}>выход</span>;
@@ -130,7 +140,7 @@ export function MiniApp() {
     // the events tab appears while there is an active (or just finished) event for this person
     // «Работа» appears with access to at least one product (ТЗ 27.10 §28)
     const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0)
-      && (t.id !== "work" || (me.products?.length ?? 0) > 0) && (t.id !== "training" || !!me.training))
+      && (t.id !== "work" || (me.products?.length ?? 0) > 0) && (t.id !== "training" || !!me.training || (me.manuals ?? 0) > 0))
       .map((t) => (t.id === "admin" ? { ...t, label: STAFF_TAB[user.role] } : t));
     const working = user.work_status === "working";
     const badge = (id: Tab) => (id === "admin" ? pendingTotal : 0);
@@ -143,6 +153,7 @@ export function MiniApp() {
         {/* iPad landscape / desktop: side rail */}
         <aside className="sticky top-0 hidden h-dvh flex-col border-r bg-card/50 px-5 pt-8 pb-6 lg:flex">
           <Wordmark className="px-3 text-2xl" />
+          {me.global_link && <GlobalLink link={me.global_link} className="mx-3 mt-3 max-w-full self-start py-1 text-xs" />}
           <nav className="mt-10 space-y-1">
             {tabs.map(({ id, label, icon: Icon }) => (
               <button
@@ -187,9 +198,10 @@ export function MiniApp() {
           <header className="pt-safe flex items-center justify-between gap-3 px-5 pb-3 lg:hidden">
             <div className="min-w-0">
               <Wordmark className="block text-xl leading-tight" />
-              <span className="flex items-center gap-1.5 truncate text-[11px] font-semibold text-muted-foreground">
+              <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
                 <span className={cn("size-1.5 shrink-0 rounded-full", ROLE_DOT[user.role])} />
-                {ROLE_TITLES[user.role]}{me.network ? ` · ${me.network}` : ""}
+                <span className="truncate">{ROLE_TITLES[user.role]}{me.network ? ` · ${me.network}` : ""}</span>
+                {me.global_link && <GlobalLink link={me.global_link} />}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -213,7 +225,7 @@ export function MiniApp() {
                               internship={me.internship} />
             )}
             {tab === "events" && <EventsScreen />}
-            {tab === "training" && <TrainingScreen />}
+            {tab === "training" && <TrainingScreen trainer={!!me.training} manuals={me.manuals ?? 0} />}
             {tab === "work" && <WorkScreen products={me.products ?? []} working={working} onOpenProfile={() => go("profile")} />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} botUsername={me.bot_username} />}
             {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} />}

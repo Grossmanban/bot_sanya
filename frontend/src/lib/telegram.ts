@@ -118,6 +118,17 @@ export function openProfile(username: string | null | undefined, telegramId?: nu
   profileFallback?.({ telegramId, name });
 }
 
+/** Another bot or Mini App (t.me only): inside Telegram, a new tab outside it. */
+export function openTelegramLinkSafe(url: string) {
+  const app = webApp();
+  try {
+    if (app) app.openTelegramLink(url);
+    else window.open(url, "_blank");
+  } catch {
+    window.open(url, "_blank");
+  }
+}
+
 export function haptic(type: HapticNotification) {
   try {
     webApp()?.HapticFeedback?.notificationOccurred(type);

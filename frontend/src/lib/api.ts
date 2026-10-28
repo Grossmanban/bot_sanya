@@ -62,7 +62,7 @@ export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
   | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups"
-  | "products" | "alice" | "profiles" | "remind_profiles";
+  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals";
 
 /** ТЗ 27.10 §28: «Работа» — products a person has access to */
 export type Product = "alice";
@@ -244,6 +244,10 @@ export interface Me {
   products?: Product[];
   /** ТЗ 28.10 §3: «Обучение» — the trainer of a candidate or a grant */
   training?: boolean;
+  /** ТЗ 28.10 §12: how many manuals are given to this person */
+  manuals?: number;
+  /** ТЗ 28.10 §10: the button to another bot, when created and active */
+  global_link?: { title: string; url: string } | null;
 }
 
 export type ApplicationStatus = "new" | "scheduled" | "internship" | "done" | "rejected" | "returned";
@@ -684,6 +688,19 @@ export interface ReasonKind {
   title: string;
   items: { id: number; text: string; position: number }[];
 }
+
+/** ТЗ 28.10 §12 */
+export interface ManualSummary { id: number; title: string; read: number; total: number }
+export interface ManualRead {
+  id: number; title: string; read: number; total: number;
+  sections: { id: number; title: string; read: boolean; html: string }[];
+}
+export interface ManualAdmin {
+  id: number; title: string; version: number; created_at: string;
+  sections: { id: number; title: string; html: string }[];
+  versions: { version: number; created_at: string; note: string | null }[];
+}
+export interface ManualListItem { id: number; title: string; version: number; sections: number; people: number }
 
 export interface MessageText {
   key: string;
@@ -1251,6 +1268,9 @@ export const api = {
     }),
   events: () => request<{ items: LiveEvent[] }>("/api/events"),
   training: () => request<{ items: Application[]; trainers: { id: number; name: string }[]; points: string[] }>("/api/training"),
+  manuals: () => request<{ items: ManualSummary[] }>("/api/manuals"),
+  manual: (id: number) => request<{ manual: ManualRead }>(`/api/manuals/${id}`),
+  manualRead: (id: number, sectionId: number) => post<{ manual: ManualRead }>(`/api/manuals/${id}/sections/${sectionId}/read`, {}),
   trainingRequest: (id: number, body: { kind: TrainingRequestKind; reason?: string | null; date?: string; time?: string;
     location?: string; trainer_id?: number }, key: string) =>
     post<{ request: TrainingRequest; application: Application }>(`/api/training/${id}/request`, { ...body, idempotency_key: key }),
@@ -1541,6 +1561,24 @@ export const api = {
     ) => post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/payouts", { ...body, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/pending"),
     reasons: () => request<{ kinds: ReasonKind[] }>("/api/reasons"),
+    globalLink: () => request<{ link: { title: string; url: string; active: boolean } | null }>("/api/admin/global-link"),
+    saveGlobalLink: (body: { title: string; url: string; active: boolean }) =>
+      request<{ link: { title: string; url: string; active: boolean } }>("/api/admin/global-link", { method: "PUT", body: JSON.stringify(body) }),
+    deleteGlobalLink: () => request<{ link: null }>("/api/admin/global-link", { method: "DELETE" }),
+    manuals: () => request<{ items: ManualListItem[] }>("/api/admin/manuals"),
+    createManual: (title: string, key: string) =>
+      post<{ manual: ManualAdmin; items: ManualListItem[] }>("/api/admin/manuals", { title, idempotency_key: key }),
+    manual: (id: number) => request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}`),
+    renameManual: (id: number, title: string, key: string) => patch<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}`, { title, idempotency_key: key }),
+    deleteManual: (id: number, key: string) => post<{ items: ManualListItem[] }>(`/api/admin/manuals/${id}/delete`, { idempotency_key: key }),
+    saveManual: (id: number, sections: { id?: number; title: string; html: string }[], key: string) =>
+      request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}/sections`, { method: "PUT", body: JSON.stringify({ sections, idempotency_key: key }) }),
+    uploadManual: (id: number, html: string, key: string) =>
+      request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}/upload?idempotency_key=${key}`, { method: "POST", body: html,
+        headers: { "Content-Type": "text/html" } }),
+    userManuals: (userId: number) => request<{ items: { id: number; title: string; assigned: boolean }[] }>(`/api/admin/users/${userId}/manuals`),
+    setUserManual: (userId: number, manualId: number | null, allow: boolean, key: string) =>
+      post<{ items: { id: number; title: string; assigned: boolean }[] }>(`/api/admin/users/${userId}/manuals`, { manual_id: manualId, allow, idempotency_key: key }),
     addReason: (kind: string, text: string, key: string) =>
       post<{ kinds: ReasonKind[] }>("/api/admin/reasons", { kind, text, idempotency_key: key }),
     editReason: (id: number, body: { text?: string; delete?: boolean }, key: string) =>

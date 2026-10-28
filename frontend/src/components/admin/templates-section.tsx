@@ -160,3 +160,54 @@ function TextEditor({ item, onSaved }: { item: MessageText; onSaved: (items: Mes
     </div>
   );
 }
+
+
+/** ТЗ 28.10 §10: one button to another Telegram bot or Mini App, for everyone, next to the role in the header. */
+export function GlobalLinkCard() {
+  const { data, setData } = useLoad(() => api.admin.globalLink(), []);
+  const [title, setTitle] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const { busy, run } = useAction();
+  if (!data) return <Skeleton className="h-32 rounded-3xl" />;
+  const link = data.link;
+  const t = title ?? link?.title ?? "";
+  const u = url ?? link?.url ?? "https://t.me/";
+  const save = async (active: boolean, ok: string) => {
+    try {
+      const res = await run("link", () => api.admin.saveGlobalLink({ title: t.trim(), url: u.trim(), active }), ok);
+      if (res) { setData(res); setTitle(null); setUrl(null); }
+    } catch {
+      /* toast shown */
+    }
+  };
+  return (
+    <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <div>
+        <h2 className="font-semibold">Кнопка в другой бот</h2>
+        <p className="text-sm text-muted-foreground">
+          Появляется у всех в шапке приложения рядом с ролью и открывает другой бот или Mini App внутри Telegram.
+          {link ? (link.active ? " Сейчас показывается." : " Сейчас скрыта — настройки сохранены.") : " Пока не создана."}
+        </p>
+      </div>
+      <input className={input} placeholder="Название кнопки" value={t} onChange={(e) => setTitle(e.target.value.slice(0, 40))} />
+      <input className={input} placeholder="https://t.me/имя_бота" value={u} inputMode="url" onChange={(e) => setUrl(e.target.value.slice(0, 300))} />
+      <div className="flex flex-wrap gap-2">
+        <Button className="press h-11 rounded-xl" disabled={!!busy || !t.trim()} onClick={() => save(link ? link.active : true, link ? "Сохранено" : "Кнопка создана")}>
+          {busy === "link" && <LoaderCircle className="animate-spin" />} {link ? "Сохранить" : "Создать"}
+        </Button>
+        {link && (
+          <Button variant="secondary" className="press h-11 rounded-xl" disabled={!!busy}
+                  onClick={() => save(!link.active, link.active ? "Кнопка скрыта" : "Кнопка показана")}>
+            {link.active ? "Скрыть" : "Показать"}
+          </Button>
+        )}
+        {link && (
+          <Button variant="ghost" className="press h-11 rounded-xl text-cancel" disabled={!!busy}
+                  onClick={async () => { try { if (await run("del", () => api.admin.deleteGlobalLink(), "Кнопка удалена")) { setData({ link: null }); setTitle(null); setUrl(null); } } catch { /* */ } }}>
+            <Trash2 /> Удалить
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}

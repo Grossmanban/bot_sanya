@@ -167,3 +167,34 @@ def set_raw(conn: sqlite3.Connection, key: str, value: str | None) -> None:
                 "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (f"raw:{key}", value),
             )
+
+
+# ---------------------------------------------------------------- ТЗ 28.10 §10: one button to another bot / Mini App
+
+LINK_RE = re.compile(r"^https://t\.me/[A-Za-z0-9_]{4,32}(/[A-Za-z0-9_]{1,64})?/?(\?[A-Za-z0-9_=&%-]{0,200})?$")
+
+
+def global_link(conn: sqlite3.Connection) -> dict | None:
+    import json
+
+    raw = get_raw(conn, "global_link")
+    return json.loads(raw) if raw else None
+
+
+def set_global_link(conn: sqlite3.Connection, title: str | None, url: str | None, active: bool) -> dict:
+    """Created or changed by owners and admins; t.me links only — they open inside Telegram (В28)."""
+    import json
+
+    title = " ".join((title or "").split())[:40]
+    url = (url or "").strip()
+    if not title:
+        raise ServiceError("Напишите название кнопки", 422, "title_required")
+    if not LINK_RE.match(url):
+        raise ServiceError("Ссылка — на бота или Mini App в Telegram: https://t.me/имя_бота", 422, "bad_link")
+    value = {"title": title, "url": url, "active": bool(active)}
+    set_raw(conn, "global_link", json.dumps(value, ensure_ascii=False))
+    return value
+
+
+def delete_global_link(conn: sqlite3.Connection) -> None:
+    set_raw(conn, "global_link", None)
