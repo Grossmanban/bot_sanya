@@ -797,16 +797,17 @@ def test_payment_profile_validation_and_audit(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     u, other = make_user(), make_user(first="Чужой")
     with pytest.raises(svc.ServiceError) as e:
-        payouts.save_profile(conn, u, u["id"], "123", "Сбербанк", "Иван Петров", svc.new_key())
+        payouts.save_profile(conn, owner, u["id"], "123", "Сбербанк", "Иван Петров", svc.new_key())
     assert e.value.code == "bad_phone"
     with pytest.raises(svc.ServiceError) as e:
-        payouts.save_profile(conn, u, u["id"], "8 900 123 45 67", "Банк Луны", "Иван Петров", svc.new_key())
+        payouts.save_profile(conn, owner, u["id"], "8 900 123 45 67", "Банк Луны", "Иван Петров", svc.new_key())
     assert e.value.code == "bad_bank"
-    p = payouts.save_profile(conn, u, u["id"], "8 (900) 123-45-67", "Сбербанк", "Иван Петров", svc.new_key())
+    p = payouts.save_profile(conn, owner, u["id"], "8 (900) 123-45-67", "Сбербанк", "Иван Петров", svc.new_key())
     assert p["phone"] == "+79001234567"
-    with pytest.raises(svc.ServiceError) as e:  # nobody else but owners changes it
-        payouts.save_profile(conn, other, u["id"], "+79000000000", "ВТБ", "Чужой Человек", svc.new_key())
-    assert e.value.status == 403
+    for actor in (u, other):  # ТЗ 28.10 §7: employees send requests; only owners save at once
+        with pytest.raises(svc.ServiceError) as e:
+            payouts.save_profile(conn, actor, u["id"], "+79000000000", "ВТБ", "Чужой Человек", svc.new_key())
+        assert e.value.status == 403
     payouts.save_profile(conn, owner, u["id"], "+7 900 765 43 21", "Т-Банк", "Иван Петров", svc.new_key())
     log = payouts.profile_history(conn, u["id"])
     assert len(log) == 2 and '"Сбербанк"' in log[0]["old_value"]
@@ -823,7 +824,7 @@ def test_payout_calculation_and_commit(conn, make_user):
     networks.set_trainer(conn, owner, net["id"], trainer["id"], svc.new_key())
     networks.set_member(conn, owner, a["id"], net["id"], svc.new_key())
     a, b = svc.get_user(conn, a["id"]), svc.get_user(conn, b["id"])
-    payouts.save_profile(conn, a, a["id"], "+79001112233", "Сбербанк", "Анна Аня", svc.new_key())
+    payouts.save_profile(conn, owner, a["id"], "+79001112233", "Сбербанк", "Анна Аня", svc.new_key())
 
     s1 = shift(conn, a)                                         # 25 планом
     s2 = shift(conn, a, THU + timedelta(days=1), {**P, "volume": 10})
@@ -853,6 +854,11 @@ def test_payout_calculation_and_commit(conn, make_user):
     with pytest.raises(svc.ServiceError) as e:
         payouts.commit(conn, a, "x", TODAY, THU, rates, None, [{"user_id": a["id"]}], [], [], svc.new_key())
     assert e.value.status == 403
+    with pytest.raises(svc.ServiceError) as e:  # ТЗ 28.10 §7: money only to approved payment details
+        payouts.commit(conn, owner, "x", TODAY, THU + timedelta(days=3), rates, None,
+                       [{"user_id": trainer["id"], "base_override": 1000}], [], [], svc.new_key())
+    assert e.value.code == "no_requisites" and "Тренер" in e.value.message
+    payouts.save_profile(conn, owner, trainer["id"], "+79001112244", "ВТБ", "Тренер Петров", svc.new_key())
     batch = payouts.commit(conn, owner, "Зарплата 12–18", TODAY, THU + timedelta(days=3), rates, None,
                            [{"user_id": a["id"]}, {"user_id": b["id"]}, {"user_id": trainer["id"], "base_override": 1000}],
                            ["proof-1"], [], svc.new_key())

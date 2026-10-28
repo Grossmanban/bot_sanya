@@ -45,3 +45,10 @@ def make_user(conn):
         return user
 
     return make
+
+
+def requisites(conn, *users):
+    """Approved payment details (ТЗ 28.10 §7: payouts go only to approved ones)."""
+    for u in users:
+        conn.execute("""INSERT OR IGNORE INTO payment_profiles (user_id, phone, bank, recipient, updated_at, updated_by)
+                        VALUES (?, '+79000000000', 'Сбербанк', 'Тест Тестов', datetime('now'), 999)""", (u["id"],))

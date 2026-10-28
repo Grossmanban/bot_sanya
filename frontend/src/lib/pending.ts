@@ -53,7 +53,7 @@ export const SECTION_COUNTS: Record<string, (keyof ReportCounts)[]> = {
   actual: ["actual_missing", "actual_overdue"],
   penalties: ["fines_pending", "fines_draft"],
   onboarding: ["onboarding_new", "internship_review", "training_requests"],
-  team: ["registrations"],
+  team: ["registrations", "profile_changes", "payment_changes"],
   day: ["urgent", "unmarked"],
   events: ["events_pending"],
   alice: ["alice_moderation", "alice_failed"],

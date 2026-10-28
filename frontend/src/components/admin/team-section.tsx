@@ -12,6 +12,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -24,6 +25,8 @@ import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
 import { ReasonChips } from "../reason-chips";
+import { PersonForm, StatusPill } from "../profile/person-form";
+import { ReasonForm } from "../training/shared";
 import { TxForm } from "../finance/money";
 
 export function TeamSection({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
@@ -66,6 +69,9 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
           </p>
         </section>
       )}
+
+      {(caps.includes("profiles") || caps.includes("money")) && <ProfileRequests onDone={reload} />}
+      {caps.includes("remind_profiles") && <Reminder />}
 
       {canDecide && candidates > 0 && (
         <p className="px-1 text-sm text-muted-foreground">
@@ -217,6 +223,12 @@ function Group({
                     {u.role !== "employee" ? ROLE_TITLES[u.role] : u.username ? `@${u.username}` : `ID ${u.telegram_id}`}
                     {u.network && <span> · {u.network}</span>}
                   </span>
+                  {u.profile_state && u.status === "approved" && (u.profile_state.profile.status !== "complete" || u.profile_state.payment.status !== "complete") && (
+                    <span className="mt-1 flex flex-wrap gap-1">
+                      {u.profile_state.profile.status !== "complete" && <StatusPill status={u.profile_state.profile.status} prefix="Профиль: " />}
+                      {u.profile_state.payment.status !== "complete" && <StatusPill status={u.profile_state.payment.status} prefix="Реквизиты: " />}
+                    </span>
+                  )}
                 </span>
                 {u.account_state === "paused" ? (
                   <span className="flex items-center gap-1 rounded-full bg-wait-soft px-2 py-0.5 text-xs font-semibold text-wait">
@@ -364,6 +376,7 @@ function MemberSheet({
                 )}
               </dl>
 
+              {approved && <PersonData key={`d-${user.id}`} userId={user.id} />}
               {approved && <Requisites userId={user.id} />}
 
               {!isSelf && user.username && (
@@ -592,6 +605,161 @@ function NormPicker({ user, onUpdated }: { user: User; onUpdated: (u: User) => v
 }
 
 /** Owner only (customer round B): a personal rate over the network's/common one and «не применять налог на лень». */
+const PERSON_LABEL: Record<string, string> = { last_name: "Фамилия", first_name: "Имя", middle_name: "Отчество", age: "Возраст",
+  metro: "Метро", min_days: "Мин. дней", work_days: "Удобные дни", phone: "Телефон", bank: "Банк", bank_name: "Название банка",
+  recipient: "Получатель" };
+const WD = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
+const shown = (k: string, v: unknown) => v == null || v === "" ? "—" : k === "work_days" && Array.isArray(v) ? v.map((i) => WD[i as number]).join(", ") : String(v);
+
+/** ТЗ 28.10 §7: «Изменения профилей» — what the employee proposes against what is current; approve or reject with a reason. */
+function ProfileRequests({ onDone }: { onDone: () => void }) {
+  const { data, setData } = useLoad(() => api.admin.profileRequests(), []);
+  const [rejecting, setRejecting] = useState<number | null>(null);
+  const { busy, run } = useAction();
+  if (!data || data.items.length === 0) return null;
+  const decide = async (id: number, approve: boolean, reason: string | null) => {
+    try {
+      const res = await run(`d${id}`, (k) => api.admin.decideProfile(id, approve, reason, k), approve ? "Одобрено" : "Отклонено");
+      if (res) {
+        setData(res);
+        setRejecting(null);
+        onDone();
+      }
+    } catch {
+      /* toast shown */
+    }
+  };
+  return (
+    <section className="space-y-3 rounded-3xl bg-wait-soft p-4 md:p-5">
+      <h2 className="font-semibold text-wait">Изменения профилей: {data.items.length}</h2>
+      <ul className="space-y-2">
+        {data.items.map((r) => (
+          <li key={r.id} className="space-y-2 rounded-2xl bg-card p-3">
+            <p className="font-semibold">
+              <button className="underline-offset-2 hover:underline" onClick={() => openProfile(r.username, r.telegram_id, r.name)}>{r.name}</button>
+              <span className="font-normal text-muted-foreground"> · {r.kind === "profile" ? "профиль" : "реквизиты"} · {r.created_at.slice(8, 10)}.{r.created_at.slice(5, 7)}</span>
+            </p>
+            <dl className="grid gap-1 text-sm">
+              {Object.entries(r.data).map(([k, v]) => {
+                const old = r.old?.[k];
+                const changed = JSON.stringify(old) !== JSON.stringify(v);
+                return (
+                  <div key={k} className="flex gap-2">
+                    <dt className="w-28 shrink-0 text-muted-foreground">{PERSON_LABEL[k] ?? k}</dt>
+                    <dd className={cn("min-w-0 break-words", changed && "font-semibold")}>
+                      {changed && r.old ? <><span className="text-muted-foreground line-through">{shown(k, old)}</span> → </> : null}{shown(k, v)}
+                    </dd>
+                  </div>
+                );
+              })}
+            </dl>
+            <div className="flex gap-2">
+              <Button size="sm" className="h-9 rounded-xl" disabled={!!busy} onClick={() => decide(r.id, true, null)}>Одобрить</Button>
+              <Button size="sm" variant="secondary" className="h-9 rounded-xl" onClick={() => setRejecting(rejecting === r.id ? null : r.id)}>Отклонить</Button>
+            </div>
+            {rejecting === r.id && (
+              <ReasonForm kind="reject_request" busy={!!busy} confirm="Отклонить — сотрудник увидит причину"
+                          onSave={(reason) => decide(r.id, false, reason)} />
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** «📢 Напомнить о заполнении»: shows how many get it and asks before sending (ТЗ 28.10 §7). */
+function Reminder() {
+  const [preview, setPreview] = useState<{ count: number; names: string[]; text: string } | null>(null);
+  const { busy, run } = useAction();
+  return (
+    <>
+      <Button variant="secondary" className="press h-11 w-full rounded-2xl font-semibold" disabled={!!busy}
+              onClick={async () => setPreview(await api.admin.reminderPreview())}>
+        📢 Напомнить о заполнении
+      </Button>
+      <AlertDialog open={!!preview} onOpenChange={(o) => !o && setPreview(null)}>
+        <AlertDialogContent className="rounded-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-display">
+              {preview?.count ? `Отправить ${preview.count} ${preview.count % 10 === 1 && preview.count % 100 !== 11 ? "сотруднику" : "сотрудникам"}?` : "Некому напоминать"}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="break-words">
+              {preview?.count ? `Только тем, у кого профиль или реквизиты не заполнены или отклонены: ${preview.names.join(", ")}${preview.count > preview.names.length ? "…" : ""}.`
+                : "У всех профили и реквизиты заполнены и одобрены."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {!!preview?.count && <p className="max-h-40 overflow-y-auto rounded-xl bg-muted p-3 text-sm whitespace-pre-wrap">{preview.text}</p>}
+          <AlertDialogFooter>
+            <AlertDialogCancel className="rounded-xl">Отмена</AlertDialogCancel>
+            {!!preview?.count && (
+              <AlertDialogAction className="rounded-xl" onClick={async () => {
+                try {
+                  const res = await run("remind", (k) => api.admin.sendReminder(k));
+                  if (res) toast.success(`Отправлено: ${res.sent} из ${res.count}`);
+                } catch {
+                  /* toast shown */
+                }
+              }}>Отправить</AlertDialogAction>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+/** The employee's data in their card: state, the change log; owners and admins may edit at once (§7). */
+function PersonData({ userId }: { userId: number }) {
+  const { data, setData } = useLoad(() => api.admin.userProfile(userId), [userId]);
+  const [editing, setEditing] = useState(false);
+  const [log, setLog] = useState(false);
+  const { busy, run } = useAction();
+  if (!data) return null;
+  const p = data.profile;
+  return (
+    <div className="mt-4 space-y-2 rounded-2xl bg-muted/50 px-4 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[15px] font-semibold">Данные сотрудника</span>
+        <StatusPill status={data.state.status} />
+      </div>
+      <p className="text-sm break-words">
+        {[p.last_name, p.first_name, p.middle_name].filter(Boolean).join(" ")}{p.age ? ` · ${p.age} лет` : ""}{p.metro ? ` · м. ${p.metro}` : ""}
+        {p.min_days ? ` · от ${p.min_days} дн. (${p.work_days.map((i) => WD[i]).join(", ")})` : ""}
+      </p>
+      {data.missing.length > 0 && <p className="text-xs text-muted-foreground">Не заполнено: {data.missing.join(", ").toLowerCase()}</p>}
+      {data.can_edit && !editing && (
+        <button className="text-xs font-semibold text-primary" onClick={() => setEditing(true)}>Изменить сразу</button>
+      )}
+      {editing && (
+        <PersonForm initial={data.draft} busy={!!busy} submitLabel="Сохранить без согласования"
+                    onSubmit={async (d) => {
+                      try {
+                        const res = await run("edit", (k) => api.admin.editUserProfile(userId, d, k), "Данные сохранены");
+                        if (res) { setData(res); setEditing(false); }
+                      } catch {
+                        /* toast shown */
+                      }
+                    }} />
+      )}
+      {(data.history?.length ?? 0) > 0 && (
+        <button className="block text-xs font-semibold text-primary" onClick={() => setLog((x) => !x)}>{log ? "Скрыть журнал" : "Журнал изменений"}</button>
+      )}
+      {log && (
+        <ul className="space-y-1.5 text-xs text-muted-foreground">
+          {data.history!.map((h, i) => (
+            <li key={i}>
+              {h.at.slice(8, 10)}.{h.at.slice(5, 7)} {h.at.slice(11, 16)} · {h.by} · {h.how}
+              {h.new && Object.keys(h.new).filter((k) => JSON.stringify(h.old?.[k as keyof typeof h.old]) !== JSON.stringify(h.new![k as keyof typeof h.new]))
+                .map((k) => <span key={k} className="block">{PERSON_LABEL[k]}: {shown(k, h.old?.[k as keyof typeof h.old])} → {shown(k, h.new![k as keyof typeof h.new])}</span>)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** ТЗ 28.10 §3: «Обучение» — opened automatically for a candidate's trainer; an admin may give or take it,
  * but not while candidates are still assigned (the server says so). */
 function TrainingAccess({ user, onChanged }: { user: User; onChanged: () => void }) {

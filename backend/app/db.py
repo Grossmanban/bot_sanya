@@ -1221,6 +1221,38 @@ ALTER TABLE users ADD COLUMN not_newbie_by INTEGER;
 """)
 
 
+def _profiles(conn: sqlite3.Connection) -> None:
+    """Migration 34 — ТЗ 28.10 §7: the employee's profile (surname, name, patronymic, age, metro, work days) goes
+    through the admin's review; payment details changes too (the old ones are used until approved). The
+    patronymic, which used to be glued to the first name, is split off for people who came with a questionnaire."""
+    for column in ("middle_name TEXT", "age INTEGER", "metro TEXT", "min_days INTEGER", "work_days TEXT",
+                   "profile_approved_at TEXT"):
+        conn.execute(f"ALTER TABLE users ADD COLUMN {column}")
+    conn.execute("ALTER TABLE payment_profiles ADD COLUMN bank_name TEXT")
+    conn.execute("""CREATE TABLE profile_requests (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id),
+        kind        TEXT NOT NULL CHECK (kind IN ('profile','payment')),
+        data        TEXT NOT NULL,
+        old         TEXT,
+        status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','stale')),
+        created_at  TEXT NOT NULL,
+        decided_by  INTEGER,
+        decided_at  TEXT,
+        reason      TEXT)""")
+    conn.execute("CREATE UNIQUE INDEX ux_profile_requests_pending ON profile_requests (user_id, kind) WHERE status = 'pending'")
+    rows = conn.execute("""SELECT u.id, u.first_name, u.last_name, a.full_name FROM users u JOIN applications a ON a.id = (
+                               SELECT MAX(b.id) FROM applications b WHERE b.user_id = u.id)""").fetchall()
+    for user_id, first, last, full in rows:
+        parts = (full or "").split()
+        if len(parts) >= 3 and last == parts[0] and first == " ".join(parts[1:]):
+            conn.execute("UPDATE users SET first_name = ?, middle_name = ? WHERE id = ?",
+                         (parts[1], " ".join(parts[2:]), user_id))
+
+
+MIGRATIONS.append(_profiles)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

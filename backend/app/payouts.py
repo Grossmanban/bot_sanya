@@ -66,9 +66,12 @@ def get_profile(conn: sqlite3.Connection, user_id: int) -> dict | None:
 def public_profile(profile: dict | None, full: bool) -> dict | None:
     if profile is None:
         return None
+    bank = profile["bank"]
+    if bank == "Другой банк" and profile.get("bank_name"):
+        bank = profile["bank_name"]  # В22: the name the person wrote
     return {"phone": pretty_phone(profile["phone"]) if full else mask_phone(profile["phone"]),
-            "bank": profile["bank"], "recipient": profile["recipient"] if full else None,
-            "updated_at": profile["updated_at"]}
+            "bank": bank, "bank_option": profile["bank"], "bank_name": profile.get("bank_name"),
+            "recipient": profile["recipient"] if full else None, "updated_at": profile["updated_at"]}
 
 
 def can_see(viewer: dict, user: dict) -> bool:
@@ -77,7 +80,8 @@ def can_see(viewer: dict, user: dict) -> bool:
 
 
 def save_profile(conn: sqlite3.Connection, actor: dict, user_id: int, phone: str, bank: str, recipient: str,
-                 key: str) -> dict:
+                 key: str, bank_name: str | None = None) -> dict:
+    """Saves the details now: an owner's edit, or an approved request (ТЗ 28.10 §7). Employees send requests."""
     phone = normalize_phone(phone)
     if bank not in BANKS:
         raise ServiceError("Выберите банк из списка", 422, "bad_bank")
@@ -89,21 +93,23 @@ def save_profile(conn: sqlite3.Connection, actor: dict, user_id: int, phone: str
         if _seen(conn, key):
             return get_profile(conn, user_id)
         actor = _fresh_actor(conn, actor)
-        if actor["id"] != user_id and not perms.can(actor, "money"):
-            raise ServiceError("Реквизиты меняет сам сотрудник или владелец", 403, "forbidden")
+        if not perms.can(actor, "money"):
+            raise ServiceError("Реквизиты сразу сохраняет только владелец — сотрудник отправляет их на одобрение", 403, "forbidden")
+        bank_name = (" ".join((bank_name or "").split())[:60] or None) if bank == "Другой банк" else None
         old = get_profile(conn, user_id)
-        new = {"phone": phone, "bank": bank, "recipient": recipient}
-        if old and all(old[k] == v for k, v in new.items()):
+        new = {"phone": phone, "bank": bank, "recipient": recipient, "bank_name": bank_name}
+        if old and all(old.get(k) == v for k, v in new.items()):
             return old
         conn.execute(
-            """INSERT INTO payment_profiles (user_id, phone, bank, recipient, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET phone = excluded.phone, bank = excluded.bank,
+            """INSERT INTO payment_profiles (user_id, phone, bank, recipient, updated_at, updated_by, bank_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET phone = excluded.phone, bank = excluded.bank, bank_name = excluded.bank_name,
                     recipient = excluded.recipient, updated_at = excluded.updated_at, updated_by = excluded.updated_by""",
-            (user_id, phone, bank, recipient, now_iso(), actor["telegram_id"]),
+            (user_id, phone, bank, recipient, now_iso(), actor["telegram_id"], bank_name),
         )
         # audit of requisites changes (ТЗ 10.2)
         conn.execute("INSERT INTO payment_profile_log (user_id, old_value, new_value, actor, created_at) VALUES (?, ?, ?, ?, ?)",
-                     (user_id, json.dumps({k: old[k] for k in new}, ensure_ascii=False) if old else None,
+                     (user_id, json.dumps({k: old.get(k) for k in new}, ensure_ascii=False) if old else None,
                       json.dumps(new, ensure_ascii=False), actor["telegram_id"], now_iso()))
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="PAYMENT_PROFILE_SAVED", key=key,
                   new={"bank": bank, "phone": mask_phone(phone)})
@@ -322,6 +328,11 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
         rows = [r for r in calculate(conn, date_from, date_to, rates, network_id) if r["user_id"] in picked]
         if not rows:
             raise ServiceError("Нечего выплачивать за этот период", 409, "nothing")
+        no_details = [r["name"] for r in rows if r["phone"] is None
+                      and (picked[r["user_id"]].get("base_override") or r["total"]) > 0]
+        if no_details:  # ТЗ 28.10 §7 (В21): money goes only to approved payment details
+            raise ServiceError("Нет одобренных реквизитов: " + ", ".join(no_details) +
+                               ". Одобрите их или уберите людей из выплаты", 409, "no_requisites")
         cur = conn.execute(
             """INSERT INTO payout_batches (title, period_from, period_to, network_id, rates, proof_media, deduction_media,
                                            total, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",

@@ -73,6 +73,8 @@ CAN = {
     "settings": {OWNER, ADMIN},
     "points": {OWNER, ADMIN},
     "registrations": {OWNER, ADMIN},
+    "profiles": {OWNER, ADMIN},     # ТЗ 28.10 §7: approve, reject and edit employees' profiles (payment details — money)
+    "remind_profiles": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # «📢 Напомнить о заполнении»: a trainer — their people
     "export": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "raspred": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # the list for the work chat; a trainer gets their network's
     "all_people": {OWNER, ADMIN},   # works with the whole team, not one network (company-wide goals, events)

@@ -345,7 +345,11 @@ def test_payment_profile_and_payout_endpoints(client, conn):
     assert client.get("/api/me/payment-profile", headers=h).json()["profile"] is None
     body = {"phone": "+7 900 123 45 67", "bank": "ВТБ", "recipient": "Иван Петров", "idempotency_key": key()}
     r = client.put("/api/me/payment-profile", json=body, headers=h)
-    assert r.json()["profile"]["phone"] == "+7 900 123-45-67"
+    assert r.json()["profile"] is None and r.json()["pending"]["data"]["phone"] == "+7 900 123-45-67"  # waits for the owner
+    req = client.get("/api/admin/profile-requests", headers=owner).json()["items"][0]
+    assert client.get("/api/admin/profile-requests", headers=ah).json()["items"] == []  # payment details — owners only
+    client.post(f"/api/admin/profile-requests/{req['id']}/decide", json={"approve": True, "idempotency_key": key()}, headers=owner)
+    assert client.get("/api/me/payment-profile", headers=h).json()["profile"]["phone"] == "+7 900 123-45-67"
     masked = client.get(f"/api/admin/users/{u['id']}/payment-profile", headers=ah).json()
     assert masked["full"] is False and masked["profile"]["phone"] == "+7 *** ***-45-67" and masked["history"] == []
     full = client.get(f"/api/admin/users/{u['id']}/payment-profile", headers=owner).json()

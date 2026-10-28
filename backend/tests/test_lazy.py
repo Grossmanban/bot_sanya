@@ -5,12 +5,14 @@ from datetime import date, timedelta
 from app import payouts
 from app import services as svc
 
+from .conftest import requisites
 from .test_api import client, headers  # noqa: F401 — the fixture
 from .test_rates import WEEK, did
 from .test_violations import person
 
 
 def commit(conn, owner, users, d_from, d_to, k=None, **common):
+    requisites(conn, *users)
     return payouts.commit(conn, owner, "Зарплата", d_from, d_to, payouts.Rates.from_dict(common or None), None,
                           [{"user_id": u["id"]} for u in users], [], [], k or svc.new_key())
 

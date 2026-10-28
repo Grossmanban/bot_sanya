@@ -27,6 +27,8 @@ export interface User {
   is_owner?: boolean;
   /** pending with an open questionnaire: decided in «Онбординг» (team listing) */
   candidate?: boolean;
+  /** ТЗ 28.10 §7 (team listing): the profile's and the payment details' review state */
+  profile_state?: { profile: { status: ProfileStatus; reason: string | null }; payment: { status: ProfileStatus; reason: string | null } };
   /** ТЗ 28.10 §3 (team listing): «Обучение» granted by an admin, and how many candidates are assigned */
   training?: { granted: boolean; assigned: number };
   created_at?: string;
@@ -60,7 +62,7 @@ export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
   | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups"
-  | "products" | "alice";
+  | "products" | "alice" | "profiles" | "remind_profiles";
 
 /** ТЗ 27.10 §28: «Работа» — products a person has access to */
 export type Product = "alice";
@@ -668,6 +670,8 @@ export type ReportCounts = {
   internship_review?: number;
   training_requests?: number;
   urgent?: number;
+  profile_changes?: number;
+  payment_changes?: number;
   unmarked?: number;
   events_pending?: number;
   alice_moderation?: number;
@@ -965,8 +969,59 @@ export interface ScheduleSettings {
 export interface PaymentProfile {
   phone: string;
   bank: string;
+  /** «Другой банк» + the name the person wrote (ТЗ 28.10 В22) */
+  bank_option?: string;
+  bank_name?: string | null;
   recipient: string | null;
   updated_at: string;
+}
+
+/** ТЗ 28.10 §7: the employee's data that goes through the admin's review */
+export interface PersonData {
+  last_name: string | null;
+  first_name: string | null;
+  middle_name: string | null;
+  age: number | null;
+  metro: string | null;
+  min_days: number | null;
+  work_days: number[];
+}
+
+export type ProfileStatus = "complete" | "incomplete" | "pending" | "rejected";
+
+export interface ProfileRequest {
+  id: number;
+  kind: "profile" | "payment";
+  user_id: number;
+  name: string;
+  username: string | null;
+  telegram_id: number;
+  data: Record<string, unknown>;
+  old: Record<string, unknown> | null;
+  status: "pending" | "approved" | "rejected" | "stale";
+  created_at: string;
+  decided_at: string | null;
+  reason: string | null;
+}
+
+export interface ProfileView {
+  profile: PersonData;
+  draft: PersonData;
+  missing: string[];
+  state: { status: ProfileStatus; reason: string | null };
+  pending: ProfileRequest | null;
+  rejected: ProfileRequest | null;
+  weekdays: string[];
+  titles: Record<string, string>;
+  history?: { at: string; by: string; how: string | null; old: PersonData | null; new: PersonData | null }[];
+  can_edit?: boolean;
+}
+
+export interface PaymentView {
+  profile: PaymentProfile | null;
+  banks: string[];
+  pending: ProfileRequest | null;
+  rejected: ProfileRequest | null;
 }
 
 export interface PayoutRates {
@@ -1186,9 +1241,11 @@ export const api = {
     request<{
       items: { id: number; kind: string; shift_date: string; penalty_amount: number | null; reason: string }[];
     }>("/api/me/penalties"),
-  paymentProfile: () => request<{ profile: PaymentProfile | null; banks: string[] }>("/api/me/payment-profile"),
-  savePaymentProfile: (body: { phone: string; bank: string; recipient: string }, key: string) =>
-    request<{ profile: PaymentProfile; banks: string[] }>("/api/me/payment-profile", {
+  paymentProfile: () => request<PaymentView>("/api/me/payment-profile"),
+  myProfile: () => request<ProfileView>("/api/me/profile"),
+  submitProfile: (body: PersonData, key: string) => post<ProfileView>("/api/me/profile", { ...body, idempotency_key: key }),
+  savePaymentProfile: (body: { phone: string; bank: string; recipient: string; bank_name?: string | null }, key: string) =>
+    request<PaymentView>("/api/me/payment-profile", {
       method: "PUT",
       body: JSON.stringify({ ...body, idempotency_key: key }),
     }),
@@ -1445,6 +1502,14 @@ export const api = {
       patch<{ network: Network }>(`/api/admin/networks/${id}`, { ...body, idempotency_key: key }),
     setMemberNetwork: (userId: number, networkId: number | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/network`, { network_id: networkId, idempotency_key: key }),
+    profileRequests: () => request<{ items: ProfileRequest[] }>("/api/admin/profile-requests"),
+    decideProfile: (id: number, approve: boolean, reason: string | null, key: string) =>
+      post<{ items: ProfileRequest[] }>(`/api/admin/profile-requests/${id}/decide`, { approve, reason, idempotency_key: key }),
+    userProfile: (userId: number) => request<ProfileView>(`/api/admin/users/${userId}/profile`),
+    editUserProfile: (userId: number, body: PersonData, key: string) =>
+      request<ProfileView>(`/api/admin/users/${userId}/profile`, { method: "PUT", body: JSON.stringify({ ...body, idempotency_key: key }) }),
+    reminderPreview: () => request<{ count: number; names: string[]; text: string }>("/api/admin/profile-reminder"),
+    sendReminder: (key: string) => post<{ sent: number; count: number }>("/api/admin/profile-reminder", { idempotency_key: key }),
     userPaymentProfile: (userId: number) =>
       request<{ profile: PaymentProfile | null; full: boolean; banks: string[] }>(`/api/admin/users/${userId}/payment-profile`),
     uploadMedia: (file: Blob) => upload<{ file_id: string }>("/api/admin/media", file),

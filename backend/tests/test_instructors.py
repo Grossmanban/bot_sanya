@@ -6,6 +6,7 @@ from app import networks, payouts, rates, reports
 from app import permissions as perms
 from app import services as svc
 
+from .conftest import requisites
 from .test_rates import WEEK, calc, did, team  # noqa: F401 — the fixture
 
 
@@ -88,6 +89,7 @@ def test_instructor_ladder_by_week_and_the_payout(conn, team, make_user):  # noq
     did(conn, team["petya"], WEEK[3], 60)  # the week reaches 110 → every piece of the week at 15
     by, _ = calc(conn)
     assert by["Ольга"]["commission"] == 110 * 15 and by["Ольга"]["team_volume"] == 110
+    requisites(conn, olga)
     batch = payouts.commit(conn, owner, "Неделя", WEEK[0], WEEK[-1], payouts.Rates.from_dict(None), None,
                            [{"user_id": olga["id"]}], [], [], svc.new_key())
     assert batch["items"][0]["commission"] == 1650 and batch["items"][0]["role"] == "instructor"

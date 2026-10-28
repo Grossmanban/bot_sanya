@@ -979,6 +979,36 @@ class Notifier:
             training.mark(self.conn, app["id"], "team_invited_at")
         return result
 
+    # ------------------------------------------------------------ profiles and payment details (ТЗ 28.10 §7)
+
+    async def profile_requested(self, req: dict) -> None:
+        what = "профиля" if req["kind"] == "profile" else "реквизитов для выплат"
+        user = svc.get_user(self.conn, req["user_id"])
+        text = (f"📝 <b>Заявка на изменение {what}</b>\n{who(user)}\n"
+                "Проверьте и одобрите или отклоните с причиной — «Команда» → «Изменения профилей».")
+        chats = svc.owner_telegram_ids() if req["kind"] == "payment" else svc.admin_telegram_ids(self.conn)
+        for chat in chats:  # payment details — owners only (В20)
+            await self.send(chat, text, _open_app())
+
+    async def profile_decided(self, req: dict) -> None:
+        what = "Профиль" if req["kind"] == "profile" else "Реквизиты для выплат"
+        if req["status"] == "approved":
+            text = f"✅ {what}: изменения одобрены."
+        else:
+            text = (f"❌ {what}: изменения отклонены.\nПричина: {escape(req['reason'] or '')}\n"
+                    "Исправьте данные в разделе «Профиль» и отправьте повторно.")
+        await self.send(req["telegram_id"], text, _open_app())
+
+    async def profile_reminder(self, people: list[dict]) -> int:
+        from . import templates
+
+        text = templates.render(self.conn, "profile_reminder")
+        sent = 0
+        for u in people:
+            sent += await self.send(u["telegram_id"], text, _open_app())
+            await asyncio.sleep(0.05)
+        return sent
+
     async def finish_requested(self, app: dict) -> None:
         await self.to_admins(f"🎯 <b>{escape(app['full_name'])}</b>: тренер отметил, что стажировка завершена. "
                              "Ожидает проверки администратора — «Онбординг» → «Принять в команду».", _open_admin())

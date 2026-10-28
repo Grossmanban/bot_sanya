@@ -11,14 +11,15 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import alice, notify, pending, products, reports, templates, training, violations
+from . import alice, notify, pending, products, profiles, reports, templates, training, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
 from .notify import Notifier
 from .bot import open_app_keyboard
 from .notify import broadcast_keyboard as notify_keyboard
-from .timeutil import now_local, today_local
+from .timeutil import now_iso, now_local, today_local
+from .db import transaction
 
 
 class ShiftPayload(BaseModel):
@@ -124,6 +125,24 @@ class ProfileBody(BaseModel):
     phone: str
     bank: str
     recipient: str
+    bank_name: str | None = None
+    idempotency_key: str
+
+
+class PersonBody(BaseModel):
+    last_name: str | None = None
+    first_name: str | None = None
+    middle_name: str | None = None
+    age: int | None = None
+    metro: str | None = None
+    min_days: int | None = None
+    work_days: list[int] = []
+    idempotency_key: str
+
+
+class ProfileDecision(BaseModel):
+    approve: bool
+    reason: str | None = None
     idempotency_key: str
 
 
@@ -1073,12 +1092,30 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/me/payment-profile")
     async def my_payment_profile(user: dict = Depends(current_user)):
-        return {"profile": payouts.public_profile(payouts.get_profile(conn, user["id"]), True), "banks": payouts.BANKS}
+        return profiles.payment_view(conn, user)
 
     @api.put("/me/payment-profile")
     async def save_payment_profile(body: ProfileBody, user: dict = Depends(current_user)):
-        profile = payouts.save_profile(conn, user, user["id"], body.phone, body.bank, body.recipient, body.idempotency_key)
-        return {"profile": payouts.public_profile(profile, True), "banks": payouts.BANKS}
+        """ТЗ 28.10 §7: a change is a request; the old details are used until the owner approves (an owner saves at once)."""
+        if perms.can(user, "money"):
+            payouts.save_profile(conn, user, user["id"], body.phone, body.bank, body.recipient, body.idempotency_key,
+                                 body.bank_name)
+        else:
+            req, created = profiles.submit_payment(conn, user, body.model_dump(exclude={"idempotency_key"}), body.idempotency_key)
+            if created:
+                notifier.spawn(notifier.profile_requested(profiles.public_request(conn, req, full=False)))
+        return profiles.payment_view(conn, user)
+
+    @api.get("/me/profile")
+    async def my_profile(user: dict = Depends(current_user)):
+        return profiles.view(conn, user)
+
+    @api.post("/me/profile")
+    async def submit_my_profile(body: PersonBody, user: dict = Depends(current_user)):
+        req, created = profiles.submit(conn, user, body.model_dump(exclude={"idempotency_key"}), body.idempotency_key)
+        if created:
+            notifier.spawn(notifier.profile_requested(profiles.public_request(conn, req)))
+        return profiles.view(conn, svc.get_user(conn, user["id"]))
 
     @api.get("/events")
     async def my_events(user: dict = Depends(current_user)):
@@ -1231,6 +1268,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         nets = networks.names(conn)
         money = perms.can(admin, "money")
         items = [{**public_user(u), "network": nets.get(u["network_id"]), **(money_fields(u) if money else {}),
+                  "profile_state": profiles.state(conn, u),
                   "candidate": u["status"] == "pending" and svc.is_candidate(conn, u["id"]),
                   "training": {"granted": training.granted(conn, u["id"]), "assigned": training.assigned(conn, u["id"])}}
                  for u in visible(admin, people)]
@@ -1929,6 +1967,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         target = svc.get_user(conn, user_id)
         if target is None:
             raise svc.ServiceError("Пользователь не найден", 404, "not_found")
+        if not (perms.sees_everyone(admin) or perms.manages(admin, target)):  # a trainer — only their people
+            raise svc.ServiceError("Недостаточно прав", 403, "forbidden")
         full = payouts.can_see(admin, target)
         history = payouts.profile_history(conn, user_id)[:10] if full else []
         return {"profile": payouts.public_profile(payouts.get_profile(conn, user_id), full), "full": full,
@@ -1936,8 +1976,63 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.put("/admin/users/{user_id}/payment-profile")
     async def admin_save_payment_profile(user_id: int, body: ProfileBody, owner: dict = Depends(staff("money"))):
-        profile = payouts.save_profile(conn, owner, user_id, body.phone, body.bank, body.recipient, body.idempotency_key)
+        profile = payouts.save_profile(conn, owner, user_id, body.phone, body.bank, body.recipient, body.idempotency_key,
+                                       body.bank_name)
+        with transaction(conn):  # an owner's edit settles the employee's waiting request
+            conn.execute("""UPDATE profile_requests SET status = 'stale', decided_at = ? WHERE user_id = ? AND kind = 'payment'
+                            AND status = 'pending'""", (now_iso(), user_id))
         return {"profile": payouts.public_profile(profile, True)}
+
+    # ------------------------------------------------------------ profiles (ТЗ 28.10 §7)
+
+    @api.get("/admin/profile-requests")
+    async def admin_profile_requests(admin: dict = Depends(admin_user)):
+        if not (perms.can(admin, "profiles") or perms.can(admin, "money")):
+            raise svc.ServiceError("Недостаточно прав", 403, "forbidden")
+        return {"items": profiles.pending_list(conn, admin)}
+
+    @api.post("/admin/profile-requests/{request_id}/decide")
+    async def admin_profile_decide(request_id: int, body: ProfileDecision, admin: dict = Depends(admin_user)):
+        r, changed = profiles.decide(conn, admin, request_id, body.approve, body.reason, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.profile_decided(profiles.public_request(conn, r, full=False)))
+        return {"items": profiles.pending_list(conn, admin)}
+
+    @api.get("/admin/users/{user_id}/profile")
+    async def admin_user_profile(user_id: int, admin: dict = Depends(admin_user)):
+        target = require(admin, "pause", user_id) if not perms.sees_everyone(admin) else svc.get_user(conn, user_id)
+        if target is None:
+            raise svc.ServiceError("Пользователь не найден", 404, "not_found")
+        return {**profiles.view(conn, target), "history": profiles.history(conn, user_id) if perms.can(admin, "profiles") else [],
+                "can_edit": perms.can(admin, "profiles")}
+
+    @api.put("/admin/users/{user_id}/profile")
+    async def admin_edit_profile(user_id: int, body: PersonBody, admin: dict = Depends(staff("profiles"))):
+        user = profiles.admin_edit(conn, admin, user_id, body.model_dump(exclude={"idempotency_key"}), body.idempotency_key)
+        return {**profiles.view(conn, user), "history": profiles.history(conn, user_id), "can_edit": True}
+
+    def remind_targets(admin: dict) -> list[dict]:
+        return [u for u in visible(admin, svc.list_users(conn))
+                if u["status"] == "approved" and u["account_state"] != "blocked" and u["id"] != admin["id"]
+                and profiles.needs_reminder(conn, u)]
+
+    @api.get("/admin/profile-reminder")
+    async def admin_profile_reminder_preview(admin: dict = Depends(staff("remind_profiles"))):
+        """«📢 Напомнить о заполнении»: how many get it (incomplete or rejected profile or payment details), and the text."""
+        people = remind_targets(admin)
+        return {"count": len(people), "names": [svc.full_name(u) for u in people][:50],
+                "text": templates.render(conn, "profile_reminder")}
+
+    @api.post("/admin/profile-reminder")
+    async def admin_profile_reminder(body: KeyOnly, admin: dict = Depends(staff("remind_profiles"))):
+        people = remind_targets(admin)
+        if svc._seen(conn, body.idempotency_key):
+            return {"sent": 0, "count": len(people)}
+        with transaction(conn):
+            svc.log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="PROFILE_REMINDER_SENT",
+                          key=body.idempotency_key, new={"count": len(people)})
+        sent = await notifier.profile_reminder(people)
+        return {"sent": sent, "count": len(people)}
 
     @api.post("/admin/media/video")
     async def admin_upload_video(request: Request, admin: dict = Depends(admin_user)):

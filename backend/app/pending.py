@@ -16,7 +16,8 @@ from . import services as svc
 from .timeutil import today_local
 
 KEYS = ("review", "no_show", "actual_missing", "actual_overdue", "fines_pending", "fines_draft", "violations",
-        "registrations", "onboarding_new", "internship_review", "training_requests", "urgent", "unmarked", "events_pending",
+        "registrations", "onboarding_new", "internship_review", "training_requests", "profile_changes", "payment_changes",
+        "urgent", "unmarked", "events_pending",
         "alice_moderation", "alice_failed")
 ALICE_GIVE_UP = 20  # alice.deliver stops retrying after this many attempts
 
@@ -80,6 +81,12 @@ def counts(conn: sqlite3.Connection, viewer: dict, today: date | None = None) ->
             if (recruiting.progress(conn, dict(a)) or {}).get("review") or (a["status"] == "internship" and a["finish_requested_at"]))
         # §3–§4: the trainers' and candidates' requests waiting for an admin — «Ожидает согласования»
         out["training_requests"] = conn.execute("SELECT COUNT(*) FROM training_requests WHERE status = 'pending'").fetchone()[0]
+    if perms.can(viewer, "profiles"):  # §7: profile changes — owners and admins; payment details — owners (В20)
+        out["profile_changes"] = conn.execute(
+            "SELECT COUNT(*) FROM profile_requests WHERE kind = 'profile' AND status = 'pending'").fetchone()[0]
+    if perms.can(viewer, "money"):
+        out["payment_changes"] = conn.execute(
+            "SELECT COUNT(*) FROM profile_requests WHERE kind = 'payment' AND status = 'pending'").fetchone()[0]
     if perms.can(viewer, "schedule"):
         out["urgent"] = sum(1 for r in conn.execute(
             "SELECT user_id FROM shifts WHERE status = 'awaiting_approval' AND shift_date = ?", (today.isoformat(),))
@@ -116,7 +123,8 @@ LABELS = {
     "urgent": "⚡ Срочные заявки на сегодня", "unmarked": "🗓 Не отметили завтрашний день",
     "events_pending": "🏁 Заявки в событиях", "fines_pending": "🧾 Штрафы тренеров на согласовании",
     "fines_draft": "💸 Штрафы без суммы", "registrations": "👤 Заявки на доступ", "onboarding_new": "🧑‍🎓 Новые анкеты",
-    "internship_review": "🎯 Стажировки на проверку", "training_requests": "⏳ Обучение: ожидает согласования", "actual_missing": "📊 Дни без общего факта",
+    "internship_review": "🎯 Стажировки на проверку", "training_requests": "⏳ Обучение: ожидает согласования",
+    "profile_changes": "🪪 Изменения профилей", "payment_changes": "💳 Изменения реквизитов", "actual_missing": "📊 Дни без общего факта",
     "actual_overdue": "📊 Просрочено без общего факта", "alice_moderation": "📸 «Алиса»: на модерации",
     "alice_failed": "📸 «Алиса»: не отправлено",
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Archive, Bell, Gift, ChevronLeft, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
+import { Archive, Bell, Gift, ChevronLeft, IdCard, Palette, ChevronRight, CreditCard, History, LoaderCircle, ShieldCheck, Wallet } from "lucide-react";
+import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,8 +18,9 @@ import { ThemeChoice } from "../theme-toggle";
 import { QuickAccess } from "./quick-access";
 import { ArchiveList } from "../archive";
 import { Referrals } from "./referrals";
+import { PersonForm, STATUS_TEXT, StatusPill } from "./person-form";
 
-type View = "main" | "history" | "penalties" | "requisites" | "archive" | "referrals";
+type View = "main" | "history" | "penalties" | "requisites" | "archive" | "referrals" | "person";
 
 export function ProfileScreen({
   user,
@@ -35,12 +37,14 @@ export function ProfileScreen({
   const { busy, run } = useAction();
   const money = useLoad(() => api.myFinances(), []);
   const profile = useLoad(() => api.paymentProfile(), []);
+  const person = useLoad(() => api.myProfile(), [view]);
 
   useEffect(() => bindBackButton(view !== "main", () => setView("main")), [view]);
 
   if (view === "history") return <HistoryView onBack={() => setView("main")} />;
   if (view === "penalties") return <PenaltiesView onBack={() => setView("main")} />;
   if (view === "requisites") return <RequisitesView onBack={() => setView("main")} />;
+  if (view === "person") return <PersonView onBack={() => setView("main")} />;
   if (view === "referrals") {
     return (
       <div className="mx-auto max-w-2xl">
@@ -156,6 +160,8 @@ export function ProfileScreen({
         </section>
 
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
+          <MenuRow icon={IdCard} label="Мои данные" value={person.data ? STATUS_TEXT[person.data.state.status].label : undefined}
+                   onClick={() => setView("person")} />
           <MenuRow icon={History} label="История выходов" onClick={() => setView("history")} />
           <MenuRow
             icon={Wallet}
@@ -165,7 +171,8 @@ export function ProfileScreen({
           />
           <MenuRow icon={Archive} label="Архив целей и событий" onClick={() => setView("archive")} />
           <MenuRow icon={Gift} label="Мои рефералы" onClick={() => setView("referrals")} />
-          <MenuRow icon={CreditCard} label="Реквизиты для выплат" value={profile.data ? (profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
+          <MenuRow icon={CreditCard} label="Реквизиты для выплат"
+                   value={profile.data ? (profile.data.pending ? "на рассмотрении" : profile.data.rejected ? "отклонены" : profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
                    onClick={() => setView("requisites")} />
         </section>
 
@@ -316,19 +323,58 @@ function formatPhone(raw: string) {
   return out;
 }
 
-/** SBP requisites (ТЗ модуль 9): phone, bank, recipient; visible only to the person and the owners. */
+/** ТЗ 28.10 §7: the person's data — sent for the admin's review; while it's under review nothing new can be sent. */
+function PersonView({ onBack }: { onBack: () => void }) {
+  const { data, setData } = useLoad(() => api.myProfile(), []);
+  const { busy, run } = useAction();
+  return (
+    <div className="mx-auto max-w-2xl space-y-4">
+      <SubHeader title="Мои данные" onBack={onBack} />
+      {!data ? <Skeleton className="h-72 rounded-3xl" /> : (
+        <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+          <StatusPill status={data.state.status} />
+          {data.state.status === "rejected" && (
+            <p className="rounded-2xl bg-cancel-soft px-4 py-3 text-sm">
+              Администратор отклонил изменения: <b>{data.state.reason}</b>. Исправьте и отправьте снова.
+            </p>
+          )}
+          {data.pending ? (
+            <p className="rounded-2xl bg-wait-soft px-4 py-3 text-sm">
+              Изменения на рассмотрении у администратора. Пока решение не принято, новые изменения отправить нельзя.
+            </p>
+          ) : (
+            <PersonForm initial={data.draft} busy={!!busy} submitLabel="Отправить на рассмотрение"
+                        onSubmit={async (d) => {
+                          try {
+                            const res = await run("send", (k) => api.submitProfile(d, k), "Отправлено — администратор рассмотрит");
+                            if (res) setData(res);
+                          } catch {
+                            /* toast shown */
+                          }
+                        }} />
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** SBP requisites (ТЗ модуль 9, ТЗ 28.10 §7): a change goes to the owner; the old details stay in use until approved. */
 function RequisitesView({ onBack }: { onBack: () => void }) {
-  const { data } = useLoad(() => api.paymentProfile(), []);
+  const { data, setData } = useLoad(() => api.paymentProfile(), []);
   const [phone, setPhone] = useState<string | null>(null);
   const [bank, setBank] = useState<string | null>(null);
+  const [bankName, setBankName] = useState<string | null>(null);
   const [recipient, setRecipient] = useState<string | null>(null);
   const { busy, run } = useAction();
   const p = data?.profile;
   const vPhone = phone ?? p?.phone ?? "+7";
-  const vBank = bank ?? p?.bank ?? "";
+  const vBank = bank ?? p?.bank_option ?? p?.bank ?? "";
+  const vBankName = bankName ?? p?.bank_name ?? "";
   const vRecipient = recipient ?? p?.recipient ?? "";
   const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
-  const ready = vPhone.replace(/\D/g, "").length === 11 && vBank && vRecipient.trim().split(/\s+/).length >= 2;
+  const other = vBank === "Другой банк";
+  const ready = vPhone.replace(/\D/g, "").length === 11 && vBank && vRecipient.trim().split(/\s+/).length >= 2 && (!other || vBankName.trim());
 
   return (
     <div className="mx-auto max-w-2xl space-y-4">
@@ -336,35 +382,58 @@ function RequisitesView({ onBack }: { onBack: () => void }) {
       {!data ? <Skeleton className="h-72 rounded-3xl" /> : (
         <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
           <p className="text-sm text-muted-foreground">Выплаты приходят по СБП — по номеру телефона в выбранный банк.</p>
-          <label className="block space-y-1.5">
-            <span className="text-sm text-muted-foreground">Телефон, привязанный к СБП</span>
-            <input inputMode="tel" className={cn(field, "tabular")} value={vPhone} onChange={(e) => setPhone(formatPhone(e.target.value))} />
-          </label>
-          <label className="block space-y-1.5">
-            <span className="text-sm text-muted-foreground">Банк</span>
-            <select className={field} value={vBank} onChange={(e) => setBank(e.target.value)}>
-              <option value="" disabled>Выберите банк</option>
-              {data.banks.map((b) => <option key={b} value={b}>{b}</option>)}
-            </select>
-          </label>
-          <label className="block space-y-1.5">
-            <span className="text-sm text-muted-foreground">ФИО получателя — как в банке</span>
-            <input className={field} value={vRecipient} placeholder="Иванов Иван Иванович" onChange={(e) => setRecipient(e.target.value.slice(0, 120))} />
-          </label>
-          <p className="flex items-start gap-2 text-xs text-muted-foreground">
-            <ShieldCheck className="mt-0.5 size-4 shrink-0" /> Реквизиты видите только вы и владелец. Каждое изменение сохраняется в журнале.
-          </p>
-          <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy || !ready}
-                  onClick={async () => {
-                    try {
-                      const res = await run("save", (k) => api.savePaymentProfile({ phone: vPhone, bank: vBank, recipient: vRecipient.trim() }, k), "Реквизиты сохранены");
-                      if (res) { setPhone(null); setBank(null); setRecipient(null); onBack(); }
-                    } catch {
-                      /* toast shown */
-                    }
-                  }}>
-            {busy && <LoaderCircle className="animate-spin" />} Сохранить
-          </Button>
+          {data.pending && (
+            <p className="rounded-2xl bg-wait-soft px-4 py-3 text-sm">
+              Новые реквизиты на рассмотрении у владельца. До одобрения выплаты идут по прежним{p ? "" : " (их пока нет)"}.
+            </p>
+          )}
+          {data.rejected && !data.pending && (
+            <p className="rounded-2xl bg-cancel-soft px-4 py-3 text-sm">Реквизиты отклонены: <b>{data.rejected.reason}</b>. Исправьте и отправьте снова.</p>
+          )}
+          {p && <p className="text-sm">Действуют: <b>{p.phone}</b>, {p.bank}{p.recipient ? `, ${p.recipient}` : ""}</p>}
+          {!data.pending && (
+            <>
+              <label className="block space-y-1.5">
+                <span className="text-sm text-muted-foreground">Телефон, привязанный к СБП</span>
+                <input inputMode="tel" className={cn(field, "tabular")} value={vPhone} onChange={(e) => setPhone(formatPhone(e.target.value))} />
+              </label>
+              <label className="block space-y-1.5">
+                <span className="text-sm text-muted-foreground">Банк</span>
+                <select className={field} value={vBank} onChange={(e) => setBank(e.target.value)}>
+                  <option value="" disabled>Выберите банк</option>
+                  {data.banks.map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </label>
+              {other && (
+                <label className="block space-y-1.5">
+                  <span className="text-sm text-muted-foreground">Название банка</span>
+                  <input className={field} value={vBankName} onChange={(e) => setBankName(e.target.value.slice(0, 60))} />
+                </label>
+              )}
+              <label className="block space-y-1.5">
+                <span className="text-sm text-muted-foreground">ФИО получателя — как в банке</span>
+                <input className={field} value={vRecipient} placeholder="Иванов Иван Иванович" onChange={(e) => setRecipient(e.target.value.slice(0, 120))} />
+              </label>
+              <p className="flex items-start gap-2 text-xs text-muted-foreground">
+                <ShieldCheck className="mt-0.5 size-4 shrink-0" /> Реквизиты видите только вы и владелец. Изменения вступают в силу после одобрения владельцем.
+              </p>
+              <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy || !ready}
+                      onClick={async () => {
+                        try {
+                          const res = await run("save", (k) => api.savePaymentProfile({ phone: vPhone, bank: vBank, recipient: vRecipient.trim(),
+                            bank_name: other ? vBankName.trim() : null }, k));
+                          if (res) {
+                            toast.success(res.pending ? "Отправлено на одобрение владельцу" : "Реквизиты сохранены");
+                            setData(res); setPhone(null); setBank(null); setRecipient(null); setBankName(null);
+                          }
+                        } catch {
+                          /* toast shown */
+                        }
+                      }}>
+                {busy && <LoaderCircle className="animate-spin" />} Отправить на одобрение
+              </Button>
+            </>
+          )}
         </section>
       )}
     </div>
