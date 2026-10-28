@@ -361,6 +361,24 @@ class AliceQueries(BaseModel):
     idempotency_key: str
 
 
+class PayoutEdit(BaseModel):
+    choices: list[PayoutChoice] = []
+    confirmed: dict[int, int] = {}
+    note: str | None = None
+    idempotency_key: str
+
+
+class PayoutAnnul(BaseModel):
+    reason: str | None = None
+    money_sent: bool = False
+    idempotency_key: str
+
+
+class AliceDelete(BaseModel):
+    reason: str | None = None
+    idempotency_key: str
+
+
 class AlicePayout(BaseModel):
     date_from: str
     date_to: str
@@ -412,6 +430,8 @@ class TxBody(BaseModel):
     reason: str
     event_date: str | None = None
     media_file_id: str | None = None
+    product: str | None = None  # ТЗ 28.10 §24: «alice»
+    alice_task_id: int | None = None
     idempotency_key: str
 
 
@@ -1114,13 +1134,24 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_alice_payout_commit(body: AlicePayout, owner: dict = Depends(staff("money"))):
         if not body.idempotency_key:
             raise svc.ServiceError("Нет ключа операции", 422, "key_required")
-        batch_id = alice.commit_payout(conn, owner, body.title or "", svc.parse_date(body.date_from),
-                                       svc.parse_date(body.date_to), body.confirmed, body.proof_media, body.idempotency_key)
+        batch_id, created = alice.commit_payout(conn, owner, body.title or "", svc.parse_date(body.date_from),
+                                                svc.parse_date(body.date_to), body.confirmed, body.proof_media,
+                                                body.idempotency_key)
         batch = payouts.batch(conn, batch_id)
-        notifier.spawn(notifier.alice_paid(batch))
-        for (tid,) in conn.execute("SELECT id FROM alice_tasks WHERE payout_id = ?", (batch_id,)).fetchall():
-            notifier.spawn(alice.post_status(conn, notifier.bot, tid))  # §21: «💰 Оплачено» in the forum too
+        if created:  # a repeated tap sends nothing again (§25)
+            notifier.spawn(notifier.alice_paid(batch))
+            for (tid,) in conn.execute("SELECT id FROM alice_tasks WHERE payout_id = ?", (batch_id,)).fetchall():
+                notifier.spawn(alice.post_status(conn, notifier.bot, tid))  # §21: «💰 Оплачено» in the forum too
         return {"batch": batch, "bank_text": payouts.bank_text(batch)}
+
+    @api.post("/admin/alice/{task_id}/delete")
+    async def admin_alice_delete(task_id: int, body: AliceDelete, admin: dict = Depends(staff("alice"))):
+        """§23: deleted softly; the photos go to «Архив», the publication leaves the employee's topic."""
+        task, changed = alice.delete_task(conn, admin, task_id, body.reason, body.idempotency_key)
+        task = await alice.archive_and_unpublish(conn, notifier.bot, task_id, admin)
+        if changed:
+            notifier.spawn(notifier.alice_deleted(task, admin))
+        return {"task": alice.view(conn, task, staff=True)}
 
     @api.get("/admin/access-attempts")
     async def admin_access_attempts(_: dict = Depends(staff("access_log"))):
@@ -1965,7 +1996,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Некорректный файл", 422, "bad_media")
         result = finance.create(conn, admin, body.user_id, body.type, body.amount, body.reason, body.idempotency_key,
                                 svc.parse_date(body.event_date) if body.event_date else None, body.media_file_id or None,
-                                units=body.units)
+                                units=body.units, product=body.product, alice_task_id=body.alice_task_id)
         if result.changed:
             notifier.spawn(notifier.tx_created(result.tx, admin))
         return {"tx": finance.public(result.tx), "changed": result.changed}
@@ -2436,8 +2467,36 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                payouts.Rates.from_dict(body.rates.model_dump()), body.network_id,
                                [c.model_dump() for c in body.choices], body.proof, body.deduction_proof,
                                body.idempotency_key)
-        notifier.spawn(notifier.payout_committed(batch, owner))
+        if not batch.get("repeated"):  # a repeated tap gets the same payout and sends nothing again
+            notifier.spawn(notifier.payout_committed(batch, owner))
         return {"batch": batch, "bank_text": payouts.bank_text(batch)}
+
+    @api.post("/admin/payouts/{batch_id}/edit")
+    async def admin_payout_edit(batch_id: int, body: PayoutEdit, owner: dict = Depends(staff("money"))):
+        """§25: the same payout, recalculated (no duplicate); the previous version is kept."""
+        before = payouts.batch(conn, batch_id)
+        if before is None:
+            raise svc.ServiceError("Выплата не найдена", 404, "not_found")
+        if before.get("product") == "alice":
+            alice.edit_payout(conn, owner, batch_id, body.confirmed, body.idempotency_key, body.note)
+        else:
+            payouts.edit(conn, owner, batch_id, [c.model_dump() for c in body.choices], body.idempotency_key, body.note)
+        batch = payouts.batch(conn, batch_id)
+        notifier.spawn(notifier.payout_changed(before, batch, owner))
+        return {"batch": batch, "bank_text": payouts.bank_text(batch)}
+
+    @api.post("/admin/payouts/{batch_id}/annul")
+    async def admin_payout_annul(batch_id: int, body: PayoutAnnul, owner: dict = Depends(staff("money"))):
+        batch, made = payouts.annul(conn, owner, batch_id, body.reason, body.money_sent, body.idempotency_key)
+        if batch["status"] == "annulled" and batch["annulled_at"] and not svc._seen(conn, body.idempotency_key + "#n"):
+            with transaction(conn):
+                svc.log_event(conn, user_id=owner["id"], actor_id=owner["telegram_id"], event_type="PAYOUT_ANNUL_NOTIFIED",
+                              key=body.idempotency_key + "#n", new={"batch": batch_id})
+            notifier.spawn(notifier.payout_annulled(batch, owner, made))
+            if batch.get("product") == "alice":
+                for t in batch.get("tasks", []) or []:
+                    notifier.spawn(alice.post_status(conn, notifier.bot, t["id"]))
+        return {"batch": batch, "items": payouts.history(conn)}
 
     @api.get("/admin/payouts")
     async def admin_payouts(_: dict = Depends(staff("money"))):

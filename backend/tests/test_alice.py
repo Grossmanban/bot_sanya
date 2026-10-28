@@ -14,6 +14,7 @@ from app.notify import Notifier
 from app.timeutil import now_local
 
 from .test_api import headers, key
+from .conftest import requisites
 from .test_features import run
 
 JPG = b"\xff\xd8\xff" + b"0" * 64
@@ -169,29 +170,34 @@ def test_stats_duplicates_payout_by_yandex_report(conn, setup, make_user):
     alice.moderate(conn, owner, ids[3], False, None, svc.new_key())
     today = now_local().date()
     st = alice.my_stats(conn, u["id"], today)["all"]
-    assert st == {"completed": 3, "moderation": 0, "rejected": 1, "accepted": 2, "paid": 0}
+    assert st == {"completed": 3, "moderation": 0, "rejected": 1, "accepted": 2, "paid": 0, "yandex_rejected": 0}
     # the same photo in another execution is flagged for the moderator
     t = full_run(conn, v, JPG + bytes([0]))
     assert alice.duplicates(conn, t["id"]) == [ids[0]]
-    # Yandex confirmed 2 of 3 for QR-1: the oldest two are paid, one waits
+    # ТЗ 28.10 §25 (В50): Yandex confirmed 2 of the period's 3 for QR-1 — 2 picked at random (stably), 1 «Отклонено Яндексом»
     with pytest.raises(svc.ServiceError) as e:
         alice.reconcile(conn, today, today, {qr["id"]: 4})
     assert e.value.code == "too_many"
     plan = alice.reconcile(conn, today, today, {qr["id"]: 2}, rate=100)
-    assert plan["rows"][0] | {} == plan["rows"][0] and (plan["rows"][0]["waiting"], plan["rows"][0]["left"]) == (3, 1)
-    assert {p["name"].split()[0]: p["count"] for p in plan["pay"]} == {"Иван": 1, "Вера": 1} and plan["total"] == 200
+    row = plan["rows"][0]
+    assert (row["waiting"], row["confirmed"], row["yandex_rejected"]) == (3, 2, 1) and len(plan["rejected"]) == 1
+    assert alice.reconcile(conn, today, today, {qr["id"]: 2}, rate=100)["pay"] == plan["pay"]  # reopening: the same split
+    assert sum(p["count"] for p in plan["pay"]) == 2 and plan["total"] == 200
     assert alice.get(conn, ids[0])["status"] == "accepted"  # a preview changes nothing
+    assert alice.reconcile(conn, today, today, {})["rejected"] == []  # a QR without a number is left as it is
     app_settings.update(conn, {"alice_rate": 100})
+    requisites(conn, u, v)
     k = svc.new_key()
-    batch_id = alice.commit_payout(conn, owner, "Алиса, октябрь", today, today, {qr["id"]: 2}, [], k)
-    assert alice.commit_payout(conn, owner, "Алиса, октябрь", today, today, {qr["id"]: 2}, [], k) == batch_id  # once
-    assert [alice.get(conn, i)["status"] for i in ids] == ["paid", "paid", "accepted", "rejected"]
+    batch_id, created = alice.commit_payout(conn, owner, "Алиса, октябрь", today, today, {qr["id"]: 2}, [], k)
+    assert created and alice.commit_payout(conn, owner, "Алиса, октябрь", today, today, {qr["id"]: 2}, [], k) == (batch_id, False)
+    statuses = sorted(alice.get(conn, i)["status"] for i in ids[:3])
+    assert statuses == ["paid", "paid", "yandex_rejected"] and alice.get(conn, ids[3])["status"] == "rejected"
     batch = payouts.batch(conn, batch_id)
-    assert batch["product"] == "alice" and batch["total"] == 200 and batch["rates"] == {"alice_rate": 100}
-    # a rate change doesn't touch the paid ones; the rest waits for the next report
+    assert batch["product"] == "alice" and batch["total"] == 200 and batch["rates"]["alice_rate"] == 100
+    assert sorted(t["status"] for t in batch["tasks"]) == ["paid", "paid", "yandex_rejected"]
+    # a rate change doesn't touch the paid ones; nothing is left waiting in that period
     app_settings.update(conn, {"alice_rate": 150})
-    nxt = alice.reconcile(conn, today, today, {qr["id"]: 1})
-    assert nxt["total"] == 150 and nxt["rows"][0]["waiting"] == 1
+    assert alice.reconcile(conn, today, today, {})["rows"][0]["waiting"] == 0
     # the Alice payout doesn't touch the pieces' «paid through» nor the lazy pool
     assert payouts.employee_view(conn, u["id"], today)["paid_through"] is None
 

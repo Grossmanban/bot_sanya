@@ -68,7 +68,7 @@ export type Capability =
 export type Product = "alice";
 export const PRODUCT_TITLES: Record<Product, string> = { alice: "Яндекс Алиса" };
 
-export type AliceStatus = "in_progress" | "sending" | "send_failed" | "moderation" | "rejected" | "accepted" | "paid" | "abandoned";
+export type AliceStatus = "in_progress" | "sending" | "send_failed" | "moderation" | "rejected" | "accepted" | "paid" | "abandoned" | "yandex_rejected" | "deleted";
 
 export interface AliceStage {
   stage: 1 | 2 | 3;
@@ -117,6 +117,7 @@ export interface AliceCounts {
   rejected: number;
   accepted: number;
   paid: number;
+  yandex_rejected?: number;
 }
 
 export interface AliceStats {
@@ -139,9 +140,12 @@ export interface AliceQr {
 /** ТЗ 27.10 §43: the grid by QR codes for Yandex's report */
 export interface AliceReconcile {
   rate: number;
-  rows: { qr_id: number; number: string | null; accepted: number; paid: number; waiting: number; confirmed: number;
-    amount: number; left: number; people: { user_id: number; name: string }[] }[];
-  pay: { user_id: number; name: string; count: number; amount: number; task_ids: number[] }[];
+  rows: { qr_id: number; number: string | null; accepted: number; paid: number; waiting: number; confirmed: number | null;
+    amount: number; left: number; yandex_rejected: number; people: { user_id: number; name: string }[] }[];
+  /** §24: the person's open fines, deductions and bonuses are taken by this payout too (one debt) */
+  pay: { user_id: number; name: string; count: number; amount: number; task_ids: number[]; fines: number; deductions: number;
+    bonuses: number; total: number; carried_debt: number }[];
+  rejected: number[];
   total: number;
 }
 
@@ -1121,6 +1125,17 @@ export interface PayoutBatch {
   deduction_media: string[];
   items: PayoutItem[];
   summary?: PayoutSummary | null;
+  // ТЗ 28.10 §25
+  product?: Product | null;
+  status?: "processed" | "annulled";
+  version?: number;
+  network_id?: number | null;
+  annulled_at?: string | null;
+  annul_reason?: string | null;
+  annulled_by_name?: string | null;
+  money_sent?: number | null;
+  versions?: { version: number; created_at: string; by: string | null; note: string | null }[];
+  tasks?: { id: number; status: string; user_id: number }[];
 }
 
 export interface Broadcast {
@@ -1467,7 +1482,8 @@ export const api = {
     },
     financeSummary: () => request<{ people: MoneyPerson[]; pending: Tx[]; drafts: Tx[] }>("/api/admin/finances/summary"),
     /** fines in units (ТЗ 27.10 §19), bonuses and deductions in rubles */
-    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, value: { amount?: number; units?: number }, reason: string,
+    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, value: { amount?: number; units?: number; product?: "alice";
+      alice_task_id?: number | null }, reason: string,
                key: string, media_file_id: string | null = null) =>
       post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, ...value, reason, media_file_id, idempotency_key: key }),
     decideTx: (id: number, approve: boolean, comment: string | null, key: string) =>
@@ -1538,7 +1554,15 @@ export const api = {
       request<{ profile: PaymentProfile | null; full: boolean; banks: string[] }>(`/api/admin/users/${userId}/payment-profile`),
     uploadMedia: (file: Blob) => upload<{ file_id: string }>("/api/admin/media", file),
     payouts: () => request<{ items: { id: number; title: string; period_from: string; period_to: string; total: number; people: number;
-      created_at: string; product?: Product | null }[]; rates: PayoutRates }>("/api/admin/payouts"),
+      created_at: string; product?: Product | null; status?: "processed" | "annulled"; version?: number; annul_reason?: string | null }[];
+      rates: PayoutRates }>("/api/admin/payouts"),
+    editPayout: (id: number, body: { choices?: { user_id: number; include: boolean; base_override?: number | null }[];
+      confirmed?: Record<number, number>; note?: string | null }, key: string) =>
+      post<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}/edit`, { ...body, idempotency_key: key }),
+    annulPayout: (id: number, reason: string, moneySent: boolean, key: string) =>
+      post<{ batch: PayoutBatch }>(`/api/admin/payouts/${id}/annul`, { reason, money_sent: moneySent, idempotency_key: key }),
+    aliceDelete: (id: number, reason: string | null, key: string) =>
+      post<{ task: AliceTask }>(`/api/admin/alice/${id}/delete`, { reason, idempotency_key: key }),
     payout: (id: number) => request<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}`),
     payoutExcel: (id: number) => post<{ ok: boolean }>(`/api/admin/payouts/${id}/excel`, {}),
     previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates }) =>

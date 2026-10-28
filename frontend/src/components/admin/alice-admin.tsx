@@ -1,7 +1,11 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { AlertTriangle, Archive, Check, ExternalLink, History, ImageUp, LoaderCircle, RotateCcw, Save, UserPlus, X } from "lucide-react";
+import { AlertTriangle, Archive, Check, ExternalLink, History, ImageUp, LoaderCircle, RotateCcw, Save, Trash2, UserPlus, X } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +22,7 @@ type Tab = "queue" | "qr" | "queries" | "stats";
 const field = "h-10 max-w-full min-w-0 rounded-xl border-0 bg-muted px-3 text-sm outline-none focus:ring-2 focus:ring-ring/25";
 const STATUSES: [string, string][] = [
   ["moderation", "На модерации"], ["accepted", "Принято, ожидает оплаты"], ["rejected", "Отклонено"], ["paid", "Оплачено"],
-  ["send_failed", "Не отправлено"], ["", "Все"],
+  ["send_failed", "Не отправлено"], ["yandex_rejected", "Отклонено Яндексом"], ["deleted", "Удалённые"], ["", "Все"],
 ];
 
 /** ТЗ 27.10 §32–40: moderation, QR codes, search queries, statistics of «Яндекс Алиса». */
@@ -138,6 +142,7 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
       {task.reject_reason && <p className="text-sm text-cancel">Причина отказа: {task.reject_reason}</p>}
       {task.send_error && <p className="text-sm text-cancel">Не отправлено в группу: {task.send_error}</p>}
       {task.moderated_by && <p className="text-xs text-muted-foreground">Решил: {task.moderated_by}</p>}
+      <DeleteTask task={task} onDone={onDone} />
       {task.message_link && (
         <button className="flex items-center gap-1 text-xs font-semibold text-primary" onClick={() => webApp()?.openTelegramLink(task.message_link!)}>
           <ExternalLink className="size-3.5" /> Открыть в группе
@@ -408,5 +413,50 @@ function Stats() {
         </>
       )}
     </div>
+  );
+}
+
+
+/** ТЗ 28.10 §23: an admin removes any task — confirmed, the reason optional; the photos go to «Архив», the publication
+ * leaves the topic. A failed part is repeated by the same button without a second archive copy. */
+function DeleteTask({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) => void }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const { busy, run } = useAction();
+  const t = task as AliceTask & { archive_state?: string | null; unpublish_state?: string | null };
+  const partial = task.status === "deleted" && (t.archive_state !== "done" || t.unpublish_state === "failed");
+  if (task.status === "deleted" && !partial) return <p className="text-xs text-muted-foreground">Удалено, фото в «Архиве».</p>;
+  const go = async () => {
+    try {
+      const res = await run("delete", (k) => api.admin.aliceDelete(task.id, reason.trim() || null, k),
+        partial ? "Повторено" : "Задание удалено");
+      if (res) { setOpen(false); onDone(res.task); }
+    } catch { /* toast shown */ }
+  };
+  return (
+    <>
+      <button className="flex items-center gap-1 text-xs font-semibold text-cancel" disabled={!!busy}
+              onClick={() => (partial ? go() : setOpen(true))}>
+        <Trash2 className="size-3.5" /> {partial ? "Удалено не полностью — повторить" : "Удалить задание"}
+      </button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent className="rounded-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-display">Удалить {task.title ?? task.number}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Фото с подписью уйдут в чат «Архив», публикация исчезнет из темы сотрудника, задание пропадёт из списков и статистики.
+              Запись и связи с выплатами сохранятся. Исполнитель получит сообщение.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <input className={field + " w-full"} placeholder="Причина (по желанию)" value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} />
+          <AlertDialogFooter>
+            <AlertDialogCancel className="rounded-xl">Отмена</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" className="rounded-xl" disabled={!!busy} onClick={(e) => { e.preventDefault(); void go(); }}>
+              {busy === "delete" && <LoaderCircle className="animate-spin" />} Удалить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

@@ -12,9 +12,11 @@ Photos live in Telegram (the forum group); the server keeps a file only until it
 a report exists, not that its content is genuine; a photo already used in another execution is flagged.
 
 Statuses: in_progress → sending / send_failed → moderation → rejected | accepted («Принято, ожидает оплаты») → paid.
-«Всего завершено» counts everything submitted. The payout (§41–44): Yandex reports a number per QR code; the
-owner enters it, the oldest accepted executions of that QR are paid first (a QR may be assigned to several
-people), the rest keep waiting. Nothing changes on a preview, only on «Зафиксировать».
+«Всего завершено» counts everything submitted. The payout (§41–44, ТЗ 28.10 §25): Yandex reports a number per QR
+code for a period; the owner enters it; that many of the QR's accepted executions of the period are paid, picked at
+random but stably, the rest of the period become «Отклонено Яндексом». A payout can be edited (a new version) and
+annulled (its tasks wait for payment again). Fines are one debt: an «Алиса» payout takes them too.
+Nothing changes on a preview, only on «Зафиксировать».
 """
 
 import hashlib
@@ -45,9 +47,9 @@ STAGES = {
 STATUS = {
     "in_progress": "Выполняется", "sending": "Отправляется", "send_failed": "Не отправлено",
     "moderation": "На модерации", "rejected": "Отклонено", "accepted": "Принято, ожидает оплаты", "paid": "Оплачено",
-    "abandoned": "Прервано",
+    "abandoned": "Прервано", "yandex_rejected": "Отклонено Яндексом", "deleted": "Удалено",
 }
-SUBMITTED = ("sending", "send_failed", "moderation", "rejected", "accepted", "paid")
+SUBMITTED = ("sending", "send_failed", "moderation", "rejected", "accepted", "paid", "yandex_rejected")
 MAX_REASON = 300
 MAX_QUERY = 120
 QUERIES_FILE = Path(__file__).parent / "resources" / "alice_queries.txt"
@@ -198,7 +200,7 @@ def qr_history(conn: sqlite3.Connection, qr_id: int) -> list[dict]:
              for r in conn.execute("SELECT * FROM alice_qr_assign WHERE qr_id = ? AND removed_at IS NOT NULL", (qr_id,))]
     rows += [{"at": r["completed_at"] or r["started_at"],
               "what": f"{title(r['id'])}: {people.get(r['user_id'])} — {STATUS[r['status']]}", "by": None}
-             for r in conn.execute("SELECT * FROM alice_tasks WHERE qr_id = ? AND status != 'abandoned'", (qr_id,))]
+             for r in conn.execute("SELECT * FROM alice_tasks WHERE qr_id = ? AND status NOT IN ('abandoned', 'deleted')", (qr_id,))]
     return sorted(rows, key=lambda r: r["at"] or "", reverse=True)[:200]
 
 
@@ -434,7 +436,7 @@ def duplicates(conn: sqlite3.Connection, task_id: int) -> list[int]:
     return [r[0] for r in conn.execute(
         """SELECT DISTINCT o.task_id FROM alice_photos p JOIN alice_photos o ON o.sha256 = p.sha256 AND o.task_id != p.task_id
            JOIN alice_tasks t ON t.id = o.task_id
-           WHERE p.task_id = ? AND p.replaced_at IS NULL AND o.replaced_at IS NULL AND t.status != 'abandoned'""", (task_id,))]
+           WHERE p.task_id = ? AND p.replaced_at IS NULL AND o.replaced_at IS NULL AND t.status NOT IN ('abandoned', 'deleted')""", (task_id,))]
 
 
 def view(conn: sqlite3.Connection, task: dict, staff: bool = False) -> dict:
@@ -460,7 +462,8 @@ def view(conn: sqlite3.Connection, task: dict, staff: bool = False) -> dict:
         out.update(user_id=task["user_id"], name=svc.full_name(user), username=user["username"],
                    telegram_id=user["telegram_id"], qr_id=task["qr_id"], duplicates=duplicates(conn, task["id"]),
                    moderated_by=names.get(task["moderated_by"]), payout_id=task["payout_id"],
-                   message_link=_message_link(task))
+                   message_link=_message_link(task), archive_state=task["archive_state"],
+                   unpublish_state=task["unpublish_state"], delete_reason=task["delete_reason"], deleted_at=task["deleted_at"])
     return out
 
 
@@ -644,8 +647,10 @@ async def post_status(conn: sqlite3.Connection, bot, task_id: int) -> None:
             "paid": "💰 Оплачено"}.get(task["status"], STATUS[task["status"]])
     reason = f"\nПричина: {escape(task['reject_reason'])}" if task["status"] == "rejected" and task["reject_reason"] else ""
     try:
-        await bot.send_message(task["chat_id"], f"{title(task_id)} — {mark}{reason}",
-                               message_thread_id=task["thread_id"], reply_to_message_id=first, parse_mode="HTML")
+        msg = await bot.send_message(task["chat_id"], f"{title(task_id)} — {mark}{reason}",
+                                     message_thread_id=task["thread_id"], reply_to_message_id=first, parse_mode="HTML")
+        with transaction(conn):  # §23: the latest status reply is removed with the album if the task is deleted
+            conn.execute("UPDATE alice_tasks SET status_message_id = ? WHERE id = ?", (getattr(msg, "message_id", None), task_id))
     except TelegramAPIError:
         pass
 
@@ -680,6 +685,8 @@ def moderate(conn: sqlite3.Connection, actor: dict, task_id: int, approve: bool,
 def queue(conn: sqlite3.Connection, status: str | None = "moderation", user_id: int | None = None, qr_id: int | None = None,
           date_from: date | None = None, date_to: date | None = None, limit: int = 200) -> list[dict]:
     where, args = ["status != 'abandoned'", "status != 'in_progress'"], []
+    if status != "deleted":  # a deleted task leaves the lists (§23); it's found only under «Удалённые»
+        where.append("status != 'deleted'")
     if status:
         where.append("status = ?")
         args.append(status)
@@ -709,7 +716,7 @@ def _counts(rows) -> dict:
         by[r["status"]] = by.get(r["status"], 0) + r["n"]
     return {"completed": sum(by.get(s, 0) for s in SUBMITTED), "moderation": by.get("moderation", 0)
             + by.get("sending", 0) + by.get("send_failed", 0), "rejected": by.get("rejected", 0),
-            "accepted": by.get("accepted", 0), "paid": by.get("paid", 0)}
+            "accepted": by.get("accepted", 0), "paid": by.get("paid", 0), "yandex_rejected": by.get("yandex_rejected", 0)}
 
 
 def my_stats(conn: sqlite3.Connection, user_id: int, today: date, date_from: date | None = None,
@@ -734,7 +741,7 @@ def my_stats(conn: sqlite3.Connection, user_id: int, today: date, date_from: dat
 
 def history(conn: sqlite3.Connection, user_id: int, limit: int = 50) -> list[dict]:
     return [view(conn, dict(r)) for r in conn.execute(
-        "SELECT * FROM alice_tasks WHERE user_id = ? AND status != 'abandoned' AND status != 'in_progress' "
+        "SELECT * FROM alice_tasks WHERE user_id = ? AND status NOT IN ('abandoned', 'in_progress', 'deleted') "
         "ORDER BY id DESC LIMIT ?", (user_id, limit))]
 
 
@@ -765,61 +772,110 @@ def admin_stats(conn: sqlite3.Connection, date_from: date, date_to: date) -> dic
 # ---------------------------------------------------------------- the payout by Yandex's report (§41–44)
 
 
-def _unpaid(conn, qr_id: int, date_to: date) -> list[dict]:
-    """Accepted, not paid, finished up to the period's end — the oldest first (the agreed order)."""
+def _waiting(conn, qr_id: int, date_from: date, date_to: date) -> list[dict]:
+    """ТЗ 28.10 §25 (В50): accepted, not paid, finished inside the period (its start counts too)."""
     return [dict(r) for r in conn.execute(
-        """SELECT * FROM alice_tasks WHERE qr_id = ? AND status = 'accepted' AND substr(completed_at, 1, 10) <= ?
-           ORDER BY completed_at, id""", (qr_id, date_to.isoformat()))]
+        """SELECT * FROM alice_tasks WHERE qr_id = ? AND status = 'accepted'
+           AND substr(completed_at, 1, 10) BETWEEN ? AND ? ORDER BY id""",
+        (qr_id, date_from.isoformat(), date_to.isoformat()))]
+
+
+def pick(waiting: list[dict], want: int, qr_id: int, date_from: date, date_to: date) -> list[dict]:
+    """Which of them Yandex paid: chosen at random (В50), but the same every time for the same data — reopening
+    the wizard never changes the split."""
+    seed = f"{qr_id}:{date_from}:{date_to}:{want}:{','.join(str(t['id']) for t in waiting)}"
+    chosen = random.Random(hashlib.sha256(seed.encode()).hexdigest()).sample(waiting, want)
+    return sorted(chosen, key=lambda t: t["id"])
 
 
 def reconcile(conn: sqlite3.Connection, date_from: date, date_to: date, confirmed: dict[int, int] | None = None,
               rate: int | None = None) -> dict:
-    """The grid by QR codes: accepted in the period, already paid, waiting; what Yandex confirmed (entered) is spread
-    over the oldest waiting executions — and so over people. Nothing is saved."""
+    """The grid by QR codes for the period: accepted, already paid, waiting. For a QR whose number from Yandex is
+    entered, that many waiting tasks are paid (picked at random) and the rest of the period's waiting ones become
+    «Отклонено Яндексом»; a QR with nothing entered is left as it is. Nothing is saved."""
     if date_to < date_from:
         raise ServiceError("Период задан неверно", 422, "bad_range")
     rate = app_settings.get_all(conn)["alice_rate"] if rate is None else rate
     confirmed = confirmed or {}
-    rows, people = [], {}
+    rows, people, rejected = [], {}, []
     qr_ids = [r[0] for r in conn.execute(
-        """SELECT DISTINCT qr_id FROM alice_tasks WHERE status IN ('accepted','paid')
-           AND substr(completed_at, 1, 10) <= ?""", (date_to.isoformat(),))]
+        """SELECT DISTINCT qr_id FROM alice_tasks WHERE status IN ('accepted','paid','yandex_rejected')
+           AND substr(completed_at, 1, 10) BETWEEN ? AND ?""", (date_from.isoformat(), date_to.isoformat()))]
     for qr_id in qr_ids:
-        in_period = conn.execute(
-            """SELECT status, COUNT(*) FROM alice_tasks WHERE qr_id = ? AND status IN ('accepted','paid')
+        counts = {st: n for st, n in conn.execute(
+            """SELECT status, COUNT(*) FROM alice_tasks WHERE qr_id = ? AND status IN ('accepted','paid','yandex_rejected')
                AND substr(completed_at, 1, 10) BETWEEN ? AND ? GROUP BY status""",
-            (qr_id, date_from.isoformat(), date_to.isoformat())).fetchall()
-        counts = {s: n for s, n in in_period}
-        waiting = _unpaid(conn, qr_id, date_to)
-        if not waiting and not counts:
-            continue
-        want = confirmed.get(qr_id, 0)
-        if isinstance(want, bool) or not isinstance(want, int) or want < 0:
+            (qr_id, date_from.isoformat(), date_to.isoformat()))}
+        waiting = _waiting(conn, qr_id, date_from, date_to)
+        want = confirmed.get(qr_id)
+        if want is not None and (isinstance(want, bool) or not isinstance(want, int) or want < 0):
             raise ServiceError("Количество — целое число от 0", 422, "bad_count")
-        if want > len(waiting):
+        if want is not None and want > len(waiting):
             raise ServiceError(f"QR {(get_qr(conn, qr_id) or {}).get('number') or qr_id}: подтверждено {want}, а ждут оплаты "
                                f"только {len(waiting)}", 422, "too_many")
-        paid_now = waiting[:want]
+        paid_now = pick(waiting, want, qr_id, date_from, date_to) if want else []
+        paid_ids = {t["id"] for t in paid_now}
+        refused = [t for t in waiting if t["id"] not in paid_ids] if want is not None else []
         for t in paid_now:
             p = people.setdefault(t["user_id"], {"user_id": t["user_id"], "count": 0, "task_ids": []})
             p["count"] += 1
             p["task_ids"].append(t["id"])
+        rejected += [t["id"] for t in refused]
         qr = get_qr(conn, qr_id) or {}
-        rows.append({"qr_id": qr_id, "number": qr.get("number"), "accepted": counts.get("accepted", 0) + counts.get("paid", 0),
+        rows.append({"qr_id": qr_id, "number": qr.get("number"),
+                     "accepted": sum(counts.get(k, 0) for k in ("accepted", "paid", "yandex_rejected")),
                      "paid": counts.get("paid", 0), "waiting": len(waiting), "confirmed": want,
-                     "amount": want * rate, "left": len(waiting) - want,
-                     "people": sorted({t["user_id"] for t in waiting})})
+                     "amount": (want or 0) * rate, "left": 0 if want is not None else len(waiting),
+                     "yandex_rejected": len(refused), "people": sorted({t["user_id"] for t in waiting})})
     names = {uid: svc.full_name(svc.get_user(conn, uid)) for uid in {u for r in rows for u in r["people"]} | set(people)}
     for r in rows:
         r["people"] = [{"user_id": u, "name": names[u]} for u in r["people"]]
-    pay = [{**p, "name": names[p["user_id"]], "amount": p["count"] * rate} for p in people.values()]
-    return {"rate": rate, "rows": sorted(rows, key=lambda r: (r["number"] or "", r["qr_id"])),
-            "pay": sorted(pay, key=lambda p: p["name"]), "total": sum(p["amount"] for p in pay)}
+    pay = []
+    for p in people.values():  # §24 (В48): the person's open fines and deductions are taken here too — one debt
+        from . import payouts
+
+        base = p["count"] * rate
+        s = payouts.settle(base, payouts._open_money(conn, p["user_id"], date_to))
+        pay.append({**p, "name": names[p["user_id"]], "amount": base, "base": base, **s})
+    return {"rate": rate, "rows": sorted(rows, key=lambda r: (r["number"] or "", r["qr_id"])), "rejected": rejected,
+            "pay": sorted(pay, key=lambda p: p["name"]), "total": sum(p["total"] for p in pay)}
+
+
+def _write_payout(conn, actor: dict, batch_id: int, plan: dict) -> None:
+    from . import payouts
+
+    for p in plan["pay"]:
+        user = svc.get_user(conn, p["user_id"])
+        profile = payouts.get_profile(conn, user["id"])
+        if profile is None and p["total"] > 0:
+            raise ServiceError(f"Нет одобренных реквизитов: {p['name']}. Одобрите их или уберите его QR из сверки",
+                               409, "no_requisites")
+        conn.execute(
+            """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
+                   team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
+                   lazy_units, lazy_before, rate_base, rate_lazy)
+               VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NULL)""",
+            (batch_id, user["id"], perms.role_of(user), payouts.pretty_phone(profile["phone"]) if profile else None,
+             profile["bank"] if profile else None, profile["recipient"] if profile else None, p["count"],
+             p["base"], p["base"], p["bonuses"], p["fines"], p["deductions"], p["total"], p["carried_debt"], p["base"],
+             plan["rate"]))
+        payouts.settle_txs(conn, batch_id, p["tx_ids"], actor)
+        marked = conn.execute(
+            f"""UPDATE alice_tasks SET status = 'paid', payout_id = ?, paid_at = ?
+                WHERE id IN ({','.join('?' * len(p['task_ids']))}) AND status = 'accepted'""",
+            (batch_id, now_iso(), *p["task_ids"])).rowcount
+        if marked != len(p["task_ids"]):  # someone else paid them a moment ago: nothing is saved
+            raise ServiceError("Выполнения изменились — обновите расчёт", 409, "changed")
+    if plan["rejected"]:
+        conn.execute(f"""UPDATE alice_tasks SET status = 'yandex_rejected', payout_id = ?
+                         WHERE id IN ({','.join('?' * len(plan['rejected']))}) AND status = 'accepted'""",
+                     (batch_id, *plan["rejected"]))
 
 
 def commit_payout(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, date_to: date,
-                  confirmed: dict[int, int], proof: list[str], key: str) -> int:
-    """Paid: the chosen executions become «Оплачено», tied to the payout; the rest keep waiting. Returns the batch id."""
+                  confirmed: dict[int, int], proof: list[str], key: str) -> tuple[int, bool]:
+    """Paid: the picked executions become «Оплачено», the rest of the period for the reconciled QR codes —
+    «Отклонено Яндексом», all tied to the payout. Returns (batch id, created now)."""
     from . import payouts
 
     _check_key(key)
@@ -828,36 +884,147 @@ def commit_payout(conn: sqlite3.Connection, actor: dict, title: str, date_from: 
         raise ServiceError("Назовите выплату", 422, "title_required")
     with transaction(conn):
         if _seen(conn, key):
-            return conn.execute("SELECT MAX(id) FROM payout_batches WHERE product = ?", (PRODUCT,)).fetchone()[0]
+            done = payouts.batch_by_key(conn, key)
+            if done is None:
+                raise ServiceError("Выплата уже обрабатывается — обновите список", 409, "in_progress")
+            return done, False
         actor = _fresh_actor(conn, actor)
         if not perms.can(actor, "money"):
             raise ServiceError("Выплаты фиксирует только владелец", 403, "owner_only")
         plan = reconcile(conn, date_from, date_to, confirmed)
-        if not plan["pay"]:
+        if not plan["pay"] and not plan["rejected"]:
             raise ServiceError("Укажите, сколько подтвердил Яндекс", 422, "nothing")
         cur = conn.execute(
             """INSERT INTO payout_batches (title, period_from, period_to, network_id, rates, proof_media, deduction_media,
                                            total, created_by, created_at, product) VALUES (?, ?, ?, NULL, ?, ?, '[]', ?, ?, ?, ?)""",
-            (title, date_from.isoformat(), date_to.isoformat(), json.dumps({"alice_rate": plan["rate"]}),
-             json.dumps(proof[:10]), plan["total"], actor["telegram_id"], now_iso(), PRODUCT))
+            (title, date_from.isoformat(), date_to.isoformat(), json.dumps({"alice_rate": plan["rate"], "confirmed": {
+                str(k): v for k, v in confirmed.items()}}), json.dumps(proof[:10]), plan["total"], actor["telegram_id"],
+             now_iso(), PRODUCT))
         batch_id = cur.lastrowid
-        for p in plan["pay"]:
-            user = svc.get_user(conn, p["user_id"])
-            profile = payouts.get_profile(conn, user["id"])
-            conn.execute(
-                """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
-                       team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
-                       lazy_units, lazy_before, rate_base, rate_lazy)
-                   VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?, 0, 0, 0, ?, 0, ?, 0, 0, 0, ?, NULL)""",
-                (batch_id, user["id"], perms.role_of(user), payouts.pretty_phone(profile["phone"]) if profile else None,
-                 profile["bank"] if profile else None, profile["recipient"] if profile else None, p["count"],
-                 p["amount"], p["amount"], p["amount"], p["amount"], plan["rate"]))
-            marked = conn.execute(
-                f"""UPDATE alice_tasks SET status = 'paid', payout_id = ?, paid_at = ?
-                    WHERE id IN ({','.join('?' * len(p['task_ids']))}) AND status = 'accepted'""",
-                (batch_id, now_iso(), *p["task_ids"])).rowcount
-            if marked != len(p["task_ids"]):  # someone else paid them a moment ago: nothing is saved
-                raise ServiceError("Выполнения изменились — обновите расчёт", 409, "changed")
+        _write_payout(conn, actor, batch_id, plan)
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="ALICE_PAYOUT", key=key,
                   new={"batch": batch_id, "total": plan["total"], "confirmed": {str(k): v for k, v in confirmed.items()}})
+    return batch_id, True
+
+
+def edit_payout(conn: sqlite3.Connection, actor: dict, batch_id: int, confirmed: dict[int, int], key: str,
+                note: str | None = None) -> int:
+    """§25: the same payout with other numbers from Yandex — its tasks go back and are picked again; money taken
+    is redone once; the previous version is kept."""
+    from . import payouts
+
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return batch_id
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "money"):
+            raise ServiceError("Выплаты меняет только владелец", 403, "owner_only")
+        b = payouts._live(conn, batch_id)
+        if b["product"] != PRODUCT:
+            raise ServiceError("Это не выплата «Алисы»", 409, "wrong_kind")
+        later = payouts._later(conn, b)
+        if later:
+            raise ServiceError("Сначала измените более позднюю выплату: " + ", ".join(later), 409, "not_latest")
+        payouts.snapshot(conn, b, actor, note)
+        payouts.revert(conn, b, 1)
+        plan = reconcile(conn, date.fromisoformat(b["period_from"]), date.fromisoformat(b["period_to"]), confirmed,
+                         json.loads(b["rates"])["alice_rate"])
+        _write_payout(conn, actor, batch_id, plan)
+        rates = {**json.loads(b["rates"]), "confirmed": {str(k): v for k, v in confirmed.items()}}
+        conn.execute("""UPDATE payout_batches SET total = ?, rates = ?, version = version + 1, updated_at = ?, updated_by = ?
+                        WHERE id = ?""", (plan["total"], json.dumps(rates), now_iso(), actor["telegram_id"], batch_id))
+        log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="ALICE_PAYOUT_EDITED", key=key,
+                  old={"total": b["total"]}, new={"batch": batch_id, "total": plan["total"]}, description=note)
     return batch_id
+
+
+# ---------------------------------------------------------------- deleting a task (ТЗ 28.10 §23)
+
+
+def delete_task(conn: sqlite3.Connection, actor: dict, task_id: int, reason: str | None, key: str) -> tuple[dict, bool]:
+    """An admin removes any task: softly — the record, its photos (file ids) and money links stay; it leaves the
+    lists, statistics and goals. A task paid by a live payout can't go until that payout is changed (§23 + §25)."""
+    reason = " ".join((reason or "").split())[:MAX_REASON] or None
+    _check_key(key)
+    with transaction(conn):
+        task = get(conn, task_id)
+        if task is None:
+            raise ServiceError("Задание не найдено", 404, "not_found")
+        if _seen(conn, key) or task["status"] == "deleted":
+            return task, False
+        actor = _staff(conn, actor)
+        if task["status"] in ("paid", "yandex_rejected") and task["payout_id"]:
+            live = conn.execute("SELECT status FROM payout_batches WHERE id = ?", (task["payout_id"],)).fetchone()
+            if live and live[0] != "annulled":
+                raise ServiceError(f"{title(task_id)} входит в выплату №{task['payout_id']} — сначала измените или "
+                                   "аннулируйте выплату", 409, "in_payout")
+        conn.execute("""UPDATE alice_tasks SET status = 'deleted', deleted_at = ?, deleted_by = ?, delete_reason = ?,
+                        archive_state = 'pending', unpublish_state = CASE WHEN message_ids IS NULL THEN 'none' ELSE 'pending' END
+                        WHERE id = ?""", (now_iso(), actor["telegram_id"], reason, task_id))
+        log_event(conn, user_id=task["user_id"], actor_id=actor["telegram_id"], event_type="ALICE_DELETED", key=key,
+                  old={"status": task["status"]}, new={"task": task_id}, description=reason)
+    return get(conn, task_id), True
+
+
+async def archive_and_unpublish(conn: sqlite3.Connection, bot, task_id: int, actor: dict | None) -> dict:
+    """The deleted task's photos go to the «Архив» chat with what happened, then its album (and the status reply)
+    leave the employee's topic — each step once: a repeat does only what failed, never a second archive copy."""
+    from aiogram.exceptions import TelegramAPIError
+    from aiogram.types import BufferedInputFile, InputMediaPhoto
+
+    task = get(conn, task_id)
+    if task is None or task["status"] != "deleted" or bot is None:
+        return task
+    if task["archive_state"] != "done":
+        chat = app_settings.get_raw(conn, "archive_chat_id")
+        state, ids = "failed", None
+        if chat:
+            have = {r["stage"]: dict(r) for r in conn.execute(
+                "SELECT * FROM alice_photos WHERE task_id = ? AND (file_id IS NOT NULL OR temp_path IS NOT NULL) ORDER BY id",
+                (task_id,))}
+            by = svc.get_user_by_tg(conn, task["deleted_by"]) if task["deleted_by"] else None
+            text = (f"#алиса #удаление 🗑 <b>{title(task_id)} удалена</b>\n👤 {_person(conn, task)}\n"
+                    f"🔳 QR: {escape(qr_label(task))}\n🔎 «{escape(task['query'])}»\n"
+                    f"Удалил(а): {escape(svc.full_name(by)) if by else '—'}\n"
+                    f"Причина: {escape(task['delete_reason'] or 'не указана')}\n"
+                    f"🕒 {datetime.fromisoformat(task['deleted_at']).strftime('%d.%m.%Y %H:%M')} (МСК)")
+            media_items = []
+            for s in sorted(have):
+                p = have[s]
+                src = p["file_id"] or (BufferedInputFile(Path(p["temp_path"]).read_bytes(), filename=f"{task_id}_{s}.jpg")
+                                       if p["temp_path"] and Path(p["temp_path"]).is_file() else None)
+                if src is not None:
+                    media_items.append(InputMediaPhoto(media=src, caption=text if not media_items else
+                                                       f"{title(task_id)} · фото {s}/3 — {STAGES[s][0]}", parse_mode="HTML"))
+            try:
+                if media_items:
+                    sent = await bot.send_media_group(int(chat), media=media_items)
+                    ids = [m.message_id for m in sent]
+                else:
+                    msg = await bot.send_message(int(chat), text + "\n(фото не сохранились)", parse_mode="HTML")
+                    ids = [msg.message_id]
+                state = "done"
+            except TelegramAPIError as exc:
+                log_event_safe(conn, task, "ALICE_ARCHIVE_FAILED", str(exc)[:200])
+        with transaction(conn):
+            conn.execute("UPDATE alice_tasks SET archive_state = ?, archive_message_ids = ? WHERE id = ?",
+                         (state, json.dumps(ids) if ids else None, task_id))
+        task = get(conn, task_id)
+    if task["archive_state"] == "done" and task["unpublish_state"] in ("pending", "failed"):
+        ids = json.loads(task["message_ids"] or "[]") + ([task["status_message_id"]] if task["status_message_id"] else [])
+        state = "done"
+        try:  # a bot-admin with «Удаление сообщений» may delete them in a group, old ones too
+            await bot.delete_messages(task["chat_id"], ids)
+        except TelegramAPIError as exc:
+            state = "failed"
+            log_event_safe(conn, task, "ALICE_UNPUBLISH_FAILED", str(exc)[:200])
+        with transaction(conn):
+            conn.execute("UPDATE alice_tasks SET unpublish_state = ? WHERE id = ?", (state, task_id))
+    return get(conn, task_id)
+
+
+def log_event_safe(conn, task: dict, event: str, error: str) -> None:
+    with transaction(conn):
+        log_event(conn, user_id=task["user_id"], actor_id=0, event_type=event, key=svc.new_key(),
+                  new={"task": task["id"]}, description=error)

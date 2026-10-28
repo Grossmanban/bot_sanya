@@ -45,6 +45,7 @@ const COUNTS: { key: keyof AliceCounts; label: string; tone: string }[] = [
   { key: "rejected", label: "Отклонено", tone: "text-cancel" },
   { key: "accepted", label: "Принято, ожидает оплаты", tone: "text-go" },
   { key: "paid", label: "Оплачено", tone: "text-go" },
+  { key: "yandex_rejected", label: "Отклонено Яндексом", tone: "text-cancel" },
 ];
 
 function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; working: boolean; onOpenProfile?: () => void }) {
@@ -135,7 +136,7 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
           {COUNTS.map((c) => (
             <div key={c.key} className="rounded-2xl bg-muted/60 p-3">
               <dt className="text-xs text-muted-foreground">{c.label}</dt>
-              <dd className={cn("font-display text-2xl font-semibold tabular", c.tone)}>{s[c.key]}</dd>
+              <dd className={cn("font-display text-2xl font-semibold tabular", c.tone)}>{s[c.key] ?? 0}</dd>
             </div>
           ))}
         </dl>
@@ -166,7 +167,7 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
 }
 
 export function StatusChip({ task }: { task: AliceTask }) {
-  const tone = task.status === "rejected" || task.status === "send_failed" ? "bg-cancel-soft text-cancel"
+  const tone = task.status === "rejected" || task.status === "send_failed" || task.status === "yandex_rejected" ? "bg-cancel-soft text-cancel"
     : task.status === "accepted" || task.status === "paid" ? "bg-go-soft text-go" : "bg-wait-soft text-wait";
   return <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", tone)}>{task.status_title}</span>;
 }

@@ -292,6 +292,10 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
   const [day, setDay] = useState(moscowToday());
   const pieceMode = type === "deduction" && inPieces;
   const [uploaded, setUploaded] = useState<{ blob: Blob; id: string } | null>(null);
+  // ТЗ 28.10 §24: a fine for «Алиса» (owners and admins), optionally for one task «Алиса #N»
+  const canAlice = useCan("alice");
+  const [alice, setAlice] = useState(false);
+  const [taskNo, setTaskNo] = useState("");
   const { busy, run } = useAction();
   const n = Number(amount);
   if (types.length === 0) return null;
@@ -309,7 +313,8 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
           const out = await api.admin.pieceDeduction({ user_id: userId, day, pieces: n, reason: reason.trim(), media_file_id: media }, k);
           return { tx: out.items[0], trainer: out.items[1] };
         }
-        return { ...(await api.admin.createTx(userId, type, type === "fine" ? { units: n } : { amount: n }, reason.trim(), k, media)),
+        const product = type === "fine" && alice ? { product: "alice" as const, alice_task_id: taskNo ? Number(taskNo) : null } : {};
+        return { ...(await api.admin.createTx(userId, type, type === "fine" ? { units: n, ...product } : { amount: n }, reason.trim(), k, media)),
           trainer: undefined };
       });
       if (res && pieceMode) {
@@ -364,6 +369,20 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
             Сумма = штуки × ставка сотрудника за этот день; у тренера сети — штуки × его ставка лестницы за этот день.
             Оба увидят минус в рублях.
           </p>
+        </div>
+      )}
+      {type === "fine" && canAlice && (
+        <div className="flex flex-wrap items-center gap-2">
+          {([[false, "За смены"], [true, "За «Алису»"]] as const).map(([v, label]) => (
+            <button key={label} type="button" onClick={() => setAlice(v)}
+                    className={cn("press rounded-full px-3.5 py-1.5 text-sm font-semibold", alice === v ? "bg-primary text-primary-foreground" : "bg-muted")}>
+              {label}
+            </button>
+          ))}
+          {alice && (
+            <input inputMode="numeric" className={cn(input, "w-36 flex-none")} placeholder="Задание # (необяз.)" value={taskNo}
+                   onChange={(e) => setTaskNo(e.target.value.replace(/\D/g, "").slice(0, 9))} />
+          )}
         </div>
       )}
       {type === "fine" ? <FineUnits value={amount} onChange={setAmount} /> : (

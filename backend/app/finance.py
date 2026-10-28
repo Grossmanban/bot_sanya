@@ -119,6 +119,10 @@ def public(tx: dict, names: dict[int, str] | None = None) -> dict:
         "pieces": tx.get("pieces"),
         "rate": tx.get("rate"),
         "linked_tx_id": tx.get("linked_tx_id"),
+        # ТЗ 28.10 §24: a fine for «Алиса» (and its task), and which payout took it
+        "product": tx.get("product"),
+        "alice_task_id": tx.get("alice_task_id"),
+        "payout_id": tx.get("payout_id"),
     }
 
 
@@ -336,8 +340,15 @@ def _target(conn, user_id: int) -> dict:
 
 
 def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amount: int | None, reason: str, key: str,
-           event_date: date | None = None, media: str | None = None, units: int | None = None) -> TxResult:
-    """Manual fine in units (trainer: needs an approval), bonus (any staff for their people), deduction (owner)."""
+           event_date: date | None = None, media: str | None = None, units: int | None = None,
+           product: str | None = None, alice_task_id: int | None = None) -> TxResult:
+    """Manual fine in units (trainer: needs an approval), bonus (any staff for their people), deduction (owner).
+    ТЗ 28.10 §24: a fine may be for the product «Алиса», optionally for one task — owners and admins only (В49);
+    it is one debt with the other fines and is taken by whichever payout comes first (В48)."""
+    if product is not None and product != "alice":
+        raise ServiceError("Неизвестный продукт", 422, "bad_product")
+    if alice_task_id is not None and product is None:
+        product = "alice"
     if type not in TYPES:
         raise ServiceError("Неизвестный тип", 422, "bad_type")
     if type == "fine":
@@ -367,6 +378,15 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
             status = "active"
         if event_date and event_date > today_local():
             raise ServiceError("Дата не может быть в будущем", 422, "bad_date")
+        if product:
+            if type != "fine":
+                raise ServiceError("За продукт назначается штраф", 422, "bad_type")
+            if not perms.can(actor, "alice"):
+                raise ServiceError("Штраф за «Алису» назначают владелец и администраторы", 403, "forbidden")
+            if alice_task_id is not None:
+                task = conn.execute("SELECT user_id FROM alice_tasks WHERE id = ?", (alice_task_id,)).fetchone()
+                if task is None or task[0] != user_id:
+                    raise ServiceError(f"Задание «Алиса #{alice_task_id}» не найдено у этого сотрудника", 422, "bad_task")
         day = (event_date or today_local()).isoformat()
         if type == "fine":
             tx = record_fine(conn, user_id=user_id, units=units, reason=reason, actor_tg=actor["telegram_id"],
@@ -374,6 +394,10 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
         else:
             tx = record(conn, user_id=user_id, type=type, amount=amount, reason=reason, actor_tg=actor["telegram_id"],
                         status=status, event_date=day, media=media)
+        if product:
+            conn.execute("UPDATE financial_transactions SET product = ?, alice_task_id = ? WHERE id = ?",
+                         (product, alice_task_id, tx["id"]))
+            tx = {**tx, "product": product, "alice_task_id": alice_task_id}
         event = f"{type.upper()}_{'REQUESTED' if status == 'pending_admin_approval' else 'CREATED'}"
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
                   new={"tx": tx["id"], "amount": tx["amount"], "units": tx["pieces"], "status": status}, description=reason)

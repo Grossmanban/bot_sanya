@@ -169,7 +169,7 @@ def _lazy_since(conn, user_id: int) -> str | None:
     """The last day paid before the pool existed: those payouts already paid lazy days at the lazy rate."""
     row = conn.execute(
         """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id
-           WHERE i.user_id = ? AND i.lazy_before IS NULL AND b.product IS NULL""", (user_id,)).fetchone()
+           WHERE i.user_id = ? AND i.lazy_before IS NULL AND b.product IS NULL AND i.voided = 0""", (user_id,)).fetchone()
     return row[0]
 
 
@@ -183,7 +183,9 @@ def lazy_pool(conn: sqlite3.Connection, user_id: int, threshold: int, upto: date
         f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND status IN {ACTIVE}
             AND report_state = 'approved' AND training = 0 AND fact_volume IS NOT NULL AND fact_volume < ?
             AND shift_date > ? AND shift_date <= ?""", (user_id, threshold, since, upto.isoformat())).fetchone()[0]
-    taken = conn.execute("SELECT COALESCE(SUM(lazy_units), 0) FROM payout_items WHERE user_id = ?", (user_id,)).fetchone()[0]
+    # an edited or annulled payout gives its lazy pieces back (ТЗ 28.10 §25): only live rows count
+    taken = conn.execute("SELECT COALESCE(SUM(lazy_units), 0) FROM payout_items WHERE user_id = ? AND voided = 0",
+                         (user_id,)).fetchone()[0]
     return max(0, accrued - taken)
 
 
@@ -201,7 +203,7 @@ def employee_view(conn: sqlite3.Connection, user_id: int, today: date) -> dict:
     Pieces, not rubles: the payout may come out lower (fines, the pool, deductions)."""
     paid_through = conn.execute(
         """SELECT MAX(b.period_to) FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id
-           WHERE i.user_id = ? AND b.product IS NULL""",  # a product's payout (§41) pays executions, not pieces
+           WHERE i.user_id = ? AND b.product IS NULL AND i.voided = 0""",  # a product's payout pays executions
         (user_id,)).fetchone()[0] or ""
     pieces = conn.execute(
         f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND status IN {ACTIVE}
@@ -309,6 +311,69 @@ def settle(base: int, money: list[dict]) -> dict:
             "has_deductions": any(t["type"] == "deduction" for t in money)}
 
 
+def batch_by_key(conn: sqlite3.Connection, key: str) -> int | None:
+    """The payout a repeated «Зафиксировать» already made (never just «the last one» — ТЗ 28.10 §25)."""
+    row = conn.execute("SELECT new_value FROM event_logs WHERE idempotency_key = ?", (key,)).fetchone()
+    return json.loads(row[0] or "{}").get("batch") if row else None
+
+
+def _overlap(conn, user_ids: list[int], date_from: date, date_to: date, exclude: int | None = None) -> list[str]:
+    """В55: a live regular payout of the same person over the same days would pay the same pieces twice."""
+    if not user_ids:
+        return []
+    rows = conn.execute(
+        f"""SELECT DISTINCT i.user_id, b.id, b.title FROM payout_items i JOIN payout_batches b ON b.id = i.batch_id
+            WHERE b.product IS NULL AND b.status != 'annulled' AND i.voided = 0 AND b.id != ?
+            AND b.period_from <= ? AND b.period_to >= ? AND i.user_id IN ({','.join('?' * len(user_ids))})""",
+        (exclude or 0, date_to.isoformat(), date_from.isoformat(), *user_ids)).fetchall()
+    return [f"{svc.full_name(svc.get_user(conn, r[0]))} — уже в выплате №{r[1]} «{r[2]}»" for r in rows]
+
+
+def _write_regular(conn, actor: dict, batch_id: int, rows: list[dict], picked: dict, date_from: date, date_to: date) -> int:
+    """The items and the settled money of a regular payout (a new one, or a new version of an edited one)."""
+    grand = 0
+    for r in rows:
+        override = picked[r["user_id"]].get("base_override")
+        if override is not None:
+            if isinstance(override, bool) or not isinstance(override, int) or not 0 <= override <= 10_000_000:
+                raise ServiceError("База — целое число рублей", 422, "bad_base")
+            money = [finance.get(conn, t) for t in r["tx_ids"]] + [
+                t for t in _open_money(conn, r["user_id"], date_to) if t["id"] not in r["tx_ids"]]
+            r = {**r, **settle(override, sorted(money, key=lambda t: (t["event_date"], t["id"])))}
+        base = override if override is not None else r["base_calc"]
+        conn.execute(
+            """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
+                   team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
+                   lazy_units, lazy_before, rate_base, rate_lazy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (batch_id, r["user_id"], r["role"], r["network"], r["phone"], r["bank"], r["recipient"], r["personal_volume"],
+             r["team_volume"], r["base_calc"], base, r["bonuses"], r["fines"], r["deductions"], r["total"],
+             r["carried_debt"], r["pieces_pay"], r["commission"],
+             # the pool is written off here, inside the payout's transaction — never by a preview
+             r["lazy_units"], r["lazy_before"], r["rate_base"], r["rate_lazy"]),
+        )
+        settle_txs(conn, batch_id, r["tx_ids"], actor)
+        grand += r["total"]
+    return grand
+
+
+def settle_txs(conn, batch_id: int, tx_ids: list[int], actor: dict) -> None:
+    """Fines, deductions and bonuses taken by a payout: «учтён в выплате». Who approved a fine stays (§25)."""
+    if tx_ids:
+        conn.execute(
+            f"""UPDATE financial_transactions SET status = 'offset', payout_id = ?, settled_by = ?, settled_at = ?
+                WHERE id IN ({','.join('?' * len(tx_ids))}) AND status = 'active'""",
+            (batch_id, actor["telegram_id"], now_iso(), *tx_ids))
+
+
+def _check_rows(rows: list[dict], picked: dict) -> None:
+    no_details = [r["name"] for r in rows if r["phone"] is None
+                  and (picked[r["user_id"]].get("base_override") or r["total"]) > 0]
+    if no_details:  # ТЗ 28.10 §7 (В21): money goes only to approved payment details
+        raise ServiceError("Нет одобренных реквизитов: " + ", ".join(no_details) +
+                           ". Одобрите их или уберите людей из выплаты", 409, "no_requisites")
+
+
 def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, date_to: date, rates: Rates,
            network_id: int | None, choices: list[dict], proof: list[str], deduction_proof: list[str], key: str) -> dict:
     """«Зафиксировать выплату» (ТЗ 11.3): recalculated on the server; chosen people only; base may be overridden."""
@@ -321,57 +386,159 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
         raise ServiceError("Выберите хотя бы одного человека", 422, "nobody")
     with transaction(conn):
         if _seen(conn, key):
-            return dict(conn.execute("SELECT * FROM payout_batches ORDER BY id DESC LIMIT 1").fetchone())
+            done = batch_by_key(conn, key)
+            if done is None:
+                raise ServiceError("Выплата уже обрабатывается — обновите список", 409, "in_progress")
+            return {**batch(conn, done), "repeated": True}
         actor = _fresh_actor(conn, actor)
         if not perms.can(actor, "money"):
             raise ServiceError("Выплаты фиксирует только владелец", 403, "owner_only")
         rows = [r for r in calculate(conn, date_from, date_to, rates, network_id) if r["user_id"] in picked]
         if not rows:
             raise ServiceError("Нечего выплачивать за этот период", 409, "nothing")
-        no_details = [r["name"] for r in rows if r["phone"] is None
-                      and (picked[r["user_id"]].get("base_override") or r["total"]) > 0]
-        if no_details:  # ТЗ 28.10 §7 (В21): money goes only to approved payment details
-            raise ServiceError("Нет одобренных реквизитов: " + ", ".join(no_details) +
-                               ". Одобрите их или уберите людей из выплаты", 409, "no_requisites")
+        _check_rows(rows, picked)
+        clash = _overlap(conn, [r["user_id"] for r in rows], date_from, date_to)
+        if clash:
+            raise ServiceError("Период пересекается с действующей выплатой: " + "; ".join(clash[:5]), 409, "overlap")
         cur = conn.execute(
             """INSERT INTO payout_batches (title, period_from, period_to, network_id, rates, proof_media, deduction_media,
                                            total, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
             (title, date_from.isoformat(), date_to.isoformat(), network_id, json.dumps(rates.as_dict()),
              json.dumps(proof[:10]), json.dumps(deduction_proof[:10]), actor["telegram_id"], now_iso()),
         )
-        batch_id, grand = cur.lastrowid, 0
-        for r in rows:
-            override = picked[r["user_id"]].get("base_override")
-            if override is not None:
-                if isinstance(override, bool) or not isinstance(override, int) or not 0 <= override <= 10_000_000:
-                    raise ServiceError("База — целое число рублей", 422, "bad_base")
-                money = [finance.get(conn, t) for t in r["tx_ids"]] + [
-                    t for t in _open_money(conn, r["user_id"], date_to) if t["id"] not in r["tx_ids"]]
-                r = {**r, **settle(override, sorted(money, key=lambda t: (t["event_date"], t["id"])))}
-            base = override if override is not None else r["base_calc"]
-            conn.execute(
-                """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
-                       team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
-                       lazy_units, lazy_before, rate_base, rate_lazy)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (batch_id, r["user_id"], r["role"], r["network"], r["phone"], r["bank"], r["recipient"], r["personal_volume"],
-                 r["team_volume"], r["base_calc"], base, r["bonuses"], r["fines"], r["deductions"], r["total"],
-                 r["carried_debt"], r["pieces_pay"], r["commission"],
-                 # the pool is written off here, inside the payout's transaction — never by a preview
-                 r["lazy_units"], r["lazy_before"], r["rate_base"], r["rate_lazy"]),
-            )
-            if r["tx_ids"]:
-                conn.execute(
-                    f"""UPDATE financial_transactions SET status = 'offset', payout_id = ?, decided_by = ?, decided_at = ?
-                        WHERE id IN ({','.join('?' * len(r['tx_ids']))}) AND status = 'active'""",
-                    (batch_id, actor["telegram_id"], now_iso(), *r["tx_ids"]))
-            grand += r["total"]
-        committed = [dict(i) for i in conn.execute("SELECT * FROM payout_items WHERE batch_id = ?", (batch_id,))]
+        batch_id = cur.lastrowid
+        grand = _write_regular(conn, actor, batch_id, rows, picked, date_from, date_to)
+        committed = [dict(i) for i in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = 0", (batch_id,))]
         conn.execute("UPDATE payout_batches SET total = ?, summary = ? WHERE id = ?",
                      (grand, json.dumps(summary(conn, committed, date_from, date_to, network_id)), batch_id))
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="PAYOUT_COMMITTED", key=key,
                   new={"batch": batch_id, "total": grand, "people": len(rows)}, description=title)
     return batch(conn, batch_id)
+
+
+# ---------------------------------------------------------------- edit and annul (ТЗ 28.10 §25)
+
+
+def _live(conn, batch_id: int) -> dict:
+    b = conn.execute("SELECT * FROM payout_batches WHERE id = ?", (batch_id,)).fetchone()
+    if b is None:
+        raise ServiceError("Выплата не найдена", 404, "not_found")
+    if b["status"] == "annulled":
+        raise ServiceError("Выплата уже аннулирована", 409, "annulled")
+    return dict(b)
+
+
+def _later(conn, b: dict) -> list[str]:
+    """В53: only the latest payout of these people (for «Алиса» — of these QR codes) may change: a later one was
+    counted on top of it (the lazy pool, debts, paid tasks)."""
+    if b["product"] == "alice":
+        rows = conn.execute(
+            """SELECT DISTINCT b2.id, b2.title FROM alice_tasks t JOIN alice_tasks t2 ON t2.qr_id = t.qr_id
+               JOIN payout_batches b2 ON b2.id = t2.payout_id WHERE t.payout_id = ? AND b2.id > ? AND b2.status != 'annulled'""",
+            (b["id"], b["id"])).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT DISTINCT b2.id, b2.title FROM payout_items i JOIN payout_items i2 ON i2.user_id = i.user_id AND i2.voided = 0
+               JOIN payout_batches b2 ON b2.id = i2.batch_id WHERE i.batch_id = ? AND i.voided = 0 AND b2.id > ?
+               AND b2.status != 'annulled' AND (b2.product IS NULL) = (? IS NULL)""",
+            (b["id"], b["id"], b["product"])).fetchall()
+    return [f"№{r[0]} «{r[1]}»" for r in rows]
+
+
+def revert(conn, b: dict, voided: int) -> None:
+    """Undo what a payout did, inside the caller's transaction: its money back to active (to be taken again only
+    once), its lazy pieces back to the pool, its «Алиса» tasks back to «Принято, ожидает оплаты»."""
+    conn.execute("""UPDATE financial_transactions SET status = 'active', payout_id = NULL, settled_by = NULL, settled_at = NULL
+                    WHERE payout_id = ? AND status = 'offset'""", (b["id"],))
+    conn.execute("UPDATE payout_items SET voided = ? WHERE batch_id = ? AND voided = 0", (voided, b["id"]))
+    conn.execute("""UPDATE alice_tasks SET status = 'accepted', payout_id = NULL, paid_at = NULL
+                    WHERE payout_id = ? AND status IN ('paid', 'yandex_rejected')""", (b["id"],))
+
+
+def snapshot(conn, b: dict, actor: dict, note: str | None) -> None:
+    items = [dict(r) for r in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = 0", (b["id"],))]
+    tasks = [dict(r) for r in conn.execute("SELECT id, status FROM alice_tasks WHERE payout_id = ?", (b["id"],))]
+    conn.execute("""INSERT INTO payout_versions (batch_id, version, snapshot, created_at, created_by, note)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                 (b["id"], b["version"], json.dumps({"batch": {k: b[k] for k in ("title", "total", "rates", "summary")},
+                                                     "items": items, "tasks": tasks}, ensure_ascii=False),
+                  now_iso(), actor["telegram_id"], note))
+
+
+def edit(conn: sqlite3.Connection, actor: dict, batch_id: int, choices: list[dict], key: str, note: str | None = None) -> dict:
+    """§25: the same payout, recalculated — who is in it and the base; the money taken is redone (only the current
+    deductions, each once); the previous version is kept."""
+    _check_key(key)
+    picked = {c["user_id"]: c for c in choices if c.get("include", True)}
+    if not picked:
+        raise ServiceError("Выберите хотя бы одного человека", 422, "nobody")
+    with transaction(conn):
+        if _seen(conn, key):
+            return batch(conn, batch_id)
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "money"):
+            raise ServiceError("Выплаты меняет только владелец", 403, "owner_only")
+        b = _live(conn, batch_id)
+        if b["product"]:
+            raise ServiceError("Выплату «Алисы» меняют в её мастере", 409, "wrong_kind")
+        later = _later(conn, b)
+        if later:
+            raise ServiceError("Сначала измените более позднюю выплату: " + ", ".join(later), 409, "not_latest")
+        snapshot(conn, b, actor, note)
+        revert(conn, b, 1)
+        date_from, date_to = date.fromisoformat(b["period_from"]), date.fromisoformat(b["period_to"])
+        rows = [r for r in calculate(conn, date_from, date_to, Rates.from_dict(json.loads(b["rates"])), b["network_id"])
+                if r["user_id"] in picked]
+        if not rows:
+            raise ServiceError("Нечего выплачивать за этот период", 409, "nothing")
+        _check_rows(rows, picked)
+        clash = _overlap(conn, [r["user_id"] for r in rows], date_from, date_to, exclude=batch_id)
+        if clash:
+            raise ServiceError("Период пересекается с действующей выплатой: " + "; ".join(clash[:5]), 409, "overlap")
+        grand = _write_regular(conn, actor, batch_id, rows, picked, date_from, date_to)
+        committed = [dict(i) for i in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = 0", (batch_id,))]
+        conn.execute("""UPDATE payout_batches SET total = ?, summary = ?, version = version + 1, updated_at = ?, updated_by = ?
+                        WHERE id = ?""",
+                     (grand, json.dumps(summary(conn, committed, date_from, date_to, b["network_id"])), now_iso(),
+                      actor["telegram_id"], batch_id))
+        log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="PAYOUT_EDITED", key=key,
+                  old={"total": b["total"], "version": b["version"]}, new={"batch": batch_id, "total": grand}, description=note)
+    return batch(conn, batch_id)
+
+
+def annul(conn: sqlite3.Connection, actor: dict, batch_id: int, reason: str | None, money_sent: bool, key: str) -> tuple[dict, list[dict]]:
+    """«Аннулировать выплату» (§25): status «Аннулирована», into «Архив», nothing deleted. Its fines, deductions
+    and lazy pieces count again from the next payout; «Алиса» tasks wait for payment again. Money already sent
+    (В54): a deduction «Переплата по выплате №…» per person — the usual correction, not a silent refund.
+    Returns (batch, the deductions made)."""
+    from . import templates
+
+    reason = templates.require_reason(reason, "Укажите причину аннулирования")
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return batch(conn, batch_id), []
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "money"):
+            raise ServiceError("Аннулирует выплату только владелец", 403, "owner_only")
+        b = _live(conn, batch_id)
+        later = _later(conn, b)
+        if later:
+            raise ServiceError("Сначала аннулируйте более позднюю выплату: " + ", ".join(later), 409, "not_latest")
+        items = [dict(r) for r in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = 0", (batch_id,))]
+        revert(conn, b, 2)
+        conn.execute("""UPDATE payout_batches SET status = 'annulled', annulled_at = ?, annulled_by = ?, annul_reason = ?,
+                        money_sent = ? WHERE id = ?""", (now_iso(), actor["telegram_id"], reason, int(money_sent), batch_id))
+        log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="PAYOUT_ANNULLED", key=key,
+                  new={"batch": batch_id, "total": b["total"], "money_sent": money_sent}, description=reason)
+    made = []
+    if money_sent:
+        for it in items:
+            if it["total"] > 0:
+                made.append(finance.create(conn, actor, it["user_id"], "deduction", it["total"],
+                                           f"Переплата по аннулированной выплате №{batch_id} «{b['title']}»",
+                                           f"{key}:{it['user_id']}").tx)
+    return batch(conn, batch_id), made
 
 
 def batch(conn: sqlite3.Connection, batch_id: int) -> dict | None:
@@ -383,15 +550,27 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> dict | None:
     b["proof_media"] = json.loads(b["proof_media"])
     b["deduction_media"] = json.loads(b["deduction_media"])
     b["summary"] = json.loads(b["summary"]) if b.get("summary") else None
+    shown = 2 if b["status"] == "annulled" else 0  # an annulled payout keeps showing what it was
     b["items"] = [{**dict(r), "name": svc.full_name(svc.get_user(conn, r["user_id"]))}
-                  for r in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? ORDER BY id", (batch_id,))]
+                  for r in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = ? ORDER BY id",
+                                        (batch_id, shown))]
+    names = {r["telegram_id"]: svc.full_name(dict(r)) for r in conn.execute("SELECT telegram_id, first_name, last_name FROM users")}
+    b["annulled_by_name"] = names.get(b.get("annulled_by")) if b.get("annulled_by") else None
+    b["versions"] = [{"version": r["version"], "created_at": r["created_at"], "by": names.get(r["created_by"]), "note": r["note"]}
+                     for r in conn.execute("SELECT * FROM payout_versions WHERE batch_id = ? ORDER BY version DESC", (batch_id,))]
+    if b.get("product") == "alice":
+        b["tasks"] = [{"id": r["id"], "status": r["status"], "user_id": r["user_id"]} for r in conn.execute(
+            "SELECT id, status, user_id FROM alice_tasks WHERE payout_id = ? ORDER BY id", (batch_id,))]
     return b
 
 
-def history(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
+def history(conn: sqlite3.Connection, limit: int = 60) -> list[dict]:
+    """The registry; annulled payouts go to its «Архив» (the client splits by status)."""
     return [{**dict(r), "people": r["people"]} for r in conn.execute(
-        """SELECT b.id, b.title, b.period_from, b.period_to, b.total, b.created_at, b.product,
-                  (SELECT COUNT(*) FROM payout_items i WHERE i.batch_id = b.id) AS people
+        """SELECT b.id, b.title, b.period_from, b.period_to, b.total, b.created_at, b.product, b.status, b.version,
+                  b.annulled_at, b.annul_reason,
+                  (SELECT COUNT(*) FROM payout_items i WHERE i.batch_id = b.id
+                   AND i.voided = CASE WHEN b.status = 'annulled' THEN 2 ELSE 0 END) AS people
            FROM payout_batches b ORDER BY b.id DESC LIMIT ?""", (limit,))]
 
 

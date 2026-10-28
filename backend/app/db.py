@@ -1313,6 +1313,52 @@ ALTER TABLE alice_tasks ADD COLUMN send_claimed_at TEXT;
 """)
 
 
+def _widen_check(conn: sqlite3.Connection, table: str, old: str, new: str) -> None:
+    """Rebuild a table whose CHECK must allow more values: its own SQL with the list widened, the rows copied,
+    the indexes recreated (SQLite can't change a CHECK in place). Foreign keys are off during migrations."""
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()[0]
+    if old not in sql:
+        raise RuntimeError(f"{table}: CHECK {old} not found")
+    indexes = [r[0] for r in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", (table,))]
+    columns = ", ".join(r[1] for r in conn.execute(f"PRAGMA table_info({table})"))
+    conn.execute(sql.replace(old, new, 1).replace(f"CREATE TABLE {table}", f"CREATE TABLE {table}__new", 1)
+                 .replace(f'CREATE TABLE "{table}"', f"CREATE TABLE {table}__new", 1))
+    conn.execute(f"INSERT INTO {table}__new ({columns}) SELECT {columns} FROM {table}")
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {table}__new RENAME TO {table}")
+    for index in indexes:
+        conn.execute(index)
+
+
+def _alice_money(conn: sqlite3.Connection) -> None:
+    """Migration 37 — ТЗ 28.10 §23–§25: «Алиса» tasks may be «Отклонено Яндексом» or deleted (softly, with the
+    archive and the group cleanup tracked); payouts may be edited (versions) and annulled (kept, voided);
+    a fine may be tied to «Алиса» and a task; settling a fine no longer overwrites who approved it."""
+    _widen_check(conn, "alice_tasks", "'abandoned'", "'abandoned','yandex_rejected','deleted'")
+    for column in ("deleted_at TEXT", "deleted_by INTEGER", "delete_reason TEXT", "archive_state TEXT",
+                   "archive_message_ids TEXT", "unpublish_state TEXT", "status_message_id INTEGER"):
+        conn.execute(f"ALTER TABLE alice_tasks ADD COLUMN {column}")
+    _widen_check(conn, "payout_batches", "IN ('processed')", "IN ('processed','annulled')")
+    for column in ("annulled_at TEXT", "annulled_by INTEGER", "annul_reason TEXT", "money_sent INTEGER",
+                   "version INTEGER NOT NULL DEFAULT 1", "updated_at TEXT", "updated_by INTEGER"):
+        conn.execute(f"ALTER TABLE payout_batches ADD COLUMN {column}")
+    conn.execute("ALTER TABLE payout_items ADD COLUMN voided INTEGER NOT NULL DEFAULT 0")  # 1 — an older version, 2 — annulled
+    conn.execute("""CREATE TABLE payout_versions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id    INTEGER NOT NULL REFERENCES payout_batches(id),
+        version     INTEGER NOT NULL,
+        snapshot    TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        created_by  INTEGER,
+        note        TEXT)""")
+    for column in ("product TEXT", "alice_task_id INTEGER", "settled_at TEXT", "settled_by INTEGER"):
+        conn.execute(f"ALTER TABLE financial_transactions ADD COLUMN {column}")
+
+
+MIGRATIONS.append(_alice_money)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

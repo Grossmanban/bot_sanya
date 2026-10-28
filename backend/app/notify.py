@@ -1239,6 +1239,53 @@ class Notifier:
         await self.archive(["выплата", "алиса"], f"💰 Выплата «{escape(batch['title'])}» по «Алисе»: "
                                                  f"{len(batch['items'])} чел., {batch['total']} ₽")
 
+    async def alice_deleted(self, task: dict, actor: dict) -> None:
+        """§23: the executor is told; a part that didn't work (archive, the group) is reported to the admins."""
+        from . import alice
+
+        user = svc.get_user(self.conn, task["user_id"])
+        why = f"\nПричина: {escape(task['delete_reason'])}" if task["delete_reason"] else ""
+        await self.send(user["telegram_id"], f"🗑 Ваша {alice.title(task['id'])} удалена администратором.{why}")
+        problems = []
+        if task["archive_state"] != "done":
+            problems.append("фото не попали в «Архив» (подключён ли архивный чат?)")
+        if task["unpublish_state"] == "failed":
+            problems.append("публикация не удалена из темы (нужно право бота «Удаление сообщений»)")
+        if problems:
+            await self.send(actor["telegram_id"], f"⚠️ {alice.title(task['id'])} удалена, но: " + "; ".join(problems)
+                            + ". Нажмите «Удалить» ещё раз — бот повторит только то, что не получилось.")
+
+    async def payout_changed(self, before: dict, batch: dict, actor: dict) -> None:
+        old = {i["user_id"]: i["total"] for i in before["items"]}
+        lines = [f"✏️ <b>ВЫПЛАТА ИЗМЕНЕНА: {escape(batch['title'])}</b> (№{batch['id']}, версия {batch['version']})",
+                 f"Итого: {before['total']} → {batch['total']} ₽", f"Изменил: {who(actor)}"]
+        for it in batch["items"]:
+            if old.get(it["user_id"]) != it["total"]:
+                lines.append(f"• {escape(it['name'])}: {old.get(it['user_id'], 0)} → {it['total']} ₽")
+                user = svc.get_user(self.conn, it["user_id"])
+                await self.send(user["telegram_id"], f"✏️ Выплата «{escape(batch['title'])}» пересчитана: {it['total']} ₽.")
+        for uid in set(old) - {i["user_id"] for i in batch["items"]}:
+            user = svc.get_user(self.conn, uid)
+            lines.append(f"• {escape(svc.full_name(user))}: {old[uid]} → убран из выплаты")
+            await self.send(user["telegram_id"], f"✏️ Вы убраны из выплаты «{escape(batch['title'])}».")
+        await self.archive(["выплата", "изменение"], "\n".join(lines)[:3900])
+
+    async def payout_annulled(self, batch: dict, actor: dict, made: list[dict]) -> None:
+        """§25: «Аннулирована» — the archive keeps who, when and why; people learn it (and of an overpayment)."""
+        lines = [f"⛔ <b>ВЫПЛАТА АННУЛИРОВАНА: {escape(batch['title'])}</b> (№{batch['id']})",
+                 f"Сумма была: {batch['total']} ₽", f"Причина: {escape(batch['annul_reason'] or '')}",
+                 f"Аннулировал: {who(actor)}",
+                 "Деньги уже были переведены — каждому начислен вычет «Переплата»." if batch.get("money_sent")
+                 else "Деньги не переводились."]
+        await self.archive(["выплата", "аннулирование"], "\n".join(lines))
+        for it in batch["items"]:
+            user = svc.get_user(self.conn, it["user_id"])
+            await self.send(user["telegram_id"], f"⛔ Выплата «{escape(batch['title'])}» аннулирована."
+                                                 + (" Начислен вычет «Переплата» — он будет удержан из следующей выплаты."
+                                                    if batch.get("money_sent") and it["total"] > 0 else ""))
+        for tx in made:
+            await self.tx_created(tx, actor)
+
     async def group_invited(self, user: dict, kind: str, inv: dict) -> bool:
         """ТЗ 27.10 §27: the personal link goes to the person; the archive keeps the fact (not the link)."""
         from . import groups
@@ -1509,8 +1556,10 @@ class Notifier:
             await self.fine_requested(tx, actor)
             return
         if tx["type"] == "fine":
-            await self.send(user["telegram_id"], f"💸 Вам назначен штраф: {finance.units_text(tx)}.\nПричина: {reason}")
-            tags, line = ["штраф"], f"💸 ШТРАФ {finance.staff_text(tx)}"
+            what = ("" if not tx.get("product") else
+                    f" за «Алису»{' #' + str(tx['alice_task_id']) if tx.get('alice_task_id') else ''}")
+            await self.send(user["telegram_id"], f"💸 Вам назначен штраф{what}: {finance.units_text(tx)}.\nПричина: {reason}")
+            tags, line = (["штраф", "алиса"] if tx.get("product") else ["штраф"]), f"💸 ШТРАФ{what.upper()} {finance.staff_text(tx)}"
         elif tx["type"] == "bonus":
             await self.send(user["telegram_id"], f"🎁 Вам начислен бонус {amount} ₽.\nЗа что: {reason}")
             tags, line = ["бонус"], f"🎁 БОНУС {amount} ₽"

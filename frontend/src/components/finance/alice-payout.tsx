@@ -11,14 +11,18 @@ import { Uploads } from "./payouts-section";
 
 const field = "h-11 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
-/** ТЗ 27.10 §41–44: a «Яндекс Алиса» payout in the same registry. Yandex reports a number per QR code; it is spread
- * over the oldest accepted executions of that QR, the rest keeps waiting. No fines, no «налог на лень». */
-export function AlicePayout({ onClose }: { onClose: (id?: number) => void }) {
+/** ТЗ 27.10 §41–44, ТЗ 28.10 §25: an «Алиса» payout in the same registry. Yandex reports a number per QR code for the
+ * period; that many of the period's accepted tasks are paid (picked at random, the same on every reopening), the rest
+ * of the period become «Отклонено Яндексом». The person's open fines and deductions are taken too (one debt).
+ * edit — the same wizard changes an existing payout (a new version, no duplicate). */
+export function AlicePayout({ onClose, edit }: { onClose: (id?: number) => void;
+  edit?: { id: number; title: string; from: string; to: string; confirmed: Record<string, number> } }) {
   const today = moscowToday();
-  const [from, setFrom] = useState(`${today.slice(0, 8)}01`);
-  const [to, setTo] = useState(today);
-  const [title, setTitle] = useState("Яндекс Алиса");
-  const [confirmed, setConfirmed] = useState<Record<number, string>>({});
+  const [from, setFrom] = useState(edit?.from ?? `${today.slice(0, 8)}01`);
+  const [to, setTo] = useState(edit?.to ?? today);
+  const [title, setTitle] = useState(edit?.title ?? "Алиса");
+  const [confirmed, setConfirmed] = useState<Record<number, string>>(
+    () => Object.fromEntries(Object.entries(edit?.confirmed ?? {}).map(([k, v]) => [Number(k), String(v)])));
   const [plan, setPlan] = useState<AliceReconcile | null>(null);
   const [proof, setProof] = useState<string[]>([]);
   const { busy, run } = useAction();
@@ -37,8 +41,10 @@ export function AlicePayout({ onClose }: { onClose: (id?: number) => void }) {
 
   async function commit() {
     try {
-      const res = await run("commit", (k) => api.admin.alicePayoutCommit({ title, date_from: from, date_to: to, confirmed: numbers(),
-        proof_media: proof }, k), "Выплата зафиксирована");
+      const res = edit
+        ? await run("commit", (k) => api.admin.editPayout(edit.id, { confirmed: numbers() }, k), "Выплата пересчитана — новая версия")
+        : await run("commit", (k) => api.admin.alicePayoutCommit({ title, date_from: from, date_to: to, confirmed: numbers(),
+          proof_media: proof }, k), "Выплата зафиксирована");
       if (res) onClose(res.batch.id);
     } catch {
       /* toast shown */
@@ -49,19 +55,20 @@ export function AlicePayout({ onClose }: { onClose: (id?: number) => void }) {
     <div className="space-y-4">
       <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={() => onClose()}><ChevronLeft /> Отмена</Button>
       <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
-        <h2 className="font-display text-xl font-semibold">Выплата по «Яндекс Алисе»</h2>
+        <h2 className="font-display text-xl font-semibold">{edit ? `Изменить выплату №${edit.id}` : "Выплата по «Алисе»"}</h2>
         <p className="text-sm text-muted-foreground">
-          Учитываются только принятые выполнения этого продукта — без штрафов, налога на лень и обычных штук. Введите, сколько
-          подтвердил отчёт Яндекса по каждому QR-коду: оплачиваются самые старые принятые, остальные ждут следующей сверки.
-          Пока не нажата «Зафиксировать», ничего не меняется.
+          Учитываются принятые задания «Алисы», выполненные в выбранный период. Введите, сколько подтвердил отчёт Яндекса по
+          каждому QR-коду: столько заданий будут оплачены (выбираются случайно, при повторном открытии — те же), остальные задания
+          периода получат «Отклонено Яндексом». QR без числа не трогается. Штрафы и вычеты человека удерживаются — один общий долг,
+          без налога на лень. Пока не нажата «Зафиксировать», ничего не меняется.
         </p>
         <label className="block space-y-1.5"><span className="text-sm text-muted-foreground">Название</span>
           <input className={field} value={title} onChange={(e) => setTitle(e.target.value.slice(0, 100))} /></label>
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1.5"><span className="text-sm text-muted-foreground">С</span>
-            <input type="date" className={field} value={from} onChange={(e) => { setFrom(e.target.value); setPlan(null); }} /></label>
+            <input type="date" className={field} value={from} disabled={!!edit} onChange={(e) => { setFrom(e.target.value); setPlan(null); }} /></label>
           <label className="space-y-1.5"><span className="text-sm text-muted-foreground">По</span>
-            <input type="date" className={field} value={to} onChange={(e) => { setTo(e.target.value); setPlan(null); }} /></label>
+            <input type="date" className={field} value={to} disabled={!!edit} onChange={(e) => { setTo(e.target.value); setPlan(null); }} /></label>
         </div>
         <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy} onClick={() => preview()}>
           {busy === "calc" && <LoaderCircle className="animate-spin" />} Показать сверку
@@ -99,7 +106,8 @@ export function AlicePayout({ onClose }: { onClose: (id?: number) => void }) {
                       <div><dt className="text-muted-foreground">Принято за период</dt><dd className="font-semibold tabular">{r.accepted}</dd></div>
                       <div><dt className="text-muted-foreground">Уже оплачено</dt><dd className="font-semibold tabular">{r.paid}</dd></div>
                       <div><dt className="text-muted-foreground">Ждут оплаты</dt><dd className="font-semibold tabular">{r.waiting}</dd></div>
-                      <div><dt className="text-muted-foreground">Останется</dt><dd className="font-semibold tabular">{r.left}</dd></div>
+                      <div><dt className="text-muted-foreground">{r.confirmed == null ? "Без сверки" : "Отклонит Яндекс"}</dt>
+                        <dd className="font-semibold tabular">{r.confirmed == null ? r.left : r.yandex_rejected}</dd></div>
                     </dl>
                   </li>
                 ))}
@@ -107,20 +115,28 @@ export function AlicePayout({ onClose }: { onClose: (id?: number) => void }) {
             )}
           </section>
 
-          {plan.pay.length > 0 && (
+          {(plan.pay.length > 0 || plan.rejected.length > 0) && (
             <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
               <h3 className="font-semibold">К выплате</h3>
               <ul className="divide-y text-sm">
                 {plan.pay.map((p) => (
-                  <li key={p.user_id} className="flex justify-between py-2">
-                    <span>{p.name} · {p.count} × {rub(plan.rate)}</span>
-                    <span className="font-semibold tabular">{rub(p.amount)}</span>
+                  <li key={p.user_id} className="flex justify-between gap-3 py-2">
+                    <span className="min-w-0">
+                      {p.name} · {p.count} × {rub(plan.rate)}
+                      {(p.fines || p.deductions || p.bonuses) ? (
+                        <span className="block text-xs text-muted-foreground">
+                          {p.bonuses ? `бонусы +${rub(p.bonuses)} ` : ""}{p.fines ? `штрафы −${rub(p.fines)} ` : ""}{p.deductions ? `вычеты −${rub(p.deductions)}` : ""}
+                          {p.carried_debt ? ` · долг остаётся ${rub(p.carried_debt)}` : ""}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="font-semibold tabular">{rub(p.total)}</span>
                   </li>
                 ))}
               </ul>
-              <Uploads title="Основание выплаты" hint="Отчёт Яндекса, скриншот — до 10 файлов, по желанию" value={proof} onChange={setProof} />
+              {!edit && <Uploads title="Основание выплаты" hint="Отчёт Яндекса, скриншот — до 10 файлов, по желанию" value={proof} onChange={setProof} />}
               <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy || !title.trim()} onClick={commit}>
-                {busy === "commit" ? <LoaderCircle className="animate-spin" /> : <Wallet />} Зафиксировать {rub(plan.total)}
+                {busy === "commit" ? <LoaderCircle className="animate-spin" /> : <Wallet />} {edit ? "Сохранить изменения" : "Зафиксировать"} {rub(plan.total)}
               </Button>
             </section>
           )}

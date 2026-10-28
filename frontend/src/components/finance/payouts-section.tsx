@@ -1,7 +1,11 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check, ChevronLeft, ChevronRight, Copy, FileSpreadsheet, ImagePlus, LoaderCircle, Plus, X } from "lucide-react";
+import { AlertTriangle, Ban, Check, ChevronLeft, ChevronRight, Copy, FileSpreadsheet, ImagePlus, LoaderCircle, Pencil, Plus, X } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -13,6 +17,7 @@ import { haptic, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { TxForm } from "./money";
 import { AlicePayout } from "./alice-payout";
+import { ReasonChips } from "../reason-chips";
 
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 
@@ -20,12 +25,14 @@ const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline
 export function PayoutsSection() {
   const list = useLoad(() => api.admin.payouts(), []);
   const [mode, setMode] = useState<"list" | "new" | "alice" | number>("list");
+  const [archive, setArchive] = useState(false);
 
   if (mode === "new" && list.data) {
     return <Wizard defaults={list.data.rates} onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
   }
   if (mode === "alice") return <AlicePayout onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
-  if (typeof mode === "number") return <BatchView id={mode} onBack={() => setMode("list")} />;
+  if (typeof mode === "number") return <BatchView id={mode} onBack={async () => { await list.reload(); setMode("list"); }} />;
+  const shown = (list.data?.items ?? []).filter((b) => (b.status === "annulled") === archive);
 
   return (
     <div className="space-y-4">
@@ -41,23 +48,34 @@ export function PayoutsSection() {
         </Button>
         <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
                 disabled={!list.data} onClick={() => { tapHaptic(); setMode("alice"); }}>
-          По «Яндекс Алисе»
+          По «Алисе»
         </Button>
       </section>
-      {!list.data ? <Skeleton className="h-40 rounded-3xl" /> : list.data.items.length === 0 ? (
-        <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">Выплат ещё не было.</p>
+      <div className="flex gap-1 rounded-2xl bg-card p-1 shadow-lift">
+        {([[false, "Действующие"], [true, "Архив"]] as const).map(([a, label]) => (
+          <button key={label} onClick={() => setArchive(a)}
+                  className={cn("press h-10 flex-1 rounded-xl text-sm font-semibold", archive === a ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {!list.data ? <Skeleton className="h-40 rounded-3xl" /> : shown.length === 0 ? (
+        <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">
+          {archive ? "Аннулированных выплат нет." : "Выплат ещё не было."}
+        </p>
       ) : (
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <ul className="divide-y">
-            {list.data.items.map((b) => (
+            {shown.map((b) => (
               <li key={b.id}>
                 <button onClick={() => setMode(b.id)} className="press flex w-full items-center gap-3 px-5 py-3.5 text-left hover:bg-muted/60 md:px-6">
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">
-                      {b.title}{b.product === "alice" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· Яндекс Алиса</span>}
+                      №{b.id} {b.title}{b.product === "alice" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· Алиса</span>}
                     </span>
                     <span className="block text-xs text-muted-foreground">
                       {dayMonth(b.period_from)} – {dayMonth(b.period_to)} · {b.people} {plural(b.people, "человек", "человека", "человек")}
+                      {(b.version ?? 1) > 1 ? ` · версия ${b.version}` : ""}{b.status === "annulled" ? ` · аннулирована${b.annul_reason ? `: ${b.annul_reason}` : ""}` : ""}
                     </span>
                   </span>
                   <span className="font-display font-semibold tabular">{rub(b.total)}</span>
@@ -482,11 +500,19 @@ export function Uploads({ title, hint, value, onChange, max = 10 }: {
 }
 
 function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
-  const { data } = useLoad(() => api.admin.payout(id), [id]);
+  const { data, setData, reload } = useLoad(() => api.admin.payout(id), [id]);
   const { busy, run } = useAction();
   const byBank = useMemo(() => groupByBank(data?.batch), [data]);
+  const [editing, setEditing] = useState(false);
+  const [annulling, setAnnulling] = useState(false);
   if (!data) return <Skeleton className="h-80 rounded-3xl" />;
   const b = data.batch;
+  const annulled = b.status === "annulled";
+  if (editing && b.product === "alice") {
+    return <AlicePayout edit={{ id: b.id, title: b.title, from: b.period_from, to: b.period_to,
+      confirmed: (b.rates as unknown as { confirmed?: Record<string, number> }).confirmed ?? {} }}
+                        onClose={async () => { setEditing(false); await reload(); }} />;
+  }
   return (
     <div className="space-y-4">
       <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={onBack}><ChevronLeft /> Все выплаты</Button>
@@ -503,8 +529,34 @@ function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
                   onClick={async () => { try { await navigator.clipboard.writeText(data.bank_text); } catch { /* shown */ } haptic("success"); toast.success("Список для банка скопирован"); }}>
             <Copy /> Список для банка
           </Button>
+          {!annulled && (
+            <>
+              <Button className="press h-10 rounded-xl bg-white/10 text-white hover:bg-white/15" onClick={() => setEditing((v) => !v)}>
+                <Pencil /> Изменить
+              </Button>
+              <Button className="press h-10 rounded-xl bg-white/10 text-white hover:bg-cancel" onClick={() => setAnnulling(true)}>
+                <Ban /> Аннулировать
+              </Button>
+            </>
+          )}
         </div>
+        {annulled && (
+          <p className="mt-3 rounded-2xl bg-white/10 px-4 py-3 text-sm">
+            ⛔ Аннулирована {b.annulled_at ? dayMonth(b.annulled_at.slice(0, 10)) : ""}{b.annulled_by_name ? ` · ${b.annulled_by_name}` : ""}
+            {b.annul_reason ? ` · ${b.annul_reason}` : ""}{b.money_sent ? " · деньги были переведены — начислены вычеты «Переплата»" : ""}
+          </p>
+        )}
+        {(b.versions?.length ?? 0) > 0 && (
+          <p className="mt-2 text-xs text-hero-muted">
+            Версия {b.version}. Раньше: {b.versions!.map((v) => `v${v.version} ${dayMonth(v.created_at.slice(0, 10))}${v.note ? ` (${v.note})` : ""}`).join(", ")}
+          </p>
+        )}
       </section>
+      {editing && b.product !== "alice" && (
+        <EditPeople b={b} onDone={async (res) => { setEditing(false); if (res) setData(res); }} />
+      )}
+      <AnnulDialog open={annulling} batch={b} onClose={() => setAnnulling(false)}
+                   onDone={async () => { setAnnulling(false); await reload(); }} />
       {b.summary && b.summary.revenue_per_piece > 0 && <OwnerSummary s={b.summary} picked={b.total} />}
       {byBank.map(([bank, items]) => (
         <section key={bank} className="overflow-hidden rounded-3xl bg-card shadow-lift">
@@ -541,4 +593,92 @@ function groupByBank(b: PayoutBatch | undefined) {
     groups.set(key, [...(groups.get(key) ?? []), it]);
   }
   return [...groups.entries()].sort(([a], [b]) => (a === "Реквизиты не указаны" ? 1 : b === "Реквизиты не указаны" ? -1 : a.localeCompare(b)));
+}
+
+
+/** ТЗ 28.10 §25: the same payout recalculated — who is in it and their base; money is taken again once. */
+function EditPeople({ b, onDone }: { b: PayoutBatch; onDone: (res?: { batch: PayoutBatch; bank_text: string }) => void }) {
+  const rows = useLoad(() => api.admin.previewPayout({ date_from: b.period_from, date_to: b.period_to, network_id: b.network_id ?? null,
+    rates: b.rates }), [b.id]);
+  const inBatch = new Map(b.items.map((i) => [i.user_id, i]));
+  const [picked, setPicked] = useState<Record<number, boolean>>(() => Object.fromEntries(b.items.map((i) => [i.user_id, true])));
+  const [base, setBase] = useState<Record<number, string>>(
+    () => Object.fromEntries(b.items.filter((i) => i.base !== i.base_calc).map((i) => [i.user_id, String(i.base)])));
+  const [note, setNote] = useState("");
+  const { busy, run } = useAction();
+  if (!rows.data) return <Skeleton className="h-40 rounded-3xl" />;
+  const people = [...new Map([...b.items.map((i) => [i.user_id, { user_id: i.user_id, name: i.name }] as const),
+    ...rows.data.rows.map((r) => [r.user_id, { user_id: r.user_id, name: r.name }] as const)]).values()];
+  return (
+    <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <h3 className="font-semibold">Изменить выплату</h3>
+      <p className="text-sm text-muted-foreground">
+        Пересчёт той же выплаты: дубликата не будет, прежняя версия сохранится. Штрафы и вычеты удерживаются заново — по одному разу.
+      </p>
+      <ul className="divide-y">
+        {people.map((p) => (
+          <li key={p.user_id} className="flex items-center gap-3 py-2">
+            <input type="checkbox" className="size-5" checked={!!picked[p.user_id]}
+                   onChange={(e) => setPicked({ ...picked, [p.user_id]: e.target.checked })} />
+            <span className="min-w-0 flex-1 text-sm">{p.name}{inBatch.has(p.user_id) ? "" : " · нет в выплате"}</span>
+            <input inputMode="numeric" placeholder="база авто" className="h-9 w-28 rounded-lg border-0 bg-muted px-2 text-right text-sm tabular outline-none"
+                   value={base[p.user_id] ?? ""} onChange={(e) => setBase({ ...base, [p.user_id]: e.target.value.replace(/\D/g, "").slice(0, 8) })} />
+          </li>
+        ))}
+      </ul>
+      <input className={field} placeholder="Что изменили (по желанию)" value={note} onChange={(e) => setNote(e.target.value.slice(0, 200))} />
+      <Button className="press h-11 w-full rounded-xl" disabled={!!busy || !Object.values(picked).some(Boolean)}
+              onClick={async () => {
+                try {
+                  const res = await run("edit", (k) => api.admin.editPayout(b.id, {
+                    choices: people.map((p) => ({ user_id: p.user_id, include: !!picked[p.user_id],
+                      base_override: base[p.user_id] ? Number(base[p.user_id]) : null })), note: note.trim() || null }, k),
+                  "Выплата пересчитана — новая версия");
+                  onDone(res);
+                } catch { /* toast shown */ }
+              }}>
+        {busy === "edit" && <LoaderCircle className="animate-spin" />} Пересчитать и сохранить
+      </Button>
+    </section>
+  );
+}
+
+/** «Аннулировать выплату» (§25): reason, «деньги уже переведены?», and only then. Nothing is deleted. */
+function AnnulDialog({ open, batch, onClose, onDone }: { open: boolean; batch: PayoutBatch; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = useState("");
+  const [sent, setSent] = useState(false);
+  const { busy, run } = useAction();
+  return (
+    <AlertDialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <AlertDialogContent className="max-h-[90dvh] overflow-y-auto rounded-3xl">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="font-display">Аннулировать выплату №{batch.id}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Выплата получит статус «Аннулирована» и уйдёт в «Архив» со всей историей. Удержанные штрафы и вычеты снова станут
+            долгом, копилка налога на лень вернётся{batch.product === "alice" ? ", задания «Алисы» снова будут ждать оплаты" : ""}.
+            Аннулировать можно только последнюю выплату этих людей.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <ReasonChips kind="annul" value={reason} onPick={setReason} />
+        <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} placeholder="Причина (обязательно)"
+                  className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
+        <label className="flex items-start gap-3 rounded-xl bg-muted/60 p-3 text-sm">
+          <input type="checkbox" className="mt-0.5 size-5" checked={sent} onChange={(e) => setSent(e.target.checked)} />
+          <span>Деньги уже переведены — начислить каждому вычет «Переплата» на выплаченную сумму (удержится из следующей выплаты)</span>
+        </label>
+        <AlertDialogFooter>
+          <AlertDialogCancel className="rounded-xl">Отмена</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" className="rounded-xl" disabled={!!busy || !reason.trim()}
+                             onClick={async (e) => {
+                               e.preventDefault();
+                               try {
+                                 if (await run("annul", (k) => api.admin.annulPayout(batch.id, reason.trim(), sent, k), "Выплата аннулирована")) onDone();
+                               } catch { /* toast shown */ }
+                             }}>
+            {busy === "annul" && <LoaderCircle className="animate-spin" />} Аннулировать
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
 }
