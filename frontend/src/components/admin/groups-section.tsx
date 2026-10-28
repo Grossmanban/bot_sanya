@@ -4,7 +4,7 @@ import { useState } from "react";
 import { AlertTriangle, CheckCircle2, CircleHelp, CircleSlash, LoaderCircle, RefreshCw, Send, UserMinus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type GroupKind, type GroupMember, type GroupRow, type GroupsBoard } from "@/lib/api";
+import { api, newKey, type GroupAction, type GroupKind, type GroupMember, type GroupRow, type GroupsBoard } from "@/lib/api";
 import { ddmm, plural } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
@@ -28,7 +28,7 @@ export function GroupsSection() {
   }
 
   if (!data) return <Skeleton className="h-64 rounded-3xl" />;
-  const shown = data.items.filter((r) => !onlyIssues || r.issues.length || r.action);
+  const shown = data.items.filter((r) => !onlyIssues || r.issues.length);
   const problems = data.items.filter((r) => r.issues.length).length;
 
   return (
@@ -36,8 +36,8 @@ export function GroupsSection() {
       <section className="rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
         <h2 className="font-display text-xl font-semibold">Группы</h2>
         <p className="mt-1.5 text-[15px] text-hero-muted">
-          0–{data.threshold - 1} подтверждённых рабочих дня — «Предзакреп», с {data.threshold}-го — «Основная команда».
-          Рабочий день — дата с принятым отчётом (и автоприёмом «команда выполнила план», и учебные смены).
+          Кандидат получает «Предзакреп», когда обучение согласовано, «Основную команду» — после «Принять в команду».
+          Пришедшие без анкеты — сразу в «Основную команду». Каждому можно задать свои группы: только одна или обе.
           Приглашения личные: по ссылке войдёт только тот, кому её прислал бот.
         </p>
       </section>
@@ -102,12 +102,33 @@ export function GroupsSection() {
   );
 }
 
+const WHO: Record<GroupRow["who"], string> = { employee: "сотрудник", candidate: "кандидат", trainee: "стажёр", blocked: "заблокирован" };
+const MODES: { value: GroupRow["mode"]; label: string }[] = [
+  { value: null, label: "Авто" }, { value: "pre", label: "Предзакреп" }, { value: "main", label: "Основная" }, { value: "both", label: "Обе" },
+];
+
 function Row({ r, busy, act }: {
   r: GroupRow; busy: string | null;
   act: (name: string, fn: () => Promise<GroupsBoard>, ok: string) => Promise<void>;
 }) {
-  const invite = (k: GroupKind) => act(`inv-${r.user_id}-${k}`, () => api.admin.groupInvite(r.user_id, k), `Приглашение в «${TITLE[k]}» отправлено`);
-  const remove = (k: GroupKind) => act(`rm-${r.user_id}-${k}`, () => api.admin.groupRemove(r.user_id, k), `Удалён из «${TITLE[k]}»`);
+  const [settings, setSettings] = useState(false);
+  const run = (a: GroupAction) => {
+    if (a === "invite_pre" || a === "invite_main") {
+      const k: GroupKind = a === "invite_pre" ? "pre" : "main";
+      return act(`inv-${r.user_id}-${k}`, () => api.admin.groupInvite(r.user_id, k), `Приглашение в «${TITLE[k]}» отправлено`);
+    }
+    if (a === "remove_pre" || a === "remove_main") {
+      const k: GroupKind = a === "remove_pre" ? "pre" : "main";
+      return act(`rm-${r.user_id}-${k}`, () => api.admin.groupRemove(r.user_id, k), `Удалён из «${TITLE[k]}»`);
+    }
+    if (a === "allow_both") return act(`mode-${r.user_id}`, () => api.admin.groupMode(r.user_id, "both", newKey()), "Можно в обеих группах");
+    if (a === "not_newbie") return act(`nn-${r.user_id}`, () => api.admin.notNewbie(r.user_id, true, newKey()), "Отмечен: не новичок");
+    return act("check", () => api.admin.checkGroups(), "Членство сверено с Telegram");
+  };
+  const LABEL: Record<GroupAction, string> = {
+    invite_pre: "Пригласить в «Предзакреп»", invite_main: "Пригласить в «Основную»", remove_pre: "Убрать из «Предзакрепа»",
+    remove_main: "Убрать из «Основной»", allow_both: "Можно в обеих", not_newbie: "Не новичок — подтвердить", check: "Сверить",
+  };
   return (
     <li className="space-y-2 px-5 py-4 md:px-6">
       <div className="flex items-start justify-between gap-3">
@@ -115,45 +136,60 @@ function Row({ r, busy, act }: {
           <button className="block max-w-full truncate text-left font-semibold underline-offset-2 hover:underline"
                   onClick={() => openProfile(r.username, r.telegram_id, r.name)}>{r.name}</button>
           <p className="text-xs text-muted-foreground">
-            {r.days} {plural(r.days, "подтверждённый день", "подтверждённых дня", "подтверждённых дней")}
-            {r.first_day ? ` · первый ${ddmm(r.first_day)}` : ""} · ожидается «{TITLE[r.expected]}»
+            {WHO[r.who]} · {r.days} {plural(r.days, "подтв. день", "подтв. дня", "подтв. дней")}
+            {r.first_day ? ` · первый ${ddmm(r.first_day)}` : ""} · нужно: {r.required.length ? r.required.map((k) => `«${TITLE[k]}»`).join(" и ") : "ни одной"}
+            {r.mode ? ` (${r.mode_title.toLowerCase()})` : ""}{r.not_newbie ? " · не новичок" : ""}
           </p>
         </div>
+        <button className="shrink-0 text-xs font-semibold text-muted-foreground underline-offset-2 hover:underline" onClick={() => setSettings((v) => !v)}>
+          Группы человека
+        </button>
       </div>
       <div className="flex flex-wrap gap-2">
-        {(["pre", "main"] as const).map((k) => <Membership key={k} kind={k} state={r.member[k]} invite={r.invites[k]} />)}
+        {(["pre", "main"] as const).map((k) => <Membership key={k} kind={k} state={r.member[k]} invite={r.invites[k]} need={r.required.includes(k)} />)}
       </div>
-      {r.issues.map((i) => (
-        <p key={i} className="flex items-center gap-1.5 text-sm text-wait"><AlertTriangle className="size-4 shrink-0" /> {i}</p>
+      {r.problems.length === 0 ? (
+        <p className="flex items-center gap-1.5 text-sm text-go"><CheckCircle2 className="size-4 shrink-0" /> Все нужные группы на месте</p>
+      ) : r.problems.map((p) => (
+        <div key={p.text} className="space-y-1.5">
+          <p className="flex items-center gap-1.5 text-sm text-wait"><AlertTriangle className="size-4 shrink-0" /> {p.text}</p>
+          <div className="flex flex-wrap gap-2">
+            {p.actions.map((a, i) => (
+              <Button key={a} size="sm" variant={i === 0 ? "default" : "secondary"} className="press h-9 rounded-xl" disabled={!!busy}
+                      onClick={() => run(a)}>
+                {busy?.includes(String(r.user_id)) && i === 0 ? <LoaderCircle className="animate-spin" />
+                  : a.startsWith("invite") ? <Send /> : a.startsWith("remove") ? <UserMinus /> : null}
+                {LABEL[a]}
+              </Button>
+            ))}
+          </div>
+        </div>
       ))}
-      <div className="flex flex-wrap gap-2">
-        {(r.action === "invite_pre" || r.action === "invite_main" || r.action === "move") && (
-          <Button size="sm" className="press h-9 rounded-xl" disabled={!!busy} onClick={() => invite(r.action === "invite_pre" ? "pre" : "main")}>
-            {busy?.startsWith(`inv-${r.user_id}`) ? <LoaderCircle className="animate-spin" /> : <Send />}
-            {r.action === "invite_pre" ? "Пригласить в предзакреп" : "Пригласить в основную команду"}
-          </Button>
-        )}
-        {(r.action === "remove_pre" || r.action === "move") && r.member.pre === "member" && (
-          <Button size="sm" variant="secondary" className="press h-9 rounded-xl" disabled={!!busy} onClick={() => remove("pre")}>
-            <UserMinus /> Убрать из предзакрепа
-          </Button>
-        )}
-        {r.action === "remove_main" && (
-          <Button size="sm" variant="secondary" className="press h-9 rounded-xl" disabled={!!busy} onClick={() => remove("main")}>
-            <UserMinus /> Убрать из основной команды
-          </Button>
-        )}
-        {r.action !== "invite_pre" && r.member.pre !== "member" && r.expected === "pre" && r.action !== "check" && (
-          <Button size="sm" variant="ghost" className="press h-9 rounded-xl" disabled={!!busy} onClick={() => invite("pre")}>
-            <Send /> Ещё раз в предзакреп
-          </Button>
-        )}
-      </div>
+      {settings && (
+        <div className="row-in space-y-2 rounded-2xl bg-muted/50 p-3">
+          <p className="text-xs text-muted-foreground">В каких группах должен быть человек</p>
+          <div className="flex flex-wrap gap-1.5">
+            {MODES.map((m) => (
+              <button key={m.label} type="button" disabled={!!busy}
+                      onClick={() => act(`mode-${r.user_id}`, () => api.admin.groupMode(r.user_id, m.value, newKey()), `Группы: ${m.label}`)}
+                      className={cn("press h-9 rounded-full px-3.5 text-sm font-medium", r.mode === m.value ? "bg-primary text-primary-foreground" : "bg-card")}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span>Не новичок — подтвердить <span className="block text-xs text-muted-foreground">Считать опытным: нужна «Основная команда». Роли не меняются.</span></span>
+            <input type="checkbox" className="size-5" checked={r.not_newbie} disabled={!!busy}
+                   onChange={(e) => act(`nn-${r.user_id}`, () => api.admin.notNewbie(r.user_id, e.target.checked, newKey()),
+                     e.target.checked ? "Отмечен: не новичок" : "Отметка снята")} />
+          </label>
+        </div>
+      )}
     </li>
   );
 }
 
-function Membership({ kind, state, invite }: { kind: GroupKind; state: GroupMember; invite: GroupRow["invites"][GroupKind] }) {
+function Membership({ kind, state, invite, need }: { kind: GroupKind; state: GroupMember; invite: GroupRow["invites"][GroupKind]; need: boolean }) {
   if (state === null) return null;
   const meta = state === "member" ? { icon: CheckCircle2, text: "состоит", tone: "bg-go-soft text-go" }
     : state === "out" ? { icon: CircleSlash, text: "не состоит", tone: "bg-muted text-muted-foreground" }
@@ -162,7 +198,7 @@ function Membership({ kind, state, invite }: { kind: GroupKind; state: GroupMemb
   const sent = invite && !invite.used_at && !invite.revoked && state !== "member";
   return (
     <span className={cn("inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold", meta.tone)}>
-      <Icon className="size-3.5" /> {TITLE[kind]}: {meta.text}
+      <Icon className="size-3.5" /> {TITLE[kind]}: {meta.text}{need ? "" : state === "member" ? " (не обязательно)" : ""}
       {sent && <span className="font-normal">· приглашение {ddmm(invite.created_at.slice(0, 10))}</span>}
     </span>
   );

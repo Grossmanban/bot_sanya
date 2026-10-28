@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import alice, broadcasts, day_actual, finance, groups, invites, pending, recruiting, reports, templates
+from . import alice, broadcasts, day_actual, finance, groups, invites, pending, recruiting, reports, templates, training
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -52,6 +52,11 @@ class EventReject(StatesGroup):
 
 class BroadcastReply(StatesGroup):
     collecting = State()
+
+
+class TrainingInput(StatesGroup):
+    reschedule = State()   # the candidate's «Прошу перенести»: a reason and a convenient time
+    reject_reason = State()  # an admin rejects a request: the reason is required
 
 
 class DecisionInput(StatesGroup):
@@ -711,6 +716,108 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         await call.answer("Вы записаны" if changed else "Запись уже подтверждена")
         if changed:
             await notifier.training_confirmed(application)
+            await notifier.invite_pre_if_agreed(application)  # §6: «Предзакреп» only after the confirmation
+
+    @router.callback_query(F.data.startswith("ttc:"))
+    async def trainer_confirm(call: CallbackQuery):
+        """The trainer confirms the agreed date, time and place (В9); an old button of a changed training is refused."""
+        _, app_id, version = call.data.split(":")
+        user = svc.get_user_by_tg(conn, call.from_user.id)
+        try:
+            application, changed = training.confirm_by_trainer(conn, user or {"id": None}, int(app_id), int(version))
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            log.debug("could not drop the confirm button", exc_info=True)
+        await call.answer("Подтверждено" if changed else "Уже подтверждено")
+        if changed:
+            await notifier.invite_pre_if_agreed(application)
+
+    @router.callback_query(F.data.startswith("tcw:") | F.data.startswith("tcc:"))
+    async def candidate_contacted(call: CallbackQuery):
+        kind, app_id = call.data.split(":")
+        try:
+            application, changed = training.candidate_answer(conn, call.from_user.id, int(app_id),
+                                                             "wrote" if kind == "tcw" else "cant_write")
+        except svc.ServiceError as exc:
+            await call.answer(exc.message, show_alert=True)
+            return
+        await call.answer("Спасибо, тренер получил сообщение" if kind == "tcw" else "Тренер напишет вам сам")
+        if changed:
+            await notifier.candidate_answered(application)
+
+    @router.callback_query(F.data.startswith("trr:"))
+    async def reschedule_begin(call: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await state.set_state(TrainingInput.reschedule)
+        await state.update_data(app_id=int(call.data.split(":")[1]))
+        await call.message.answer("🔁 Напишите одним сообщением, почему нужно перенести обучение и когда вам удобно.")
+        await call.answer()
+
+    @router.message(StateFilter(TrainingInput.reschedule), F.text)
+    async def reschedule_text(message: Message, state: FSMContext):
+        data = await state.get_data()
+        await state.clear()
+        user = svc.get_user_by_tg(conn, message.from_user.id)
+        text = message.text.strip()
+        try:
+            req, created = training.create_request(conn, user or {"id": None}, data["app_id"], "change", text,
+                                                   {"note": text}, svc.new_key())
+        except svc.ServiceError as exc:
+            await message.answer(exc.message)
+            return
+        await message.answer("Запрос отправлен администратору. До решения действует прежняя запись." if created
+                             else "Запрос на перенос уже отправлен — ждите ответа.")
+        if created:
+            await notifier.training_request_created(req)
+
+    @router.callback_query(F.data.startswith("trq:"))
+    async def request_decide(call: CallbackQuery, state: FSMContext):
+        """«Ожидает согласования» in the bot: approve at once, reject — with a reason (§4)."""
+        _, verdict, request_id = call.data.split(":")
+        actor = allowed(call.from_user.id, "registrations")
+        if actor is None:
+            return await deny(call)
+        if verdict == "r":
+            await state.clear()
+            await state.set_state(TrainingInput.reject_reason)
+            await state.update_data(request_id=int(request_id))
+            await call.message.answer("Причина отклонения? Напишите — инициатор её увидит.")
+            await call.answer()
+            return
+        await finish_request(call.from_user.id, int(request_id), True, None, call)
+
+    @router.message(StateFilter(TrainingInput.reject_reason), F.text)
+    async def request_reject_reason(message: Message, state: FSMContext):
+        data = await state.get_data()
+        await state.clear()
+        await finish_request(message.from_user.id, data["request_id"], False, message.text.strip(), None, message)
+
+    async def finish_request(tg_id: int, request_id: int, approve: bool, reason: str | None,
+                             call: CallbackQuery | None, message: Message | None = None) -> None:
+        actor = allowed(tg_id, "registrations")
+        reply = (lambda t: call.answer(t, show_alert=True)) if call else (lambda t: message.answer(t))
+        if actor is None:
+            await reply("Недостаточно прав")
+            return
+        try:
+            req, changed, effect = training.decide(conn, actor, request_id, approve, reason, svc.new_key())
+        except svc.ServiceError as exc:
+            await reply(exc.message)
+            return
+        if not changed:
+            await reply("Уже решено")
+            return
+        await notifier.training_request_decided(req, actor, effect)
+        if effect and effect["kind"] == "refuse":
+            await groups.kick(conn, notifier.bot, notifier, svc.get_user(conn, effect["app"]["user_id"]), ("pre",), actor)
+        if call:
+            await call.answer("Одобрено" if approve else "Отклонено")
+        else:
+            await message.answer("Отклонено, инициатор получил причину.")
 
     @router.callback_query(F.data.startswith("ctw:") | F.data.startswith("ctc:"))
     async def contact_reply(call: CallbackQuery):
@@ -915,7 +1022,8 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         link = request.invite_link.invite_link if request.invite_link else None
         ok, user = await groups.join_request(conn, request.bot, request.chat.id, request.from_user.id, link)
         if ok and user is not None:
-            if (groups.chat(conn, "main") or {}).get("chat_id") == request.chat.id and groups.chat(conn, "pre"):
+            if ((groups.chat(conn, "main") or {}).get("chat_id") == request.chat.id and groups.chat(conn, "pre")
+                    and not groups.keeps_both(conn, user)):  # В13: unless the admin allowed both groups
                 try:  # moved up: out of «Предзакреп», if the bot may (ТЗ 27.10 §27)
                     if await groups.member_state(request.bot, groups.chat(conn, "pre")["chat_id"], user["telegram_id"]) == "member":
                         await groups.remove(conn, request.bot, user, "pre", None)

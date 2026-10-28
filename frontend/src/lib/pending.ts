@@ -52,7 +52,7 @@ export const SECTION_COUNTS: Record<string, (keyof ReportCounts)[]> = {
   discipline: ["violations"],
   actual: ["actual_missing", "actual_overdue"],
   penalties: ["fines_pending", "fines_draft"],
-  onboarding: ["onboarding_new", "internship_review"],
+  onboarding: ["onboarding_new", "internship_review", "training_requests"],
   team: ["registrations"],
   day: ["urgent", "unmarked"],
   events: ["events_pending"],

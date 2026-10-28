@@ -177,7 +177,15 @@ def view(conn: sqlite3.Connection, app: dict) -> dict:
         "trainer": {"id": trainer["id"], "name": svc.full_name(trainer), "username": trainer["username"]} if trainer else None,
         "earlier": history,  # earlier applications of the same person (kept in history)
         "progress": progress(conn, app, user),
+        "trainer_tg": {"telegram_id": trainer["telegram_id"], "username": trainer["username"]} if trainer else None,
+        **_training_extra(conn, app),
     }
+
+
+def _training_extra(conn: sqlite3.Connection, app: dict) -> dict:
+    from . import training  # training builds on this module
+
+    return training.extra(conn, app)
 
 
 def listing(conn: sqlite3.Connection, tab: str) -> list[dict]:
@@ -264,7 +272,8 @@ def confirm_training(conn: sqlite3.Connection, telegram_id: int, app_id: int) ->
     with transaction(conn):
         app = get(conn, app_id)
         user = svc.get_user_by_tg(conn, telegram_id)
-        if app is None or user is None or app["user_id"] != user["id"] or app["status"] != "scheduled":
+        if (app is None or user is None or app["user_id"] != user["id"] or app["status"] != "scheduled"
+                or not app["training_date"]):
             raise ServiceError("Запись не найдена или изменилась", 404, "not_found")
         if app["training_confirmed_at"]:
             return app, False
@@ -363,8 +372,8 @@ def start_internship(conn: sqlite3.Connection, actor: dict, app_id: int, key: st
         actor, app = _load(conn, actor, app_id)
         if _seen(conn, key) or app["status"] == "internship":
             return app, False
-        if app["status"] != "scheduled":
-            raise ServiceError("Сначала назначьте обучение", 409, "bad_status")
+        if app["status"] != "scheduled" or not app["trainer_id"]:
+            raise ServiceError("Сначала назначьте тренера и обучение", 409, "bad_status")
         conn.execute("UPDATE applications SET status = 'internship' WHERE id = ?", (app_id,))
         conn.execute("""UPDATE users SET status = 'approved', decided_at = ?, decided_by = ?, trainee_since = ?,
                         trainee_done_at = NULL, work_status = 'working', work_status_at = ?, notify_reminders = 1

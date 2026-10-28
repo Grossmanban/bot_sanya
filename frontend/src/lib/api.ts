@@ -27,6 +27,8 @@ export interface User {
   is_owner?: boolean;
   /** pending with an open questionnaire: decided in «Онбординг» (team listing) */
   candidate?: boolean;
+  /** ТЗ 28.10 §3 (team listing): «Обучение» granted by an admin, and how many candidates are assigned */
+  training?: { granted: boolean; assigned: number };
   created_at?: string;
   notify_reminders?: boolean;
   /** since when the current work status is on, and how many days that is */
@@ -149,14 +151,24 @@ export interface GroupRow {
   telegram_id: number;
   days: number;
   first_day: string | null;
-  expected: GroupKind;
+  expected: GroupKind | "both" | null;
   member: Record<GroupKind, GroupMember>;
   checked_at: string | null;
   invites: Record<GroupKind, { created_at: string; used_at: string | null; expires_at: string; revoked: boolean; auto: boolean } | null>;
   issues: string[];
-  action: "invite_pre" | "invite_main" | "move" | "remove_main" | "remove_pre" | "check" | null;
+  action: GroupAction | null;
   action_label: string | null;
+  // ТЗ 28.10 §15
+  required: GroupKind[];
+  mode: "pre" | "main" | "both" | null;
+  mode_title: string;
+  not_newbie: boolean;
+  blocked: boolean;
+  who: "employee" | "candidate" | "trainee" | "blocked";
+  problems: { text: string; actions: GroupAction[] }[];
 }
+
+export type GroupAction = "invite_pre" | "invite_main" | "remove_main" | "remove_pre" | "allow_both" | "not_newbie" | "check";
 
 export interface GroupsBoard {
   threshold: number;
@@ -164,6 +176,7 @@ export interface GroupsBoard {
   rights: Partial<Record<GroupKind, { ok: boolean; admin: boolean; invite: boolean; remove: boolean; error: string | null }>>;
   bot: boolean;
   items: GroupRow[];
+  actions?: Record<GroupAction, string>;
 }
 
 /** ТЗ 27.10 §6: an owner's invitation link */
@@ -227,6 +240,8 @@ export interface Me {
   internship?: StageProgress | null;
   /** ТЗ 27.10 §28: products in «Работа» */
   products?: Product[];
+  /** ТЗ 28.10 §3: «Обучение» — the trainer of a candidate or a grant */
+  training?: boolean;
 }
 
 export type ApplicationStatus = "new" | "scheduled" | "internship" | "done" | "rejected" | "returned";
@@ -286,6 +301,48 @@ export interface Application {
   earlier: number;
   progress: StageProgress | null;
   avatar_url: string;
+  // ТЗ 28.10 §2–§6
+  trainer_tg?: { telegram_id: number; username: string | null } | null;
+  referrer_id?: number | null;
+  stage?: TrainingStage;
+  stage_title?: string;
+  cancellations?: { at: string; kind: "cancel" | "no_show"; reason: string | null; initiator: string | null; role: string | null; legacy: boolean }[];
+  cancel_count?: number;
+  cancel_limit?: number;
+  cancel_warning?: boolean;
+  requests?: TrainingRequest[];
+  version?: number;
+  trainer_confirmed_at?: string | null;
+  training_started_at?: string | null;
+  finish_requested_at?: string | null;
+  trainer_assigned_at?: string | null;
+  contact_timer_at?: string | null;
+  messages?: { kind: string; sent_at: string; delivered: number }[];
+  pre_invited_at?: string | null;
+  team_invited_at?: string | null;
+}
+
+export type TrainingStage = "new" | "trainer" | "new_date" | "confirm" | "agreed" | "started" | "internship" | "finish_review"
+  | "done" | "rejected" | "returned";
+export type TrainingRequestKind = "start" | "refuse" | "cancel" | "change" | "internship";
+
+/** ТЗ 28.10 §3–§4: a trainer's (or a candidate's) request that waits for an admin — «Ожидает согласования». */
+export interface TrainingRequest {
+  id: number;
+  application_id: number;
+  kind: TrainingRequestKind;
+  title: string;
+  status: "pending" | "approved" | "rejected" | "stale";
+  reason: string | null;
+  created_at: string;
+  initiator: string | null;
+  initiator_role: "trainer" | "candidate";
+  initiator_tg: { telegram_id: number; username: string | null } | null;
+  candidate: string | null;
+  payload: { date?: string; time?: string; location?: string; trainer_id?: number; note?: string };
+  old: { training_date?: string | null; training_time?: string | null; training_location?: string | null; trainer_id?: number | null };
+  new_trainer: string | null;
+  decision_reason: string | null;
 }
 
 export interface Referral {
@@ -609,6 +666,7 @@ export type ReportCounts = {
   registrations?: number;
   onboarding_new?: number;
   internship_review?: number;
+  training_requests?: number;
   urgent?: number;
   unmarked?: number;
   events_pending?: number;
@@ -863,6 +921,7 @@ export interface ScheduleSettings {
   groups_auto_invite: boolean;
   groups_check_time: string;
   second_stage_units: number;
+  training_cancel_limit: number;
   attendance_check_enabled: boolean;
   attendance_check_time: string;
   daily_mark_enabled: boolean;
@@ -1134,6 +1193,12 @@ export const api = {
       body: JSON.stringify({ ...body, idempotency_key: key }),
     }),
   events: () => request<{ items: LiveEvent[] }>("/api/events"),
+  training: () => request<{ items: Application[]; trainers: { id: number; name: string }[]; points: string[] }>("/api/training"),
+  trainingRequest: (id: number, body: { kind: TrainingRequestKind; reason?: string | null; date?: string; time?: string;
+    location?: string; trainer_id?: number }, key: string) =>
+    post<{ request: TrainingRequest; application: Application }>(`/api/training/${id}/request`, { ...body, idempotency_key: key }),
+  trainingConfirm: (id: number, key: string) => post<{ application: Application }>(`/api/training/${id}/confirm`, { idempotency_key: key }),
+  trainingFinish: (id: number, key: string) => post<{ application: Application }>(`/api/training/${id}/finish`, { idempotency_key: key }),
   event: (id: number) => request<{ event: LiveEvent }>(`/api/events/${id}`),
   submitEntry: (id: number, value: number, photo: Blob, key: string) =>
     upload<{ event: LiveEvent; changed: boolean }>(`/api/events/${id}/entries?value=${value}&idempotency_key=${key}`, photo),
@@ -1255,14 +1320,37 @@ export const api = {
     uploadVideo: (file: Blob) => upload<{ file_id: string }>("/api/admin/media/video", file),
     onboarding: (tab: "new" | "scheduled" | "internship" | "done" | "rejected") =>
       request<{ items: Application[]; counts: Record<"new" | "scheduled" | "internship" | "done" | "rejected", number>;
-        trainers: { id: number; name: string; username: string | null }[]; points: string[];
+        trainers: { id: number; name: string; username: string | null }[]; points: string[]; requests: TrainingRequest[];
         targets: { internship_units: number; second_stage_units: number } }>(`/api/admin/onboarding?tab=${tab}`),
-    assignTraining: (id: number, body: { date: string; time: string; location: string; trainer_id: number }, key: string) =>
+    trainerPreview: (id: number, trainerId: number) =>
+      request<{ text: string }>(`/api/admin/onboarding/${id}/trainer-preview?trainer_id=${trainerId}`),
+    assignTrainer: (id: number, trainerId: number, send: boolean, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/trainer`, { trainer_id: trainerId, send, idempotency_key: key }),
+    trainerMessage: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/trainer-message`, { idempotency_key: key }),
+    timerReset: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/timer-reset`, { idempotency_key: key }),
+    remindReferrer: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/remind-referrer`, { idempotency_key: key }),
+    startTraining: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/start-training`, { idempotency_key: key }),
+    cancelAck: (id: number, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/cancel-ack`, { idempotency_key: key }),
+    decideRequest: (id: number, body: { approve: boolean; reason?: string | null; date?: string; time?: string; location?: string;
+      trainer_id?: number }, key: string) =>
+      post<{ request: TrainingRequest; requests: TrainingRequest[] }>(`/api/admin/training-requests/${id}/decide`, { ...body, idempotency_key: key }),
+    trainingAccess: (userId: number, allow: boolean, key: string) =>
+      post<{ training: { granted: boolean; assigned: number } }>(`/api/admin/team/${userId}/training-access`, { allow, idempotency_key: key }),
+    groupMode: (user_id: number, mode: "pre" | "main" | "both" | null, key: string) =>
+      post<GroupsBoard>("/api/admin/groups/mode", { user_id, mode, idempotency_key: key }),
+    notNewbie: (user_id: number, value: boolean, key: string) =>
+      post<GroupsBoard>("/api/admin/groups/not-newbie", { user_id, value, idempotency_key: key }),
+    assignTraining: (id: number, body: { date: string; time: string; location: string; trainer_id?: number | null }, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/training`, { ...body, idempotency_key: key }),
     rejectApplication: (id: number, reason: string | null, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/reject`, { reason, idempotency_key: key }),
-    cancelTraining: (id: number, key: string) =>
-      post<{ application: Application }>(`/api/admin/onboarding/${id}/cancel-training`, { idempotency_key: key }),
+    cancelTraining: (id: number, reason: string, kind: "cancel" | "no_show", key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/cancel-training`, { reason, kind, idempotency_key: key }),
     returnApplication: (id: number, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/return`, { idempotency_key: key }),
     contactApplication: (id: number, manager: string) =>

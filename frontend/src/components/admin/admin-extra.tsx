@@ -355,7 +355,7 @@ export function SettingsSection() {
           </span>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          {([["internship_units", "Стажировка, ед."], ["second_stage_units", "Второй этап, ед."]] as const).map(([k, label]) => (
+          {([["internship_units", "Стажировка, ед."], ["second_stage_units", "Второй этап, ед."], ["training_cancel_limit", "Предупреждать после отмен обучения"]] as const).map(([k, label]) => (
             <label key={k} className="space-y-1">
               <span className="text-xs text-muted-foreground">{label}</span>
               <input inputMode="numeric" aria-label={label} className="h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] tabular outline-none focus:ring-2 focus:ring-ring/25"

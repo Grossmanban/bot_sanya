@@ -394,6 +394,7 @@ function MemberSheet({
                 <PersonalRates key={user.id} user={user} onUpdated={onUpdated} />
               )}
               {approved && caps.includes("products") && <ProductAccess key={`p-${user.id}`} user={user} />}
+              {approved && caps.includes("registrations") && <TrainingAccess key={`t-${user.id}`} user={user} onChanged={() => onUpdated(user)} />}
 
               {canRole && (
                 <div className="mt-6">
@@ -591,6 +592,35 @@ function NormPicker({ user, onUpdated }: { user: User; onUpdated: (u: User) => v
 }
 
 /** Owner only (customer round B): a personal rate over the network's/common one and «не применять налог на лень». */
+/** ТЗ 28.10 §3: «Обучение» — opened automatically for a candidate's trainer; an admin may give or take it,
+ * but not while candidates are still assigned (the server says so). */
+function TrainingAccess({ user, onChanged }: { user: User; onChanged: () => void }) {
+  const [state, setState] = useState(user.training ?? { granted: false, assigned: 0 });
+  const { busy, run } = useAction();
+  const on = state.granted || state.assigned > 0;
+  return (
+    <label className="mt-4 flex cursor-pointer items-center gap-3 rounded-2xl bg-muted/50 px-4 py-3">
+      <span className="min-w-0 flex-1">
+        <span className="block text-[15px] font-semibold">Раздел «Обучение»</span>
+        <span className="block text-xs text-muted-foreground">
+          {state.assigned ? `Кандидатов: ${state.assigned} — отключить можно после передачи другому тренеру` : on ? "Доступ открыт" : "Нет доступа"}
+        </span>
+      </span>
+      <Switch checked={on} disabled={!!busy} onCheckedChange={async (v) => {
+        try {
+          const res = await run("training", (k) => api.admin.trainingAccess(user.id, v, k), v ? "«Обучение» открыто" : "«Обучение» закрыто");
+          if (res) {
+            setState(res.training);
+            onChanged();
+          }
+        } catch {
+          /* toast shown */
+        }
+      }} />
+    </label>
+  );
+}
+
 /** ТЗ 27.10 §28: access to «Работа» products — give, take back, the log of changes. */
 function ProductAccess({ user }: { user: User }) {
   const { data, setData } = useLoad(() => api.admin.userProducts(user.id), [user.id]);

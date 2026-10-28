@@ -11,7 +11,7 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import alice, notify, pending, products, reports, templates, violations
+from . import alice, notify, pending, products, reports, templates, training, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -63,6 +63,18 @@ class ReasonBody(BaseModel):
 
 class TextBody(BaseModel):
     text: str | None = None  # None — back to the default
+    idempotency_key: str
+
+
+class GroupMode(BaseModel):
+    user_id: int
+    mode: str | None = None
+    idempotency_key: str
+
+
+class NotNewbie(BaseModel):
+    user_id: int
+    value: bool
     idempotency_key: str
 
 
@@ -471,7 +483,45 @@ class TrainingBody(BaseModel):
     date: str
     time: str
     location: str
+    trainer_id: int | None = None
+    idempotency_key: str
+
+
+class TrainerBody(BaseModel):
     trainer_id: int
+    send: bool = True  # §2: «свяжитесь с тренером» goes only after the admin saw it and pressed «Отправить»
+    idempotency_key: str
+
+
+class CancelBody(BaseModel):
+    reason: str | None = None
+    kind: str = "cancel"  # cancel | no_show
+    idempotency_key: str
+
+
+class TrainingRequestBody(BaseModel):
+    kind: str
+    reason: str | None = None
+    date: str | None = None
+    time: str | None = None
+    location: str | None = None
+    trainer_id: int | None = None
+    note: str | None = None
+    idempotency_key: str
+
+
+class DecideBody(BaseModel):
+    approve: bool
+    reason: str | None = None
+    date: str | None = None
+    time: str | None = None
+    location: str | None = None
+    trainer_id: int | None = None
+    idempotency_key: str
+
+
+class AllowBody(BaseModel):
+    allow: bool
     idempotency_key: str
 
 
@@ -676,6 +726,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "capabilities": perms.capabilities(user),
             # ТЗ 27.10 §28: «Работа» shows only the products the person has access to
             "products": products.of_user(conn, user["id"]),
+            # ТЗ 28.10 §3, §8: «Обучение» — the trainer of a candidate or a grant by an admin
+            "training": training.has_access(conn, user),
             # a trainee's shifts are training ones and not paid
             "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user)},
             "bot_username": app.state.bot_username,
@@ -794,6 +846,18 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if not sent:
             raise svc.ServiceError("Ссылка создана, но бот не смог написать человеку — пусть нажмёт /start в боте",
                                    409, "not_delivered")
+        return await groups_view()
+
+    @api.post("/admin/groups/mode")
+    async def admin_groups_mode(body: GroupMode, admin: dict = Depends(staff("groups"))):
+        require(admin, "groups", body.user_id)
+        groups.set_mode(conn, admin, body.user_id, body.mode, body.idempotency_key)
+        return await groups_view()
+
+    @api.post("/admin/groups/not-newbie")
+    async def admin_groups_not_newbie(body: NotNewbie, admin: dict = Depends(staff("groups"))):
+        require(admin, "groups", body.user_id)
+        groups.set_not_newbie(conn, admin, body.user_id, body.value, body.idempotency_key)
         return await groups_view()
 
     @api.post("/admin/groups/remove")
@@ -1167,7 +1231,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         nets = networks.names(conn)
         money = perms.can(admin, "money")
         items = [{**public_user(u), "network": nets.get(u["network_id"]), **(money_fields(u) if money else {}),
-                  "candidate": u["status"] == "pending" and svc.is_candidate(conn, u["id"])}
+                  "candidate": u["status"] == "pending" and svc.is_candidate(conn, u["id"]),
+                  "training": {"granted": training.granted(conn, u["id"]), "assigned": training.assigned(conn, u["id"])}}
                  for u in visible(admin, people)]
         return {"items": items, "bot_username": app.state.bot_username}
 
@@ -1897,38 +1962,106 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/onboarding")
     async def admin_onboarding(tab: str = "new", _: dict = Depends(staff("registrations"))):
+        # §2: any active employee may train a candidate (the inviter is put first on each card)
         people = [{"id": u["id"], "name": svc.full_name(u), "username": u["username"]}
-                  for u in svc.list_users(conn) if u["account_state"] == "active"]
+                  for u in svc.list_users(conn) if u["status"] == "approved" and u["account_state"] == "active"]
         cfg = app_settings.get_all(conn)
         return {"items": [application_out(a) for a in recruiting.listing(conn, tab)], "counts": recruiting.counts(conn),
                 "trainers": people, "points": [p["name"] for p in svc.list_points(conn)],
+                "requests": training.pending_requests(conn),
                 "targets": {k: cfg[k] for k in ("internship_units", "second_stage_units")}}
+
+    def app_out(app_id: int) -> dict:
+        return {"application": application_out(recruiting.get(conn, app_id))}
+
+    @api.get("/admin/onboarding/{app_id}/trainer-preview")
+    async def admin_trainer_preview(app_id: int, trainer_id: int, _: dict = Depends(staff("registrations"))):
+        """§2: what the candidate will get — shown before anything is sent (no accidental sends)."""
+        trainer = svc.get_user(conn, trainer_id)
+        if trainer is None:
+            raise svc.ServiceError("Сотрудник не найден", 404, "not_found")
+        return {"text": notifier.trainer_message_text(trainer)}
+
+    @api.post("/admin/onboarding/{app_id}/trainer")
+    async def admin_assign_trainer(app_id: int, body: TrainerBody, admin: dict = Depends(staff("registrations"))):
+        a, changed, previous = training.assign_trainer(conn, admin, app_id, body.trainer_id, body.idempotency_key)
+        if changed:
+            delivered = await notifier.trainer_assigned(a, previous, body.send)
+            if body.send:
+                training.message_sent(conn, app_id, "trainer", admin["telegram_id"], delivered or notifier.bot is None, True)
+        return app_out(app_id)
+
+    @api.post("/admin/onboarding/{app_id}/trainer-message")
+    async def admin_trainer_message(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        """§2: send «свяжитесь с тренером» again — a new 48-hour count, the earlier sends stay in the history."""
+        a = recruiting.get(conn, app_id)
+        if a is None or a["status"] != "scheduled" or not a["trainer_id"]:
+            raise svc.ServiceError("Сначала назначьте тренера", 409, "bad_status")
+        delivered = await notifier.trainer_message(a)
+        training.message_sent(conn, app_id, "trainer", admin["telegram_id"], delivered or notifier.bot is None, True)
+        return app_out(app_id)
+
+    @api.post("/admin/onboarding/{app_id}/timer-reset")
+    async def admin_timer_reset(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        training.reset_timer(conn, admin, app_id, body.idempotency_key)
+        return app_out(app_id)
+
+    @api.post("/admin/onboarding/{app_id}/remind-referrer")
+    async def admin_remind_referrer(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        """§2: the inviter is asked to help the candidate reach the trainer."""
+        a = recruiting.get(conn, app_id)
+        if a is None or not a["referrer_id"] or not a["trainer_id"]:
+            raise svc.ServiceError("У кандидата нет пригласившего или тренера", 409, "no_referrer")
+        delivered = await notifier.referrer_help(a)
+        training.message_sent(conn, app_id, "referrer_help", admin["telegram_id"], delivered, False)
+        if not delivered and notifier.bot is not None:
+            raise svc.ServiceError("Бот не смог написать пригласившему", 502, "send_failed")
+        return app_out(app_id)
 
     @api.post("/admin/onboarding/{app_id}/training")
     async def admin_training(app_id: int, body: TrainingBody, admin: dict = Depends(staff("registrations"))):
-        a, changed = recruiting.assign_training(conn, admin, app_id, svc.parse_date(body.date), body.time, body.location,
-                                                body.trainer_id, body.idempotency_key)
+        a, changed, previous = training.schedule(conn, admin, app_id, svc.parse_date(body.date), body.time, body.location,
+                                                 body.trainer_id, body.idempotency_key)
         if changed:
-            notifier.spawn(notifier.training_assigned(a))
+            notifier.spawn(notifier.training_assigned(a, previous))
         return {"application": application_out(a)}
+
+    async def refused(a: dict, actor: dict) -> None:
+        """§6: the refusal message, then out of «Предзакреп» if Telegram says they're there."""
+        await notifier.application_rejected(a)
+        user = svc.get_user(conn, a["user_id"])
+        await groups.kick(conn, notifier.bot, notifier, user, ("pre",), actor)
 
     @api.post("/admin/onboarding/{app_id}/reject")
     async def admin_application_reject(app_id: int, body: RejectBody, admin: dict = Depends(staff("registrations"))):
-        a, changed = recruiting.reject(conn, admin, app_id, body.reason, body.idempotency_key)
+        a, changed = training.reject(conn, admin, app_id, body.reason, body.idempotency_key)
         if changed:
-            notifier.spawn(notifier.application_rejected(a))
+            notifier.spawn(refused(a, admin))
         return {"application": application_out(a)}
 
     @api.post("/admin/onboarding/{app_id}/cancel-training")
-    async def admin_training_cancel(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
-        a, changed = recruiting.cancel_training(conn, admin, app_id, body.idempotency_key)
+    async def admin_training_cancel(app_id: int, body: CancelBody, admin: dict = Depends(staff("registrations"))):
+        a, changed = training.cancel(conn, admin, app_id, body.reason, body.idempotency_key, body.kind)
         if changed:
             notifier.spawn(notifier.training_cancelled(a))
-        return {"application": application_out(recruiting.get(conn, app_id))}
+        return app_out(app_id)
+
+    @api.post("/admin/onboarding/{app_id}/start-training")
+    async def admin_training_start(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        a, changed = training.start(conn, admin, app_id, body.idempotency_key)
+        if changed and a["trainer_id"]:
+            trainer = svc.get_user(conn, a["trainer_id"])
+            notifier.spawn(notifier.send(trainer["telegram_id"], f"▶️ Обучение кандидата {a['full_name']} начато."))
+        return app_out(app_id)
+
+    @api.post("/admin/onboarding/{app_id}/cancel-ack")
+    async def admin_training_continue(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
+        training.ack_cancellations(conn, admin, app_id, body.idempotency_key)
+        return app_out(app_id)
 
     @api.post("/admin/onboarding/{app_id}/return")
     async def admin_application_return(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
-        a, changed = recruiting.return_to_reserve(conn, admin, app_id, body.idempotency_key)
+        a, changed = training.return_to_reserve(conn, admin, app_id, body.idempotency_key)
         if changed:
             notifier.spawn(notifier.application_returned(a))
         return {"application": application_out(a)}
@@ -1948,12 +2081,70 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/onboarding/{app_id}/stage")
     async def admin_stage(app_id: int, body: StageBody, admin: dict = Depends(staff("registrations"))):
+        """Stage 1 is «Принять в команду» (§6): the internship is counted and the main group invitation goes out."""
         before = recruiting.progress(conn, recruiting.get(conn, app_id) or {"status": None})
         a, tx, changed = recruiting.confirm_stage(conn, admin, app_id, body.stage, body.counted, body.bonus,
                                                   body.idempotency_key)
         if changed:
             notifier.spawn(notifier.stage_confirmed(a, body.stage, tx, before["units"] if before else None))
+            if body.stage == 1:
+                notifier.spawn(notifier.team_accepted(a, admin))
         return {"application": application_out(a)}
+
+    @api.post("/admin/training-requests/{request_id}/decide")
+    async def admin_training_decide(request_id: int, body: DecideBody, admin: dict = Depends(staff("registrations"))):
+        """«Ожидает согласования»: the same decision as the buttons in the bot."""
+        payload = {k: v for k, v in body.model_dump(include={"date", "time", "location", "trainer_id"}).items() if v}
+        req, changed, effect = training.decide(conn, admin, request_id, body.approve, body.reason,
+                                               body.idempotency_key, payload)
+        if changed:
+            await notifier.training_request_decided(req, admin, effect)
+            if effect and effect["kind"] == "refuse":
+                user = svc.get_user(conn, effect["app"]["user_id"])
+                notifier.spawn(groups.kick(conn, notifier.bot, notifier, user, ("pre",), admin))
+        return {"request": req, "requests": training.pending_requests(conn)}
+
+    @api.post("/admin/team/{user_id}/training-access")
+    async def admin_training_access(user_id: int, body: AllowBody, admin: dict = Depends(staff("registrations"))):
+        training.set_access(conn, admin, user_id, body.allow, body.idempotency_key)
+        return {"training": {"granted": training.granted(conn, user_id), "assigned": training.assigned(conn, user_id)}}
+
+    # ------------------------------------------------------------ «Обучение» for the candidate's trainer (§3–§4)
+
+    def trainer_user(user: dict = Depends(current_user)) -> dict:
+        if not training.has_access(conn, user):
+            raise svc.ServiceError("Раздел «Обучение» вам недоступен", 403, "no_training_access")
+        return user
+
+    @api.get("/training")
+    async def my_training(user: dict = Depends(trainer_user)):
+        people = [{"id": u["id"], "name": svc.full_name(u)} for u in svc.list_users(conn)
+                  if u["status"] == "approved" and u["account_state"] == "active" and u["id"] != user["id"]]
+        return {"items": [application_out(a) for a in training.my_candidates(conn, user)], "trainers": people,
+                "points": [p["name"] for p in svc.list_points(conn)]}
+
+    @api.post("/training/{app_id}/request")
+    async def my_training_request(app_id: int, body: TrainingRequestBody, user: dict = Depends(trainer_user)):
+        req, created = training.create_request(conn, user, app_id, body.kind, body.reason,
+                                               body.model_dump(include={"date", "time", "location", "trainer_id", "note"}),
+                                               body.idempotency_key)
+        if created:
+            notifier.spawn(notifier.training_request_created(req))
+        return {"request": req, **app_out(app_id)}
+
+    @api.post("/training/{app_id}/confirm")
+    async def my_training_confirm(app_id: int, body: KeyOnly, user: dict = Depends(trainer_user)):
+        a, changed = training.confirm_by_trainer(conn, user, app_id)
+        if changed:
+            notifier.spawn(notifier.invite_pre_if_agreed(a))
+        return app_out(app_id)
+
+    @api.post("/training/{app_id}/finish")
+    async def my_training_finish(app_id: int, body: KeyOnly, user: dict = Depends(trainer_user)):
+        a, changed = training.finish(conn, user, app_id)
+        if changed:
+            notifier.spawn(notifier.finish_requested(a))
+        return app_out(app_id)
 
     @api.get("/media/avatar/{user_id}")
     async def avatar(user_id: int, exp: int, sig: str):

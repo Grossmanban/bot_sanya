@@ -75,6 +75,81 @@ def expected(days: int, threshold: int) -> str:
     return "main" if days >= threshold else "pre"
 
 
+def came_by_questionnaire(conn: sqlite3.Connection) -> dict[int, str]:
+    """user_id → the status of their latest questionnaire (people who came by an employee's referral link)."""
+    return {r[0]: r[1] for r in conn.execute(
+        """SELECT a.user_id, a.status FROM applications a WHERE a.id = (SELECT MAX(b.id) FROM applications b
+           WHERE b.user_id = a.user_id AND b.status != 'returned')""")}
+
+
+def expected_for(conn: sqlite3.Connection, user: dict, apps: dict[int, str] | None = None) -> str | None:
+    """ТЗ 28.10 §6 (В11–В12): a candidate — «Предзакреп» once the training is agreed, the main group only after
+    «Принять в команду»; people without a questionnaire (an owner's invitation, the old team) — the main group."""
+    apps = came_by_questionnaire(conn) if apps is None else apps
+    status = apps.get(user["id"])
+    if status is None:
+        return "main"
+    return {"scheduled": "pre", "internship": "pre", "done": "main"}.get(status)
+
+
+async def invite_person(conn: sqlite3.Connection, bot, notifier, user: dict, kind: str, text: str,
+                        actor: dict | None) -> str:
+    """One personal invitation with a button, only when Telegram says the person isn't in the group yet.
+    Returns sent | member | no_group | failed (the admins are told about a failure)."""
+    g = chat(conn, kind)
+    if g is None or bot is None:
+        return "no_group"
+    state = await member_state(bot, g["chat_id"], user["telegram_id"])
+    with transaction(conn):
+        _set_state(conn, user["id"], kind, state)
+    if state == "member":
+        return "member"
+    try:
+        inv = await invite(conn, bot, user, kind, actor)
+    except ServiceError as exc:
+        await notifier.to_admins(f"⚠️ Не удалось пригласить {svc.full_name(user)} в «{KINDS[kind]}»: {exc.message}")
+        return "failed"
+    return "sent" if await notifier.group_invite_button(user, kind, inv, text) else "failed"
+
+
+async def kick(conn: sqlite3.Connection, bot, notifier, user: dict, kinds: tuple[str, ...], actor: dict | None,
+               attempts: int = 3) -> dict[str, str]:
+    """ТЗ 28.10 §6, §16: out of the work groups where Telegram says the person is. A network hiccup is retried;
+    when it still fails the admins are told and the result is in the person's history. kind → removed / not_member /
+    no_group / failed."""
+    import asyncio
+
+    out = {}
+    for kind in kinds:
+        g = chat(conn, kind)
+        if g is None or bot is None:
+            out[kind] = "no_group"
+            continue
+        state = await member_state(bot, g["chat_id"], user["telegram_id"])
+        if state == "out":
+            with transaction(conn):
+                _set_state(conn, user["id"], kind, "out")
+            out[kind] = "not_member"
+            continue
+        result = "failed"
+        for attempt in range(attempts):
+            try:
+                await remove(conn, bot, user, kind, actor)
+                result = "removed"
+                break
+            except ServiceError:
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(1 + attempt)
+        out[kind] = result
+        if result == "failed":
+            with transaction(conn):
+                log_event(conn, user_id=user["id"], actor_id=actor["telegram_id"] if actor else 0, event_type="GROUP_REMOVE_FAILED",
+                          key=svc.new_key(), new={"kind": kind})
+            await notifier.to_admins(f"⚠️ Не удалось исключить {svc.full_name(user)} из «{KINDS[kind]}»: у бота нет права "
+                                     "банить участников или Telegram не ответил. Исключите вручную.")
+    return out
+
+
 def workers(conn: sqlite3.Connection) -> list[dict]:
     """Who the groups are for: approved people who work shifts (owners and admins aside), not blocked."""
     return [u for u in svc.list_users(conn)
@@ -139,7 +214,7 @@ async def check(conn: sqlite3.Connection, bot, user_ids: set[int] | None = None)
         g = chat(conn, kind)
         if g is None:
             continue
-        for u in workers(conn):
+        for u in board_people(conn):
             if user_ids is not None and u["id"] not in user_ids:
                 continue
             state = await member_state(bot, g["chat_id"], u["telegram_id"])
@@ -224,66 +299,153 @@ async def join_request(conn: sqlite3.Connection, bot, chat_id: int, telegram_id:
 
 
 ACTIONS = {
-    "invite_pre": "Пригласить в предзакреп",
-    "invite_main": "Пригласить в основную команду",
-    "move": "Перевести: пригласить в основную и убрать из предзакрепа",
-    "remove_main": "Новичок в основной команде — проверить",
-    "remove_pre": "Убрать из предзакрепа",
+    "invite_pre": "Пригласить в «Предзакреп»",
+    "invite_main": "Пригласить в «Основную команду»",
+    "remove_pre": "Убрать из «Предзакрепа»",
+    "remove_main": "Убрать из «Основной команды»",
+    "allow_both": "Можно в обеих группах",
+    "not_newbie": "Не новичок — подтвердить",
     "check": "Сверить членство",
 }
+MODES = {"pre": ("pre",), "main": ("main",), "both": ("pre", "main")}
+MODE_TITLES = {None: "Авто", "pre": "Только «Предзакреп»", "main": "Только «Основная команда»", "both": "Обе группы"}
+
+
+def required(conn: sqlite3.Connection, user: dict, apps: dict[int, str] | None = None) -> tuple[str, ...]:
+    """ТЗ 28.10 §15: the groups this person must be in. The admin's choice for the person wins; «Не новичок» —
+    the main group; otherwise by the candidate's step (В11–В12). A blocked person — none."""
+    if user["account_state"] == "blocked" or user["status"] == "rejected":
+        return ()
+    if user.get("group_mode") in MODES:
+        return MODES[user["group_mode"]]
+    if user.get("not_newbie_at"):
+        return ("main",)
+    want = expected_for(conn, user, apps)
+    return (want,) if want else ()
+
+
+def board_people(conn: sqlite3.Connection) -> list[dict]:
+    """Workers, candidates whose training is under way, and blocked people Telegram still shows in a group."""
+    apps = came_by_questionnaire(conn)
+    st = states(conn)
+    out = []
+    for u in svc.list_users(conn):
+        if u["status"] == "approved" and u["account_state"] != "blocked" and perms.role_of(u) in (
+                perms.EMPLOYEE, perms.TRAINER, perms.INSTRUCTOR):
+            out.append(u)
+        elif u["status"] == "pending" and apps.get(u["id"]) == "scheduled" and u["account_state"] != "blocked":
+            out.append(u)
+        elif any((st.get((u["id"], k)) or {}).get("state") == "member" for k in KINDS) and not perms.is_owner(u):
+            out.append(u)  # blocked / refused, still inside
+    return out
 
 
 def board(conn: sqlite3.Connection) -> dict:
     threshold = app_settings.get_all(conn)["main_team_days"]
-    days, st = work_days(conn), states(conn)
+    days, st, apps = work_days(conn), states(conn), came_by_questionnaire(conn)
     connected = {k: chat(conn, k) for k in KINDS}
     rows = []
-    for u in workers(conn):
+    for u in board_people(conn):
         count, first = days.get(u["id"], (0, None))
-        want = expected(count, threshold)
+        need = required(conn, u, apps)
         member = {k: (st.get((u["id"], k)) or {}).get("state", "unknown") if connected[k] else None for k in KINDS}
         checked = max(((st.get((u["id"], k)) or {}).get("checked_at") or "" for k in KINDS), default="") or None
-        issues, action = [], None
-        if member["pre"] == "out" and member["main"] == "out":
-            issues.append("Не состоит ни в одной группе")
-        if count < threshold and member["main"] == "member":
-            issues.append("Новичок в основной команде")
-            action = "remove_main"
-        if count >= threshold and member["pre"] == "member":
-            issues.append(f"Уже {count} подтв. дня — пора переводить из предзакрепа")
-        if member["pre"] == "member" and member["main"] == "member":
-            issues.append("Состоит в обеих группах")
-        if action is None:
-            if member[want] == "member":
-                action = "remove_pre" if want == "main" and member["pre"] == "member" else None
-            elif member[want] == "unknown" and connected[want]:
-                action = "check"
-            elif connected[want]:
-                action = "move" if want == "main" and member["pre"] == "member" else f"invite_{want}"
+        blocked = u["account_state"] == "blocked" or u["status"] == "rejected"
+        issues = []
+        for k in need:
+            if member[k] == "out":
+                issues.append({"text": f"Не хватает: «{KINDS[k]}»", "actions": [f"invite_{k}"]})
+            elif member[k] == "unknown":
+                issues.append({"text": f"«{KINDS[k]}»: членство не проверено", "actions": ["check"]})
+        for k in KINDS:
+            if k in need or member[k] != "member":
+                continue
+            if blocked:
+                issues.append({"text": f"Заблокирован, но состоит в «{KINDS[k]}»", "actions": [f"remove_{k}"]})
+            elif k == "pre" and "main" in need:
+                issues.append({"text": "Состоит в обеих группах" if member["main"] == "member" else "Остался в «Предзакрепе»",
+                               "actions": ["remove_pre", "allow_both"]})
+            elif k == "main" and "pre" in need:
+                issues.append({"text": "Новичок в основной команде", "actions": ["not_newbie", "remove_main"]})
+            else:
+                issues.append({"text": f"В «{KINDS[k]}» раньше времени (обучение не согласовано)", "actions": [f"remove_{k}"]})
         invites = {k: last_invite(conn, u["id"], k) for k in KINDS}
+        app_status = apps.get(u["id"])
         rows.append({
             "user_id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
-            "days": count, "first_day": first, "expected": want, "member": member, "checked_at": checked,
+            "days": count, "first_day": first, "member": member, "checked_at": checked, "required": list(need),
+            "mode": u.get("group_mode"), "mode_title": MODE_TITLES.get(u.get("group_mode"), "Авто"),
+            "not_newbie": bool(u.get("not_newbie_at")), "blocked": blocked,
+            "who": "blocked" if blocked else "candidate" if u["status"] == "pending" else
+                   "trainee" if app_status == "internship" else "employee",
+            "expected": need[0] if len(need) == 1 else ("both" if need else None),  # kept for old clients
             "invites": {k: ({"created_at": i["created_at"], "used_at": i["used_at"], "expires_at": i["expires_at"],
                              "revoked": bool(i["revoked_at"]), "auto": bool(i["auto"])} if i else None)
                         for k, i in invites.items()},
-            "issues": issues, "action": action, "action_label": ACTIONS.get(action),
+            "issues": [i["text"] for i in issues], "problems": issues,
+            "action": issues[0]["actions"][0] if issues else None,
+            "action_label": ACTIONS.get(issues[0]["actions"][0]) if issues else None,
         })
-    rows.sort(key=lambda r: (not r["issues"], r["action"] is None, r["name"]))
+    rows.sort(key=lambda r: (not r["issues"], r["name"]))
     return {"threshold": threshold, "groups": {k: g and {"title": g["title"], "chat_id": g["chat_id"]} for k, g in connected.items()},
-            "items": rows}
+            "items": rows, "actions": ACTIONS, "modes": {str(k): v for k, v in MODE_TITLES.items()}}
+
+
+def set_mode(conn: sqlite3.Connection, actor: dict, user_id: int, mode: str | None, key: str) -> dict:
+    """§15 (В13–В14): the admin decides per person — «Предзакреп», the main group, both, or automatic."""
+    if mode not in (None, *MODES):
+        raise ServiceError("Неизвестный режим", 422, "bad_mode")
+    svc._check_key(key)
+    with transaction(conn):
+        if svc._seen(conn, key):
+            return svc.get_user(conn, user_id)
+        actor = svc._fresh_actor(conn, actor)
+        user = svc.get_user(conn, user_id)
+        if user is None or not perms.can(actor, "groups"):
+            raise ServiceError("Нет прав", 403, "forbidden")
+        conn.execute("UPDATE users SET group_mode = ? WHERE id = ?", (mode, user_id))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="GROUP_MODE_SET", key=key,
+                  old={"mode": user.get("group_mode")}, new={"mode": mode})
+    return svc.get_user(conn, user_id)
+
+
+def set_not_newbie(conn: sqlite3.Connection, actor: dict, user_id: int, value: bool, key: str) -> dict:
+    """§15: «Не новичок — подтвердить» (and its undo). Roles and rights stay as they are."""
+    svc._check_key(key)
+    with transaction(conn):
+        if svc._seen(conn, key):
+            return svc.get_user(conn, user_id)
+        actor = svc._fresh_actor(conn, actor)
+        user = svc.get_user(conn, user_id)
+        if user is None or not perms.can(actor, "groups"):
+            raise ServiceError("Нет прав", 403, "forbidden")
+        conn.execute("UPDATE users SET not_newbie_at = ?, not_newbie_by = ? WHERE id = ?",
+                     (now_iso() if value else None, actor["telegram_id"] if value else None, user_id))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], key=key,
+                  event_type="NOT_NEWBIE_SET" if value else "NOT_NEWBIE_CLEARED")
+    return svc.get_user(conn, user_id)
+
+
+def keeps_both(conn: sqlite3.Connection, user: dict) -> bool:
+    """Joining the main group moves a person out of «Предзакреп» — unless the admin allowed both (В13)."""
+    return "pre" in required(conn, user)
 
 
 async def auto_invites(conn: sqlite3.Connection, bot, notify) -> list[tuple[dict, str]]:
-    """Once per person and group: newcomers get «Предзакреп», the third confirmed day — «Основная команда».
-    Telegram is asked first, so a person already inside gets nothing. notify(user, kind, invite) sends the link."""
+    """Once per person: people without a questionnaire get «Основная команда» (ТЗ 28.10 В11); candidates are invited
+    by their steps instead. Telegram is asked first, so a person already inside gets nothing."""
     cfg = app_settings.get_all(conn)
     if bot is None or not cfg["groups_auto_invite"]:
         return []
-    days, st = work_days(conn), states(conn)
+    st, apps = states(conn), came_by_questionnaire(conn)
     sent = []
     for u in workers(conn):
-        kind = expected(days.get(u["id"], (0, None))[0], cfg["main_team_days"])
+        if u["id"] in apps:  # candidates are invited by their own steps: training agreed, «Принять в команду» (§6)
+            continue
+        need = required(conn, u, apps)  # ТЗ 28.10 В11: without a questionnaire — straight to the main group
+        if not need:
+            continue
+        kind = "main" if "main" in need else need[0]
         g = chat(conn, kind)
         if g is None or (st.get((u["id"], kind)) or {}).get("state") == "member":
             continue

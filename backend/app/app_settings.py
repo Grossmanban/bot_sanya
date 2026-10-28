@@ -54,6 +54,8 @@ SCHEMA: dict[str, tuple[str, str]] = {
     # the customer's module 3: unpaid internship units, then work units for the referrer's second bonus
     "internship_units": ("20", "count"),
     "second_stage_units": ("50", "count"),
+    # ТЗ 28.10 §5: at this many cancellations of a candidate's training staff get a warning (never an automatic refusal)
+    "training_cancel_limit": ("3", "count"),
     # ТЗ 27.10 §8: referral links and their QR codes change this often; the old one stops working
     "link_ttl_minutes": ("60", "ttl"),
     # ТЗ 27.10 §26–27: «Основная команда» from this many confirmed work days; personal invitations; a daily check

@@ -288,6 +288,14 @@ def _open_admin() -> InlineKeyboardMarkup | None:
     ]])
 
 
+def _open_app() -> InlineKeyboardMarkup | None:
+    if not settings.webapp_url.startswith("https://"):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📱 Открыть приложение", web_app=WebAppInfo(url=settings.webapp_url))
+    ]])
+
+
 def _open_schedule() -> InlineKeyboardMarkup | None:
     if not settings.webapp_url.startswith("https://"):
         return None
@@ -734,23 +742,67 @@ class Notifier:
         from datetime import date as _date
 
         trainer = svc.get_user(self.conn, app["trainer_id"])
-        handle = f"@{trainer['username']} ({escape(svc.full_name(trainer))})" if trainer["username"] else escape(svc.full_name(trainer))
         day = _date.fromisoformat(app["training_date"])
         return (f"📅 <b>Ваше обучение запланировано!</b>\n🗓 Дата: {ddmm_wd(day)}\n⏰ Время: {app['training_time']}\n"
-                f"📍 Место: {escape(app['training_location'])}\n👨‍🏫 Ваш тренер: {handle}\n\n"
+                f"📍 Место: {escape(app['training_location'])}\n👨‍🏫 Ваш тренер: {person_link(trainer)}\n\n"
                 "‼️ <b>ВАЖНО:</b> в случае неявки без предупреждения тренера дальнейшее сотрудничество может быть прекращено.\n"
                 "✅ Пожалуйста, нажмите кнопку ниже, чтобы подтвердить запись.")
 
-    async def training_assigned(self, app: dict) -> None:
+    def _candidate_buttons(self, app: dict) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")],
+            [InlineKeyboardButton(text="🔁 Прошу перенести", callback_data=f"trr:{app['id']}")]])
+
+    def trainer_message_text(self, trainer: dict) -> str:
+        """ТЗ 28.10 §2: «🎉 Хорошие новости!… Свяжитесь с <ФИО тренера>» — the editable text, the name opens the profile."""
+        from . import templates
+
+        return templates.render(self.conn, "candidate_trainer", ФИО_тренера=person_link(trainer))
+
+    async def trainer_message(self, app: dict) -> bool:
+        """The candidate learns who the trainer is; the 48 hours start (the caller records the send)."""
         user = svc.get_user(self.conn, app["user_id"])
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")]])
-        await self.send(user["telegram_id"], self._training_text(app), markup)
         trainer = svc.get_user(self.conn, app["trainer_id"])
-        await self.send(trainer["telegram_id"], f"🧑‍🎓 <b>Вам назначен кандидат на обучение</b>\n"
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Я связался с тренером", callback_data=f"tcw:{app['id']}")],
+            [InlineKeyboardButton(text="🙈 Не могу написать первым", callback_data=f"tcc:{app['id']}")]])
+        return await self.send(user["telegram_id"], self.trainer_message_text(trainer), markup)
+
+    async def trainer_assigned(self, app: dict, previous_id: int | None, send_candidate: bool) -> bool:
+        """§2–§3: the new trainer gets the candidate, the previous one learns they were handed over, the candidate
+        gets «свяжитесь с тренером» (if the admin sent it) or a short note about the new trainer."""
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+        await self.send(trainer["telegram_id"],
+                        f"🧑‍🎓 <b>Вам назначен кандидат на обучение</b>\n{self._application_who(app)}\n"
+                        "Согласуйте с ним дату обучения. Кандидат и запросы — в приложении, раздел «Обучение».", _open_app())
+        if previous_id and previous_id != trainer["id"]:
+            prev = svc.get_user(self.conn, previous_id)
+            if prev:
+                await self.send(prev["telegram_id"], f"ℹ️ Кандидат {escape(app['full_name'])} передан другому тренеру — "
+                                                     f"{escape(svc.full_name(trainer))}. Из вашего списка он убран.")
+        if send_candidate:
+            return await self.trainer_message(app)
+        if previous_id and previous_id != trainer["id"]:
+            user = svc.get_user(self.conn, app["user_id"])
+            return await self.send(user["telegram_id"], f"ℹ️ У вас новый тренер: {person_link(trainer)}.")
+        return False
+
+    async def training_assigned(self, app: dict, previous_id: int | None = None) -> None:
+        """§4: the date, time and place are set or changed — the candidate and the trainer confirm (В9)."""
+        user = svc.get_user(self.conn, app["user_id"])
+        await self.send(user["telegram_id"], self._training_text(app), self._candidate_buttons(app))
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="✅ Подтверждаю", callback_data=f"ttc:{app['id']}:{app['version']}")]])
+        await self.send(trainer["telegram_id"], f"📅 <b>Обучение кандидата назначено</b>\n"
                                                 f"{app['training_date'][8:10]}.{app['training_date'][5:7]} в {app['training_time']}, "
                                                 f"{escape(app['training_location'])}\n{self._application_who(app)}\n"
-                                                "Сообщу, когда кандидат подтвердит запись.")
+                                                "Подтвердите, что дата, время и место согласованы.", markup)
+        if previous_id and previous_id != trainer["id"]:
+            prev = svc.get_user(self.conn, previous_id)
+            if prev:
+                await self.send(prev["telegram_id"], f"ℹ️ Кандидат {escape(app['full_name'])} передан другому тренеру — "
+                                                     f"{escape(svc.full_name(trainer))}.")
 
     async def training_confirmed(self, app: dict) -> None:
         user = svc.get_user(self.conn, app["user_id"])
@@ -763,26 +815,195 @@ class Notifier:
     async def training_reminder(self, app: dict, kind: str) -> None:
         user = svc.get_user(self.conn, app["user_id"])
         head = "⏰ <b>Напоминание: завтра обучение</b>" if kind == "eve" else "⏰ <b>Сегодня ваше обучение</b>"
-        markup = None if app["training_confirmed_at"] else InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")]])
+        markup = None if app["training_confirmed_at"] else self._candidate_buttons(app)
         await self.send(user["telegram_id"], head + "\n\n" + self._training_text(app).split("\n\n")[0].split("\n", 1)[1], markup)
 
     async def training_cancelled(self, app: dict) -> None:
-        """The candidate is back among those waiting; the trainer is told the session is off."""
+        """§3, §5: a cancellation (not a refusal) — the candidate waits for a new date; the trainer is told."""
+        from . import training
+
         user = svc.get_user(self.conn, app["user_id"])
         day = app.get("cancelled_date")
         when = f" {day[8:10]}.{day[5:7]}" if day else ""
-        await self.send(user["telegram_id"], f"ℹ️ Обучение{when} отменено. Мы свяжемся с вами, когда назначим новую дату.")
+        what = "Вы не пришли на обучение" if app.get("cancel_kind") == "no_show" else f"Обучение{when} отменено"
+        await self.send(user["telegram_id"], f"ℹ️ {what}. Мы свяжемся с вами, когда согласуем новую дату.")
         trainer = svc.get_user(self.conn, app["cancelled_trainer_id"]) if app.get("cancelled_trainer_id") else None
+        n = len(training.cancellations(self.conn, app["id"]))
         if trainer:
-            await self.send(trainer["telegram_id"], f"ℹ️ Обучение{when} отменено\n{self._application_who(app)}")
+            await self.send(trainer["telegram_id"], f"ℹ️ {what if app.get('cancel_kind') != 'no_show' else 'Неявка кандидата'}"
+                                                    f"\n{self._application_who(app)}\nПричина: {escape(app.get('cancel_reason') or '')}\n"
+                                                    f"Отмены обучения: {n}/{training.limit(self.conn)}. Кандидат остаётся за вами.")
+        if n >= training.limit(self.conn) > 0:
+            await self.to_admins(f"⚠️ <b>Отмены обучения: {n}/{training.limit(self.conn)}</b> — {escape(app['full_name'])}.\n"
+                                 "Решите в «Онбординге»: продолжить обучение или отказать. Автоматического отказа нет.", _open_admin())
+
+    async def referrer_help(self, app: dict) -> bool:
+        """§2: the inviter is asked to help the candidate reach the trainer."""
+        from . import templates
+
+        ref = svc.get_user(self.conn, app["referrer_id"]) if app["referrer_id"] else None
+        trainer = svc.get_user(self.conn, app["trainer_id"]) if app["trainer_id"] else None
+        if ref is None or trainer is None:
+            return False
+        cand = svc.get_user(self.conn, app["user_id"])
+        text = templates.render(self.conn, "referrer_help", имя_пригласившего=escape(ref["first_name"]),
+                                ФИО_кандидата=person_link(cand, app["full_name"]), ФИО_тренера=person_link(trainer))
+        return await self.send(ref["telegram_id"], text)
+
+    async def candidate_answered(self, app: dict) -> None:
+        """«Я связался» / «Не могу написать первым» — to the trainer and the admins."""
+        user = svc.get_user(self.conn, app["user_id"])
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+        link = person_link(user, app["full_name"])
+        text = (f"✍️ Кандидат {link} сообщил, что связался с тренером {escape(svc.full_name(trainer))}."
+                if app["contact_answer"] == "wrote" else
+                f"⚠️ Кандидат {link} не может написать первым — напишите ему сами. Тренер: {person_link(trainer)}")
+        await self.send(trainer["telegram_id"], text)
+        await self.to_admins(text, exclude=trainer["telegram_id"])
+
+    # ------------------------------------------------------------ «Ожидает согласования» (ТЗ 28.10 §3–§4)
+
+    def _request_text(self, req: dict) -> str:
+        from . import training
+
+        app = training.get(self.conn, req["application_id"])
+        who = svc.get_user(self.conn, app["user_id"])
+        initiator = svc.get_user_by_tg(self.conn, req["initiator_tg"]["telegram_id"]) if req.get("initiator_tg") else None
+        role = "тренер" if req["initiator_role"] == "trainer" else "кандидат"
+        trainer = svc.get_user(self.conn, app["trainer_id"]) if app["trainer_id"] else None
+        lines = [f"⏳ <b>Запрос: {escape(req['title'])}</b>",
+                 f"От: {person_link(initiator) if initiator else '—'} ({role})",
+                 f"Кандидат: {person_link(who, app['full_name'])}",
+                 f"Тренер: {escape(svc.full_name(trainer)) if trainer else '—'}"]
+        if req["kind"] == "change":
+            old, new = req["old"], req["payload"]
+
+            def line(label, a, b):
+                return f"{label}: {escape(str(a or '—'))} → <b>{escape(str(b))}</b>" if b else None
+            lines += [x for x in (line("Дата", old.get("training_date"), new.get("date")),
+                                  line("Время", old.get("training_time"), new.get("time")),
+                                  line("Место", old.get("training_location"), new.get("location"))) if x]
+            if req.get("new_trainer"):
+                lines.append(f"Новый тренер: <b>{escape(req['new_trainer'])}</b>")
+            if new.get("note"):
+                lines.append(f"Пожелание: {escape(new['note'])}")
+        if req.get("reason"):
+            lines.append(f"Причина: {escape(req['reason'])}")
+        lines.append("До решения действуют прежние параметры.")
+        return "\n".join(lines)
+
+    async def training_request_created(self, req: dict) -> None:
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"trq:a:{req['id']}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"trq:r:{req['id']}")]])
+        if req["kind"] == "change" and req["initiator_role"] == "candidate":  # the new date is the admin's to set
+            rows = [[InlineKeyboardButton(text="❌ Отклонить", callback_data=f"trq:r:{req['id']}")]]
+            if settings.webapp_url.startswith("https://"):
+                rows.insert(0, [InlineKeyboardButton(text="📅 Назначить в приложении", web_app=WebAppInfo(url=settings.webapp_url))])
+            markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        text = self._request_text(req)
+        for chat in svc.admin_telegram_ids(self.conn):
+            if self.bot is None:
+                log.info("[request → %s] %s", chat, text[:80])
+                continue
+            try:
+                msg = await self._retry(lambda: self.bot.send_message(chat, text, parse_mode="HTML", reply_markup=markup,
+                                                                      disable_web_page_preview=True))
+                self.conn.execute("INSERT INTO request_messages (request_id, chat_id, message_id) VALUES (?, ?, ?)",
+                                  (req["id"], chat, msg.message_id))
+            except Exception as exc:
+                log.warning("request card to %s failed: %s", chat, exc)
+
+    async def training_request_decided(self, req: dict, actor: dict, effect: dict | None) -> None:
+        """Everyone learns the decision; the cards with buttons at every admin become «Решено: кем» (§4, В10)."""
+        from . import training
+
+        verdict = "✅ Одобрено" if req["status"] == "approved" else "❌ Отклонено"
+        line = f"\n\n<b>{verdict}</b> — {escape(svc.full_name(actor))}" + (
+            f"\nПричина: {escape(req['decision_reason'])}" if req.get("decision_reason") else "")
+        for chat, message_id in self.conn.execute("SELECT chat_id, message_id FROM request_messages WHERE request_id = ?",
+                                                  (req["id"],)).fetchall():
+            if self.bot is None:
+                break
+            try:
+                await self.bot.edit_message_text(self._request_text(req) + line, chat_id=chat, message_id=message_id,
+                                                 parse_mode="HTML", disable_web_page_preview=True)
+            except Exception:
+                log.debug("could not mark the request card", exc_info=True)
+        app = training.get(self.conn, req["application_id"])
+        initiator = svc.get_user_by_tg(self.conn, req["initiator_tg"]["telegram_id"]) if req.get("initiator_tg") else None
+        if initiator:
+            text = f"{verdict}: «{escape(req['title'])}» — {escape(app['full_name'])}" if req["initiator_role"] == "trainer" \
+                else f"{verdict}: ваш запрос на перенос обучения."
+            if req.get("decision_reason"):
+                text += f"\nПричина: {escape(req['decision_reason'])}"
+            await self.send(initiator["telegram_id"], text)
+        if not effect:
+            return
+        kind, app = effect["kind"], effect["app"]
+        if kind == "change":
+            await self.training_assigned(app, effect.get("previous_trainer"))
+        elif kind == "cancel":
+            await self.training_cancelled(app)
+        elif kind == "refuse":
+            await self.application_rejected(app)
+        elif kind == "internship":
+            await self.internship_started(app)
+        elif kind == "start" and initiator is None:
+            pass
+
+    async def invite_pre_if_agreed(self, app: dict) -> str | None:
+        """§6: once the candidate (and the trainer) confirmed the training — the personal invitation to «Предзакреп».
+        Not earlier, not twice, not to someone already inside."""
+        from . import groups, templates, training
+
+        app = training.get(self.conn, app["id"])
+        if not training.agreed(app) or app["pre_invited_at"]:
+            return None
+        user = svc.get_user(self.conn, app["user_id"])
+        result = await groups.invite_person(self.conn, self.bot, self, user, "pre", templates.render(self.conn, "pre_invite"), None)
+        if result in ("sent", "member"):
+            training.mark(self.conn, app["id"], "pre_invited_at")
+        return result
+
+    async def team_accepted(self, app: dict, actor: dict) -> str:
+        """§6 «Принять в команду»: congratulations and the personal button into the main group (unless inside)."""
+        from . import groups, templates, training
+
+        user = svc.get_user(self.conn, app["user_id"])
+        text = templates.render(self.conn, "team_welcome", имя=escape(user["first_name"]))
+        result = await groups.invite_person(self.conn, self.bot, self, user, "main", text, actor)
+        if result in ("member", "no_group"):  # nothing to join — the congratulations still go
+            await self.send(user["telegram_id"], text.split("\n")[0])
+        if result in ("sent", "member"):
+            training.mark(self.conn, app["id"], "team_invited_at")
+        return result
+
+    async def finish_requested(self, app: dict) -> None:
+        await self.to_admins(f"🎯 <b>{escape(app['full_name'])}</b>: тренер отметил, что стажировка завершена. "
+                             "Ожидает проверки администратора — «Онбординг» → «Принять в команду».", _open_admin())
+
+    async def group_invite_button(self, user: dict, kind: str, inv: dict, text: str) -> bool:
+        """§6: a personal invitation with a button (the link only sends a join request — the bot approves it for
+        this person alone)."""
+        from . import groups
+
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text=f"Вступить в группу «{groups.KINDS[kind]}»", url=inv["link"])]])
+        ok = await self.send(user["telegram_id"], text, markup)
+        await self.archive(["группа"], f"👥 {who(user)}: приглашение в «{groups.KINDS[kind]}»"
+                                       + ("" if ok else " — бот не смог написать человеку"), user)
+        return ok
 
     async def application_rejected(self, app: dict) -> None:
         user = svc.get_user(self.conn, app["user_id"])
         text = "К сожалению, мы вынуждены отказать вам в сотрудничестве."
         if app["reject_reason"]:
             text += f"\nПричина: {escape(app['reject_reason'])}"
-        await self.send(user["telegram_id"], text)
+        await self.send(user["telegram_id"], text, force=True)  # the account is blocked by now (§6)
+        trainer = svc.get_user(self.conn, app["trainer_id"]) if app.get("trainer_id") else None
+        if trainer:
+            await self.send(trainer["telegram_id"], f"ℹ️ Кандидату {escape(app['full_name'])} отказано — он убран из вашего списка.")
 
     async def application_returned(self, app: dict) -> None:
         user = svc.get_user(self.conn, app["user_id"])

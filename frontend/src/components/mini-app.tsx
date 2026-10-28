@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Briefcase, CalendarDays, ShieldCheck, Trophy, UserRound } from "lucide-react";
+import { Briefcase, CalendarDays, GraduationCap, ShieldCheck, Trophy, UserRound } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
 import { getThemePref, initData, setBotUsername, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
@@ -16,16 +16,18 @@ import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
 import { EventsScreen } from "./events/live";
 import { WorkScreen } from "./work/work-screen";
+import { TrainingScreen } from "./training/training-screen";
 import { Avatar } from "./avatar";
 import { ThemeButton, ThemeChoice } from "./theme-toggle";
 import { ProfileFallback } from "./profile-fallback";
 
-type Tab = "schedule" | "work" | "events" | "profile" | "admin";
+type Tab = "schedule" | "work" | "training" | "events" | "profile" | "admin";
 
 // ТЗ 28.10 §8 (В24): Работа, График, (Обучение), События, Профиль, Админ — unavailable ones are hidden
 const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
   { id: "work", label: "Работа", icon: Briefcase },
   { id: "schedule", label: "График", icon: CalendarDays },
+  { id: "training", label: "Обучение", icon: GraduationCap },
   { id: "events", label: "События", icon: Trophy },
   { id: "profile", label: "Профиль", icon: UserRound },
   { id: "admin", label: "Админ", icon: ShieldCheck },
@@ -128,7 +130,7 @@ export function MiniApp() {
     // the events tab appears while there is an active (or just finished) event for this person
     // «Работа» appears with access to at least one product (ТЗ 27.10 §28)
     const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0)
-      && (t.id !== "work" || (me.products?.length ?? 0) > 0))
+      && (t.id !== "work" || (me.products?.length ?? 0) > 0) && (t.id !== "training" || !!me.training))
       .map((t) => (t.id === "admin" ? { ...t, label: STAFF_TAB[user.role] } : t));
     const working = user.work_status === "working";
     const badge = (id: Tab) => (id === "admin" ? pendingTotal : 0);
@@ -211,6 +213,7 @@ export function MiniApp() {
                               internship={me.internship} />
             )}
             {tab === "events" && <EventsScreen />}
+            {tab === "training" && <TrainingScreen />}
             {tab === "work" && <WorkScreen products={me.products ?? []} working={working} onOpenProfile={() => go("profile")} />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} botUsername={me.bot_username} />}
             {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} />}

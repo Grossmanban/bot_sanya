@@ -1134,6 +1134,93 @@ def _templates(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_templates)
 
 
+def _training(conn: sqlite3.Connection) -> None:
+    """Migration 32 — ТЗ 28.10 §2–§6: the trainer of a candidate as a step of its own, the 48-hour timer, the
+    trainer's confirmation, «Обучение начато», requests that wait for an admin, cancellations counted, personal
+    access to «Обучение». The application statuses stay as they were (no table rebuild): the finer stage is
+    derived from these columns."""
+    import json
+
+    for column in ("trainer_assigned_at TEXT", "contact_timer_at TEXT", "trainer_confirmed_at TEXT",
+                   "training_started_at TEXT", "finish_requested_at TEXT", "cancel_ack INTEGER NOT NULL DEFAULT 0",
+                   "version INTEGER NOT NULL DEFAULT 1", "pre_invited_at TEXT", "team_invited_at TEXT"):
+        conn.execute(f"ALTER TABLE applications ADD COLUMN {column}")
+    # trainings set before: the admin set the trainer and the date together — the trainer's part counts as agreed
+    conn.execute("UPDATE applications SET trainer_assigned_at = training_set_at WHERE trainer_id IS NOT NULL")
+    conn.execute("""UPDATE applications SET trainer_confirmed_at = training_set_at
+                    WHERE trainer_id IS NOT NULL AND training_date IS NOT NULL""")
+    conn.execute("""CREATE TABLE training_requests (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id  INTEGER NOT NULL REFERENCES applications(id),
+        kind            TEXT NOT NULL CHECK (kind IN ('start','refuse','cancel','change','internship')),
+        initiator_id    INTEGER REFERENCES users(id),
+        initiator_role  TEXT NOT NULL CHECK (initiator_role IN ('trainer','candidate')),
+        reason          TEXT,
+        payload         TEXT,
+        old             TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','stale')),
+        app_version     INTEGER NOT NULL,
+        created_at      TEXT NOT NULL,
+        decided_by      INTEGER,
+        decided_at      TEXT,
+        decision_reason TEXT)""")
+    conn.execute("""CREATE UNIQUE INDEX ux_training_requests_pending ON training_requests (application_id, kind)
+                    WHERE status = 'pending'""")
+    conn.execute("""CREATE TABLE request_messages (
+        request_id  INTEGER NOT NULL REFERENCES training_requests(id),
+        chat_id     INTEGER NOT NULL,
+        message_id  INTEGER NOT NULL)""")
+    conn.execute("""CREATE TABLE training_cancellations (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id  INTEGER NOT NULL REFERENCES applications(id),
+        kind            TEXT NOT NULL CHECK (kind IN ('cancel','no_show')),
+        at              TEXT NOT NULL,
+        initiator_id    INTEGER,
+        initiator_role  TEXT,
+        reason          TEXT,
+        legacy          INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("""CREATE TABLE candidate_messages (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id  INTEGER NOT NULL REFERENCES applications(id),
+        kind            TEXT NOT NULL,
+        sent_at         TEXT NOT NULL,
+        sent_by         INTEGER,
+        delivered       INTEGER NOT NULL DEFAULT 1)""")
+    conn.execute("""CREATE TABLE training_access (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id),
+        granted_at  TEXT NOT NULL,
+        granted_by  INTEGER,
+        revoked_at  TEXT,
+        revoked_by  INTEGER,
+        auto        INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("CREATE UNIQUE INDEX ux_training_access_live ON training_access (user_id) WHERE revoked_at IS NULL")
+    # cancellations made before: counted too, marked «до 28.10» (В8)
+    for row in conn.execute("SELECT * FROM event_logs WHERE event_type = 'TRAINING_CANCELLED' ORDER BY id").fetchall():
+        try:
+            app_id = json.loads(row["new_value"] or "{}").get("application")
+        except ValueError:
+            app_id = None
+        if app_id and conn.execute("SELECT 1 FROM applications WHERE id = ?", (app_id,)).fetchone():
+            conn.execute("""INSERT INTO training_cancellations (application_id, kind, at, initiator_id, initiator_role, legacy)
+                            VALUES (?, 'cancel', ?, ?, 'admin', 1)""", (app_id, row["created_at"], row["actor_id"]))
+    # trainers already assigned get «Обучение» automatically
+    for (user_id,) in conn.execute("""SELECT DISTINCT trainer_id FROM applications WHERE trainer_id IS NOT NULL
+                                      AND status IN ('scheduled', 'internship')""").fetchall():
+        conn.execute("INSERT INTO training_access (user_id, granted_at, auto) VALUES (?, datetime('now'), 1)", (user_id,))
+
+
+MIGRATIONS.append(_training)
+
+# 33 — ТЗ 28.10 §15: who must be in which group is up to the admin per person (both groups are fine for some),
+# and «Не новичок — подтвердить» counts a person as experienced without touching their role
+MIGRATIONS.append("""
+ALTER TABLE users ADD COLUMN group_mode TEXT;
+ALTER TABLE users ADD COLUMN not_newbie_at TEXT;
+ALTER TABLE users ADD COLUMN not_newbie_by INTEGER;
+""")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

@@ -92,14 +92,12 @@ def test_personal_invitation_only_for_that_person(conn, make_user):
 
 
 def test_board_auto_invites_and_reconciliation(conn, make_user):
+    """ТЗ 28.10 §6, §15: people without a questionnaire go straight to the main group; both groups are a problem
+    only until the admin allows them; per-person groups and «Не новичок»."""
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     connected(conn, owner)
     bot = FakeBot()
     new, vet, both = make_user(first="Новичок"), make_user(first="Опытный"), make_user(first="Везде")
-    mon = date(2026, 10, 12)
-    for i in range(3):
-        did(conn, vet, mon + timedelta(days=i), 25)
-        did(conn, both, mon + timedelta(days=i), 25)
     bot.members[(PRE, vet["telegram_id"])] = "member"
     bot.members[(PRE, both["telegram_id"])] = "member"
     bot.members[(MAIN, both["telegram_id"])] = "member"
@@ -110,19 +108,32 @@ def test_board_auto_invites_and_reconciliation(conn, make_user):
         return True
 
     out = run(groups.auto_invites(conn, bot, notify))
-    assert sorted(sent) == [("Новичок", "pre"), ("Опытный", "main")]  # «Везде» already in the main team
+    assert sorted(sent) == [("Новичок", "main"), ("Опытный", "main")]  # «Везде» already in the main team
     assert len(out) == 2 and run(groups.auto_invites(conn, bot, notify)) == []  # once
     run(groups.check(conn, bot))
     rows = {r["name"].split()[0]: r for r in groups.board(conn)["items"]}
-    assert rows["Новичок"]["expected"] == "pre" and rows["Новичок"]["issues"] == ["Не состоит ни в одной группе"]
-    assert rows["Новичок"]["invites"]["pre"]["auto"] and rows["Новичок"]["action"] == "invite_pre"
-    assert rows["Опытный"]["action"] == "move" and any("пора переводить" in i for i in rows["Опытный"]["issues"])
-    assert "Состоит в обеих группах" in rows["Везде"]["issues"] and rows["Везде"]["action"] == "remove_pre"
-    # a newcomer who got into the main team is flagged
+    assert rows["Новичок"]["required"] == ["main"] and rows["Новичок"]["issues"] == ["Не хватает: «Основная команда»"]
+    assert rows["Новичок"]["invites"]["main"]["auto"] and rows["Новичок"]["action"] == "invite_main"
+    assert rows["Опытный"]["issues"] == ["Не хватает: «Основная команда»", "Остался в «Предзакрепе»"]
+    assert rows["Везде"]["issues"] == ["Состоит в обеих группах"]
+    assert rows["Везде"]["problems"][0]["actions"] == ["remove_pre", "allow_both"]
+    # В13: the admin allows both groups — it's normal now, and joining the main group won't move them out
+    groups.set_mode(conn, owner, both["id"], "both", svc.new_key())
+    rows = {r["name"].split()[0]: r for r in groups.board(conn)["items"]}
+    assert rows["Везде"]["issues"] == [] and rows["Везде"]["required"] == ["pre", "main"]
+    assert groups.keeps_both(conn, svc.get_user(conn, both["id"]))
+    # a person kept in «Предзакреп» who got into the main team: «Не новичок — подтвердить» settles it, and it's undone
+    groups.set_mode(conn, owner, new["id"], "pre", svc.new_key())
     bot.members[(MAIN, new["telegram_id"])] = "member"
     run(groups.check(conn, bot, {new["id"]}))
     row = next(r for r in groups.board(conn)["items"] if r["user_id"] == new["id"])
-    assert row["action"] == "remove_main" and "Новичок в основной команде" in row["issues"]
+    assert "Новичок в основной команде" in row["issues"]
+    groups.set_mode(conn, owner, new["id"], None, svc.new_key())
+    groups.set_not_newbie(conn, owner, new["id"], True, svc.new_key())
+    row = next(r for r in groups.board(conn)["items"] if r["user_id"] == new["id"])
+    assert row["issues"] == [] and row["not_newbie"] and svc.get_user(conn, new["id"])["role"] == "employee"
+    groups.set_not_newbie(conn, owner, new["id"], False, svc.new_key())
+    assert not next(r for r in groups.board(conn)["items"] if r["user_id"] == new["id"])["not_newbie"]
     # moving out of «Предзакреп» needs the right to ban — without it, a clear error, nothing changes
     run(groups.remove(conn, bot, svc.get_user(conn, both["id"]), "pre", owner))
     assert groups.states(conn)[(both["id"], "pre")]["state"] == "out"
