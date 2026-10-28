@@ -166,7 +166,7 @@ function NetworkCard({ net, people, owners, canEdit, onChanged }: {
             <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 py-2.5 md:px-6">
               <span className={cn("size-1.5 rounded-full", m.work_status === "working" ? "bg-go" : "bg-idle")} />
               <button className="min-w-0 flex-1 truncate text-left text-[15px] underline-offset-2 hover:underline"
-                      onClick={() => openProfile(m.username, m.telegram_id)}>{m.name}</button>
+                      onClick={() => openProfile(m.username, m.telegram_id, m.name)}>{m.name}</button>
               {m.role === "instructor" && <span className="shrink-0 rounded-full bg-wait-soft px-2 py-0.5 text-xs font-semibold text-wait">инструктор</span>}
               {canEdit && m.role === "employee" && instructors.length > 0 && (
                 <select aria-label="Кому подчиняется" disabled={!!busy} value={m.instructor_id ?? ""}

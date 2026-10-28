@@ -12,9 +12,9 @@ import { cn } from "@/lib/utils";
 import { Camera } from "./camera";
 
 /** ТЗ 27.10 §28: «Работа» — the products this person has access to (the server checks it again everywhere). */
-export function WorkScreen({ products }: { products: Product[] }) {
+export function WorkScreen({ products, working = true, onOpenProfile }: { products: Product[]; working?: boolean; onOpenProfile?: () => void }) {
   const [open, setOpen] = useState<Product | null>(products.length === 1 ? products[0] : null);
-  if (open === "alice") return <AliceScreen onBack={products.length > 1 ? () => setOpen(null) : undefined} />;
+  if (open === "alice") return <AliceScreen onBack={products.length > 1 ? () => setOpen(null) : undefined} working={working} onOpenProfile={onOpenProfile} />;
   return (
     <div className="mx-auto max-w-2xl space-y-4">
       <h1 className="font-display text-2xl font-semibold">Работа</h1>
@@ -43,7 +43,7 @@ const COUNTS: { key: keyof AliceCounts; label: string; tone: string }[] = [
   { key: "paid", label: "Оплачено", tone: "text-go" },
 ];
 
-function AliceScreen({ onBack }: { onBack?: () => void }) {
+function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; working: boolean; onOpenProfile?: () => void }) {
   const { data, setData, reload } = useLoad(() => api.alice(), []);
   const { busy, run } = useAction();
   const [period, setPeriod] = useState<"today" | "week" | "all">("today");
@@ -90,9 +90,15 @@ function AliceScreen({ onBack }: { onBack?: () => void }) {
             и поисковый запрос. После завершения фото уходят на модерацию.
           </p>
           <Button className="press h-12 w-full rounded-2xl bg-white text-[15px] font-semibold text-hero hover:bg-white/90"
-                  disabled={!!busy} onClick={() => act("start", (k) => api.aliceStart(k))}>
+                  disabled={!!busy || !working} onClick={() => act("start", (k) => api.aliceStart(k))}>
             {busy === "start" ? <LoaderCircle className="animate-spin" /> : <Play />} Начать выполнение
           </Button>
+          {!working && (
+            <p className="text-sm text-hero-muted">
+              Новые выполнения — только со статусом «Работаю».{" "}
+              {onOpenProfile && <button className="font-semibold underline underline-offset-2" onClick={onOpenProfile}>Открыть профиль</button>}
+            </p>
+          )}
           {!data.has_qr && <p className="text-sm text-hero-muted">На вас не назначен QR-код. Обратитесь к администратору.</p>}
         </section>
       )}

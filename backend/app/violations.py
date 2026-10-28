@@ -186,7 +186,7 @@ def has_personal_norms(conn: sqlite3.Connection) -> bool:
 def scan(conn: sqlite3.Connection, common: int, today: date | None = None) -> list[dict]:
     """Create violations for the last finished week (Mon–Sun before `today`). `common` is the common
     norm (0 = switched off). Safe to run again: one violation per person and week. People paused,
-    blocked or approved during that week are skipped."""
+    blocked, approved during that week or «Не работаю» since that week are skipped."""
     today = today or today_local()
     start = week_start(today) - timedelta(days=7)
     end = start + timedelta(days=6)
@@ -196,6 +196,9 @@ def scan(conn: sqlite3.Connection, common: int, today: date | None = None) -> li
             """SELECT * FROM users WHERE status = 'approved' AND account_state = 'active'
                AND (decided_at IS NULL OR substr(decided_at, 1, 10) < ?)""", (start.isoformat(),)).fetchall():
             u = dict(u)
+            # ТЗ 28.10 §9, В27: «Не работаю» during that week — no check (switching off after the week doesn't dodge it)
+            if u["work_status"] != "working" and (u["work_status_at"] or "")[:10] <= end.isoformat():
+                continue
             quota = norm_of(u, common)
             if quota <= 0 or perms.role_of(u) not in (perms.EMPLOYEE, perms.TRAINER, perms.INSTRUCTOR):
                 continue

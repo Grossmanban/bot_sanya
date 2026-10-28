@@ -9,7 +9,7 @@ import { api, type MoneyPerson, type Tx, type TxType, type User } from "@/lib/ap
 import { useCan } from "@/lib/caps";
 import { rub } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
-import { openChat, tapHaptic } from "@/lib/telegram";
+import { openProfile, tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
@@ -253,12 +253,17 @@ export function PersonMoney({ person, onClose, onChanged }: {
           <div className={cn("space-y-5 overflow-y-auto px-5", wide ? "h-full py-8" : "pb-safe pt-2")}>
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
-                <DrawerTitle className="font-display text-xl font-semibold">{person.name}</DrawerTitle>
+                <DrawerTitle className="font-display text-xl font-semibold">
+                  <button type="button" className="text-left underline-offset-2 hover:underline"
+                          onClick={() => openProfile(person.username, person.telegram_id, person.name)}>{person.name}</button>
+                </DrawerTitle>
                 <DrawerDescription>Штрафы, бонусы и вычеты</DrawerDescription>
               </div>
-              <Button variant="secondary" size="sm" className="press h-9 rounded-xl" onClick={() => openChat(person)}>
-                <MessageCircle /> Написать
-              </Button>
+              {person.username && (
+                <Button variant="secondary" size="sm" className="press h-9 rounded-xl" onClick={() => openProfile(person.username, person.telegram_id)}>
+                  <MessageCircle /> Написать
+                </Button>
+              )}
               {wide && (
                 <DrawerClose className="grid size-9 place-items-center rounded-full bg-muted" aria-label="Закрыть"><X className="size-4" /></DrawerClose>
               )}

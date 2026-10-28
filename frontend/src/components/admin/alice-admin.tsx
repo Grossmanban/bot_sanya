@@ -104,7 +104,7 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="font-semibold">{task.number}
-            <button className="ml-2 font-normal underline-offset-2 hover:underline" onClick={() => openProfile(task.username, task.telegram_id)}>
+            <button className="ml-2 font-normal underline-offset-2 hover:underline" onClick={() => openProfile(task.username, task.telegram_id, task.name)}>
               {task.name}
             </button>
           </p>

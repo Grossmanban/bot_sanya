@@ -126,7 +126,8 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
   // after 22:00 the day before there's no booking for tomorrow (from 00:00 — an urgent one for today)
   const closed = !shift && day.phase === "late";
   const formMode = mode !== "view" && mode !== "contact" && !(mode === "create" && closed);
-  const blocked = !working && mode !== "edit";
+  // ТЗ 28.10 §9: «Не работаю» closes new shifts and editing; cancelling a booked shift stays possible
+  const blocked = !working;
   // 22:00 the day before has passed: the volume stays, only the time and the point change
   const volumeLocked = mode === "edit" && !!shift && !shift.volume_open;
 
@@ -442,7 +443,7 @@ function ShiftView({ shift }: { shift: Shift }) {
           Изменить этот день можно только через администратора.
         </Notice>
       )}
-      {status === "rejected_by_admin" && <Notice tone="muted">Администратор не подтвердил выход на этот день.</Notice>}
+      {status === "rejected_by_admin" && <Notice tone="muted">Руководитель не подтвердил выход на этот день.</Notice>}
     </div>
   );
 }

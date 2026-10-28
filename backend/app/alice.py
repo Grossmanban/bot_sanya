@@ -280,6 +280,8 @@ def start(conn: sqlite3.Connection, user: dict, key: str) -> dict:
             return going
         if _seen(conn, key):
             return get(conn, conn.execute("SELECT MAX(id) FROM alice_tasks WHERE user_id = ?", (user["id"],)).fetchone()[0])
+        # ТЗ 28.10 §9, В27: a new execution needs «Работаю»; one already started can still be finished or stopped
+        svc.require_working(svc.get_user(conn, user["id"]), "Новые выполнения недоступны")
         qr = assigned_qr(conn, user["id"])
         if qr is None:
             raise ServiceError("На вас не назначен QR-код. Обратитесь к администратору", 409, "no_qr")

@@ -91,11 +91,22 @@ let botName: string | null = null;
 export function setBotUsername(name: string | null | undefined) {
   botName = name ?? null;
 }
+export function botUsername(): string | null {
+  return botName;
+}
 
-/** ТЗ 27.10 §11: a person's Telegram profile by the Telegram ID (never the database id).
- * With a username — t.me/<username>, which every client opens. Without one Telegram guarantees nothing:
- * the bot sends a card whose name opens the profile and the chat with the bot opens; failing that — tg://user?id. */
-export function openProfile(username: string | null | undefined, telegramId?: number | null) {
+export type ProfileTarget = { telegramId: number; name?: string | null };
+let profileFallback: ((p: ProfileTarget) => void) | null = null;
+/** The app shell registers the sheet shown for people without a username (ТЗ 28.10 §17). */
+export function onProfileFallback(fn: ((p: ProfileTarget) => void) | null) {
+  profileFallback = fn;
+}
+
+/** ТЗ 28.10 §17: the one way to open a person's Telegram profile, always by the Telegram ID (never the database id).
+ * With a username — t.me/<username>, which every client opens. Without one Telegram guarantees nothing, and
+ * tg://user?id does nothing inside the Mini App on iOS/Android — so an honest sheet opens instead: the ID to copy
+ * and a card sent to the chat with the bot (whose button works when the person's privacy allows it). */
+export function openProfile(username: string | null | undefined, telegramId?: number | null, name?: string | null) {
   const app = webApp();
   if (username) {
     const url = `https://t.me/${username}`;
@@ -104,21 +115,7 @@ export function openProfile(username: string | null | undefined, telegramId?: nu
     return;
   }
   if (!telegramId) return;
-  void (async () => {
-    try {
-      const { api } = await import("./api");  // lazy: api imports this module
-      const res = await api.profileLink(telegramId);
-      const bot = res.bot_username ?? botName;
-      if (res.sent && bot) {
-        if (app) app.openTelegramLink(`https://t.me/${bot}`);
-        else window.open(`https://t.me/${bot}`, "_blank");
-        return;
-      }
-    } catch {
-      /* no rights or no bot: try the direct link */
-    }
-    window.location.href = `tg://user?id=${telegramId}`;
-  })();
+  profileFallback?.({ telegramId, name });
 }
 
 export function haptic(type: HapticNotification) {
@@ -239,18 +236,6 @@ export function bindBackButton(active: boolean, onBack: () => void) {
     back.offClick(onBack);
     back.hide();
   };
-}
-
-/** Open a person's Telegram profile: t.me/username, or tg://user?id= when they have no username. */
-export function openChat(user: { username: string | null; telegram_id: number }) {
-  if (user.username) {
-    const link = `https://t.me/${user.username}`;
-    const tg = webApp();
-    if (tg) tg.openTelegramLink(link);
-    else window.open(link, "_blank");
-  } else {
-    window.location.href = `tg://user?id=${user.telegram_id}`;
-  }
 }
 
 export type HomeScreenStatus = "unsupported" | "unknown" | "added" | "missed";

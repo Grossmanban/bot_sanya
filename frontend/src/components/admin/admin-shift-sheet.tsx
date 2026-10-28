@@ -153,7 +153,7 @@ export function AdminShiftSheet({
                 <div className="min-w-0">
                   <DrawerTitle className="truncate font-display text-xl font-semibold">
                     <button className="max-w-full truncate text-left underline-offset-4 hover:underline"
-                            onClick={() => openProfile(shift.username, shift.telegram_id)}>{shift.name}</button>
+                            onClick={() => openProfile(shift.username, shift.telegram_id, shift.name)}>{shift.name}</button>
                   </DrawerTitle>
                   <DrawerDescription>
                     {longDate(shift.date)}

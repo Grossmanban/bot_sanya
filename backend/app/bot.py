@@ -84,8 +84,36 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=RASPRED_BUTTON)]], resize_keyboard=True)
 
 
+def make_block_guard(conn: sqlite3.Connection):
+    """The bot's middleware for blocked people (ТЗ 28.10 §16)."""
+
+    async def block_guard(handler, event, data):
+        """ТЗ 28.10 §16: a blocked person can do nothing in the bot — no buttons (old ones included), no commands,
+        no dialogs. One clear answer instead. Group chats (the owners' commands) are not touched."""
+        tg = getattr(event, "from_user", None)
+        chat = event.chat if isinstance(event, Message) else None
+        if tg is not None and (chat is None or chat.type == "private") and tg.id not in settings.admin_ids:
+            user = svc.get_user_by_tg(conn, tg.id)
+            if user is not None and user["account_state"] == "blocked":
+                state = data.get("state")
+                if state is not None:
+                    await state.clear()
+                if isinstance(event, CallbackQuery):
+                    await event.answer(notify.BLOCKED_TEXT, show_alert=True)
+                else:
+                    await event.answer(notify.BLOCKED_TEXT)
+                return None
+        return await handler(event, data)
+
+    return block_guard
+
+
 def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     router = Router()
+
+    block_guard = make_block_guard(conn)
+    router.message.outer_middleware(block_guard)
+    router.callback_query.outer_middleware(block_guard)
 
     def allowed(telegram_id: int, capability: str, target_user_id: int | None = None) -> dict | None:
         """The acting user if they hold the capability (for that employee), else None."""
@@ -109,7 +137,8 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             text += "\n\n⚠️ Ссылка на приложение ещё не настроена (WEBAPP_URL)."
         await message.answer(text, reply_markup=markup)
         if perms.can(user, "raspred"):
-            await message.answer("Админ: распред на завтра — кнопкой ниже или /raspred_zavtra",
+            await message.answer(f"{notify.STAFF_TAB.get(perms.role_of(user), 'Админ')}: распред на завтра — кнопкой ниже "
+                                 "или /raspred_zavtra",
                                  reply_markup=admin_reply_keyboard())
 
     # ------------------------------------------------------------ /start and registration
@@ -169,7 +198,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         elif user["status"] == "rejected":
             await message.answer("В доступе отказано.")
         elif user["account_state"] == "blocked":
-            await message.answer("⛔ Аккаунт заблокирован. Если это ошибка — свяжитесь с руководителем.")
+            await message.answer(notify.BLOCKED_TEXT)
         else:
             if svc.claim_welcome(conn, user["id"]):
                 await message.answer(WELCOME)
@@ -535,7 +564,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             return
         lines = ["💰 <b>Финансы</b>"]
         for p in people:
-            link = f'<a href="tg://user?id={p["telegram_id"]}">{escape(p["name"])}</a>'
+            link = notify.person_link({"telegram_id": p["telegram_id"], "username": p.get("username")}, p["name"])
             parts = []
             if p["fines"]:
                 parts.append(f"штрафы {p['fines']} ₽")

@@ -19,7 +19,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
 import { dayMonth, offFor } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
-import { haptic, openChat, openProfile, webApp } from "@/lib/telegram";
+import { haptic, openProfile, webApp } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
 import { cn } from "@/lib/utils";
 import { Avatar } from "../avatar";
@@ -315,8 +315,8 @@ function MemberSheet({
                     {user.username ? `@${user.username}, ` : ""}ID {user.telegram_id}
                   </DrawerDescription>
                   <button className="mt-1 text-sm font-semibold text-primary underline-offset-2 hover:underline"
-                          onClick={() => openProfile(user.username, user.telegram_id)}>
-                    Открыть профиль в Telegram{user.username ? "" : " (через бота)"}
+                          onClick={() => openProfile(user.username, user.telegram_id, `${user.first_name} ${user.last_name}`)}>
+                    Открыть профиль в Telegram
                   </button>
                 </div>
                 {wide && (
@@ -358,10 +358,10 @@ function MemberSheet({
 
               {approved && <Requisites userId={user.id} />}
 
-              {!isSelf && (
+              {!isSelf && user.username && (
                 <Button variant="secondary" className="press mt-5 h-12 w-full rounded-2xl text-[15px] font-semibold"
-                        onClick={() => openChat(user)}>
-                  <MessageCircle /> Открыть в Telegram
+                        onClick={() => openProfile(user.username, user.telegram_id)}>
+                  <MessageCircle /> Написать в Telegram
                 </Button>
               )}
 
@@ -496,16 +496,18 @@ function MemberSheet({
           <AlertDialogHeader>
             <AlertDialogTitle className="font-display">Заблокировать {user?.first_name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              Доступ к графику и отчётам закроется, права будут сняты. История и деньги сохранятся, разблокировать можно в любой момент.
+              Бот и приложение закроются, рабочие сообщения и напоминания приходить не будут, права будут сняты.
+              История и деньги сохранятся, разблокировать можно в любой момент.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} placeholder="Причина (видна в архиве)"
+          <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value.slice(0, 300))} placeholder="Причина (обязательно, видна в архиве)"
                     className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25" />
           <AlertDialogFooter>
             <AlertDialogCancel className="rounded-xl">Отмена</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
               className="rounded-xl"
+              disabled={!reason.trim()}
               onClick={() => user && act("block", (k) => api.admin.setState(user.id, "blocked", reason.trim() || null, k), "Заблокирован")}
             >
               Заблокировать

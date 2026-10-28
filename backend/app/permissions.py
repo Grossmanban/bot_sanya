@@ -47,7 +47,10 @@ def manages(actor: dict | None, target: dict | None) -> bool:
         return True
     if role_of(actor) == INSTRUCTOR:  # only the people assigned to them
         return target.get("instructor_id") == actor["id"] and target["id"] != actor["id"]
-    return actor.get("network_id") is not None and actor["network_id"] == target.get("network_id") and target["id"] != actor["id"]
+    # a trainer — the network they lead (networks.trainer_id, ТЗ 28.10 В32); set_role/set_member keep a trainer the head
+    # of their own network, so the fallback to network_id only covers rows read without led_network_id
+    led = actor.get("led_network_id") or actor.get("network_id")
+    return led is not None and led == target.get("network_id") and target["id"] != actor["id"]
 
 
 # capability -> roles that have it (trainers additionally need manages(actor, target))
@@ -66,7 +69,7 @@ CAN = {
     "review": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "schedule": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "broadcast_all": {OWNER, ADMIN},
-    "broadcast_network": {OWNER, ADMIN, TRAINER},
+    "broadcast_network": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # an instructor — only the people assigned to them
     "settings": {OWNER, ADMIN},
     "points": {OWNER, ADMIN},
     "registrations": {OWNER, ADMIN},

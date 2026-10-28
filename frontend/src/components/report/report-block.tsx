@@ -70,7 +70,7 @@ export function ReportBlock({ shift, pricing, onChanged }: { shift: Shift; prici
   }
   if (state === "approved") {
     const extra = [
-      last?.source === "admin" ? "внесено администратором" : null,
+      last?.source === "admin" ? "внесено руководителем" : null,
       report.decided === "waived" ? "недобор учтён без штрафа" : null,
     ].filter(Boolean);
     return (
@@ -84,7 +84,7 @@ export function ReportBlock({ shift, pricing, onChanged }: { shift: Shift; prici
   if (state === "rejected") {
     return (
       <Status tone="cancel" icon={ShieldAlert} title={`Отчёт отклонён · штраф ${fineShort(report.fine_units, report.fine)}`} photo={last?.photo_url}
-              text={report.note ?? "Решение администратора."}>
+              text={report.note ?? "Решение руководителя."}>
         {plan > 0 && <PlanFactBar plan={plan} fact={fact} />}
       </Status>
     );

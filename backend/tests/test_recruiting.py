@@ -51,7 +51,7 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
 
     # the candidate hears back in the chat; when the bot can't reach them, the staff are warned
     class Unreachable(FakeNotifier):
-        async def send(self, chat_id, text, markup=None):
+        async def send(self, chat_id, text, markup=None, force=False):
             await super().send(chat_id, text, markup)
             return chat_id != 5001
 

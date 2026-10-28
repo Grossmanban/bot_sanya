@@ -237,7 +237,7 @@ function Attempts() {
               <ShieldAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1">
                 <button className="block max-w-full truncate text-left font-medium underline-offset-2 hover:underline"
-                        onClick={() => openProfile(a.username, a.telegram_id)}>
+                        onClick={() => openProfile(a.username, a.telegram_id, [a.first_name, a.last_name].filter(Boolean).join(" "))}>
                   {[a.first_name, a.last_name].filter(Boolean).join(" ") || "Без имени"}
                   {a.username ? ` @${a.username}` : ""}
                 </button>

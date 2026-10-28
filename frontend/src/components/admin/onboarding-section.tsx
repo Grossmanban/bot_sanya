@@ -128,7 +128,7 @@ function Candidate({ a, me, trainers, points, onDone }: {
   const [broken, setBroken] = useState(false);
   const { busy, run } = useAction();
   const p = a.progress;
-  const openTg = () => openProfile(a.username, a.telegram_id);
+  const openTg = () => openProfile(a.username, a.telegram_id, a.full_name);
   const link = "font-semibold text-foreground underline decoration-muted-foreground/40 underline-offset-2 hover:decoration-foreground";
   const act = async (name: string, fn: (k: string) => Promise<unknown>, ok: string) => {
     try {
@@ -163,7 +163,7 @@ function Candidate({ a, me, trainers, points, onDone }: {
               <>
                 {" · пригласил(а) "}
                 {a.referrer_tg ? (
-                  <button type="button" className={link} onClick={() => openProfile(a.referrer_tg!.username, a.referrer_tg!.telegram_id)}>
+                  <button type="button" className={link} onClick={() => openProfile(a.referrer_tg!.username, a.referrer_tg!.telegram_id, a.referrer)}>
                     {a.referrer}
                   </button>
                 ) : a.referrer}

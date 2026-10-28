@@ -346,6 +346,8 @@ export interface LiveEvent extends Lifecycle {
     attempts_left: number;
     pending: boolean;
     can_submit: boolean;
+    /** ТЗ 28.10 §9: «Не работаю» — entries are closed until the status is back */
+    not_working?: boolean;
     entries: { id: number; attempt: number; value: number; status: "pending_review" | "confirmed" | "rejected"; reason: string | null; annulled: boolean; submitted_at: string }[];
   };
 }
@@ -971,6 +973,8 @@ export interface Broadcast {
   replied?: number;
   /** the photo or video, signed — to see the sent message in full */
   media_url?: string | null;
+  /** ТЗ 28.10 §13: the header the message carried («Сообщение от тренера» + name), as plain text */
+  signature_text?: string | null;
 }
 
 export interface BroadcastTemplate {
@@ -1104,7 +1108,7 @@ export const api = {
     items: Referral[]; targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
   referralQr: () => request<{ svg: string; link: string; expires_at: string; seconds_left: number }>("/api/me/referrals/qr"),
   /** ТЗ 27.10 §11: a person without a username — the bot sends a card with a link to the profile */
-  profileLink: (telegram_id: number) => post<{ sent: boolean; bot_username: string | null }>("/api/profile-link", { telegram_id }),
+  profileLink: (telegram_id: number) => post<{ sent: boolean; opens: boolean | null; bot_username: string | null }>("/api/profile-link", { telegram_id }),
   work: () => request<{ items: { product: Product; title: string }[] }>("/api/work"),
   alice: () => request<{ task: AliceTask | null; has_qr: boolean; stats: AliceStats; history: AliceTask[] }>("/api/work/alice"),
   aliceStart: (key: string) => post<{ task: AliceTask; stats: AliceStats }>("/api/work/alice/start", { idempotency_key: key }),
@@ -1205,6 +1209,7 @@ export const api = {
         people: BroadcastPerson[];
         networks: { id: number; name: string }[];
         scope: "all" | "network";
+        signer: { optional: boolean; text: string | null };
       }>("/api/admin/broadcasts"),
     broadcast: (draft: BroadcastDraft) => post<{ broadcast: Broadcast }>("/api/admin/broadcasts", draft),
     broadcastTest: (body: { html: string; signed: boolean; require_ack: boolean; media_file_id: string | null;

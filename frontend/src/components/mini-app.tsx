@@ -17,16 +17,22 @@ import { EventsScreen } from "./events/live";
 import { WorkScreen } from "./work/work-screen";
 import { Avatar } from "./avatar";
 import { ThemeButton, ThemeChoice } from "./theme-toggle";
+import { ProfileFallback } from "./profile-fallback";
 
 type Tab = "schedule" | "work" | "events" | "profile" | "admin";
 
+// ТЗ 28.10 §8 (В24): Работа, График, (Обучение), События, Профиль, Админ — unavailable ones are hidden
 const TABS: { id: Tab; label: string; icon: typeof CalendarDays }[] = [
-  { id: "schedule", label: "График", icon: CalendarDays },
   { id: "work", label: "Работа", icon: Briefcase },
+  { id: "schedule", label: "График", icon: CalendarDays },
   { id: "events", label: "События", icon: Trophy },
   { id: "profile", label: "Профиль", icon: UserRound },
   { id: "admin", label: "Админ", icon: ShieldCheck },
 ];
+
+// ТЗ 28.10 §8 (В25): the staff tab is named by the role — a trainer is never shown as «Админ»
+const STAFF_TAB: Record<User["role"], string> = { owner: "Админ", admin: "Админ", trainer: "Тренер", instructor: "Инструктор",
+  employee: "Админ" };
 
 // role colours in the header (ТЗ №1): owner, admin, trainer, employee
 const ROLE_DOT: Record<User["role"], string> = { owner: "bg-final", admin: "bg-primary", trainer: "bg-wait",
@@ -111,14 +117,15 @@ export function MiniApp() {
   } else if (me.user.status !== "approved") {
     body = <AccessScreen kind={me.user.status} botUsername={me.bot_username} />;
   } else if (me.user.account_state === "blocked") {
-    body = <AccessScreen kind="blocked" message={me.user.state_reason ? `Причина: ${me.user.state_reason}. Если это ошибка — свяжитесь с руководителем.` : undefined} />;
+    body = <AccessScreen kind="blocked" message={me.user.state_reason ? `Причина: ${me.user.state_reason}. Обратитесь к администратору.` : undefined} />;
   } else {
     const user = me.user;
     const staff = isStaff(user);
     // the events tab appears while there is an active (or just finished) event for this person
     // «Работа» appears with access to at least one product (ТЗ 27.10 §28)
     const tabs = TABS.filter((t) => (t.id !== "admin" || staff) && (t.id !== "events" || (me.events ?? 0) > 0)
-      && (t.id !== "work" || (me.products?.length ?? 0) > 0));
+      && (t.id !== "work" || (me.products?.length ?? 0) > 0))
+      .map((t) => (t.id === "admin" ? { ...t, label: STAFF_TAB[user.role] } : t));
     const working = user.work_status === "working";
     // a remembered tab that is gone now (no events any more, no admin rights) falls back to the schedule
     const tab = tabs.some((t) => t.id === shown) ? shown : "schedule";
@@ -195,7 +202,7 @@ export function MiniApp() {
                               internship={me.internship} />
             )}
             {tab === "events" && <EventsScreen />}
-            {tab === "work" && <WorkScreen products={me.products ?? []} />}
+            {tab === "work" && <WorkScreen products={me.products ?? []} working={working} onOpenProfile={() => go("profile")} />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} botUsername={me.bot_username} />}
             {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} />}
           </main>
@@ -232,6 +239,7 @@ export function MiniApp() {
     <ThemeContext.Provider value={{ pref, scheme, setPref }}>
       <div className="min-h-dvh">
         {body}
+        <ProfileFallback />
         {/* phones (≤600px) use mobileOffset, not offset: both must clear the notch and Telegram's buttons */}
         <Toaster position="top-center" theme={scheme} offset={{ top: "calc(var(--safe-top) + 8px)" }}
                  mobileOffset={{ top: "calc(var(--safe-top) + 8px)", left: "16px", right: "16px" }} />

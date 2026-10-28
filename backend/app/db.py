@@ -1102,6 +1102,12 @@ ALTER TABLE goals ADD COLUMN product TEXT;
 ALTER TABLE events ADD COLUMN product TEXT;
 """)
 
+# 30 — ТЗ 28.10 §13: the broadcast header is decided on the server by the author's real role and kept as sent
+# («Сообщение от тренера» + a link to the trainer), so reminders repeat it word for word
+MIGRATIONS.append("""
+ALTER TABLE broadcasts ADD COLUMN signature TEXT;
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

@@ -287,7 +287,7 @@ def _staff_shift(conn, actor: dict, shift_id: int, capability: str) -> tuple[dic
     if not perms.can(actor, capability, svc.get_user(conn, shift["user_id"])):
         raise ServiceError("Недостаточно прав", 403, "forbidden")
     if shift["user_id"] == actor["id"] and not perms.is_owner(actor):
-        raise ServiceError("Свой отчёт проверяет другой администратор", 403, "own_report")
+        raise ServiceError("Свой отчёт проверяет другой руководитель", 403, "own_report")
     if shift["status"] not in ACTIVE or not shift["start_time"]:
         raise ServiceError("Смена не состоялась", 409, "bad_status")
     return actor, shift
@@ -442,11 +442,12 @@ def mark_no_show(conn: sqlite3.Connection, shift_id: int, now: datetime) -> dict
 def reviewers(conn: sqlite3.Connection, user: dict) -> list[int]:
     """Telegram ids of staff who decide on this employee's reports: owners, admins, the network's trainer,
     the person's instructor."""
+    from . import networks
+
     ids = set(svc.admin_telegram_ids(conn))
-    if user.get("network_id") is not None:
-        ids |= {r[0] for r in conn.execute(
-            """SELECT telegram_id FROM users WHERE role = 'trainer' AND status = 'approved'
-               AND account_state != 'blocked' AND network_id = ?""", (user["network_id"],))}
+    trainer = networks.trainer_of(conn, user)  # ТЗ 28.10 В32: the network's trainer is networks.trainer_id, everywhere
+    if trainer is not None:
+        ids.add(trainer["telegram_id"])
     if user.get("instructor_id"):
         ids |= {r[0] for r in conn.execute(
             """SELECT telegram_id FROM users WHERE id = ? AND role = 'instructor' AND status = 'approved'

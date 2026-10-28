@@ -157,13 +157,20 @@ export function BroadcastSection({ me }: { me: User }) {
             </label>
           </li>
           <li>
-            <label className="flex cursor-pointer items-center gap-4 px-5 py-3.5 md:px-6">
-              <span className="flex-1">
-                <span className="block font-medium">Подпись «Сообщение от администратора»</span>
-                <span className="block text-sm text-muted-foreground">Заголовок над текстом</span>
-              </span>
-              <Switch checked={signed} onCheckedChange={setSigned} />
-            </label>
+            {data.signer.optional ? (
+              <label className="flex cursor-pointer items-center gap-4 px-5 py-3.5 md:px-6">
+                <span className="flex-1">
+                  <span className="block font-medium">Подпись «Сообщение от администратора»</span>
+                  <span className="block text-sm text-muted-foreground">Заголовок над текстом</span>
+                </span>
+                <Switch checked={signed} onCheckedChange={setSigned} />
+              </label>
+            ) : (
+              <div className="px-5 py-3.5 md:px-6">
+                <span className="block font-medium">Подпись</span>
+                <span className="block text-sm break-words whitespace-pre-line text-muted-foreground">{data.signer.text}</span>
+              </div>
+            )}
           </li>
         </ul>
       </section>
@@ -393,7 +400,7 @@ function SentMessage({ b, html, meta, open, onOpenChange }: {
             <img src={b.media_url} alt="Фото рассылки" onError={() => setBroken(true)} className="max-h-[60dvh] w-full rounded-2xl bg-muted object-contain" />
           ))}
           <div className="rounded-2xl bg-muted/50 p-4">
-            {!!b.signed && <p className="mb-3 font-semibold">📣 Сообщение от администратора</p>}
+            {b.signature_text && <p className="mb-3 font-semibold break-words whitespace-pre-line">{b.signature_text}</p>}
             {html ? (
               <div className="tg-rich text-[15px] leading-relaxed break-words whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: html }} />
             ) : (
@@ -433,8 +440,8 @@ function Receipts({ id, ack, replies }: { id: number; ack: boolean; replies: boo
           {answered.map((r) => (
             <div key={r.user_id} className="rounded-xl bg-card p-3 text-sm">
               <p className="font-medium">
-                <a href={r.username ? `https://t.me/${r.username}` : `tg://user?id=${r.telegram_id}`} className="underline-offset-2 hover:underline"
-                   onClick={(e) => { e.preventDefault(); openProfile(r.username, r.telegram_id); }}>
+                <a href={r.username ? `https://t.me/${r.username}` : "#"} className="underline-offset-2 hover:underline"
+                   onClick={(e) => { e.preventDefault(); openProfile(r.username, r.telegram_id, r.name); }}>
                   {r.name}
                 </a>
                 {r.username && <span className="font-normal text-muted-foreground"> @{r.username}</span>}

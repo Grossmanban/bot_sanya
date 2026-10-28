@@ -113,7 +113,7 @@ function Row({ r, busy, act }: {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <button className="block max-w-full truncate text-left font-semibold underline-offset-2 hover:underline"
-                  onClick={() => openProfile(r.username, r.telegram_id)}>{r.name}</button>
+                  onClick={() => openProfile(r.username, r.telegram_id, r.name)}>{r.name}</button>
           <p className="text-xs text-muted-foreground">
             {r.days} {plural(r.days, "подтверждённый день", "подтверждённых дня", "подтверждённых дней")}
             {r.first_day ? ` · первый ${ddmm(r.first_day)}` : ""} · ожидается «{TITLE[r.expected]}»

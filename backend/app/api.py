@@ -11,7 +11,7 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import alice, products, reports, violations
+from . import alice, notify, products, reports, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -738,7 +738,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             if row is None:
                 raise svc.ServiceError("Человек не найден", 404, "not_found")
             person = dict(row)
-        return {"sent": await notifier.profile_card(user["telegram_id"], person), "bot_username": app.state.bot_username}
+        card = await notifier.profile_card(user["telegram_id"], person)
+        return {**card, "bot_username": app.state.bot_username}
 
     # ------------------------------------------------------------ groups by work days (ТЗ 27.10 §26–27)
 
@@ -1223,9 +1224,14 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             for u in visible(admin, svc.list_users(conn)) if u["account_state"] != "blocked"
         ]
         everyone = perms.can(admin, "broadcast_all")
+        role = perms.role_of(admin)
         return {
-            "items": [{**b, "media_url": media.photo_url(b["id"], kind="broadcast") if b["media_file_id"] else None}
+            "items": [{**b, "media_url": media.photo_url(b["id"], kind="broadcast") if b["media_file_id"] else None,
+                       "signature_text": notify.plain(notify.broadcast_signature_of(b))}
                       for b in svc.list_broadcasts(conn, author_tg=None if everyone else admin["telegram_id"])],
+            # ТЗ 28.10 §13: owners and admins choose whether to sign; trainers and instructors always sign by name
+            "signer": {"optional": role not in (perms.TRAINER, perms.INSTRUCTOR),
+                       "text": notify.plain(notify.broadcast_signature(admin, True))},
             "audiences": svc.AUDIENCE_LABELS,
             "people": people,
             "networks": [{"id": n["id"], "name": n["name"]} for n in networks.listing(conn, admin)],
@@ -1238,11 +1244,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Бот не запущен: рассылка недоступна", 503, "no_bot")
         if not perms.can(admin, "broadcast_all") and body.network_id not in (None, admin["network_id"]):
             raise svc.ServiceError("Тренер пишет только своей сети", 403, "forbidden")
+        signature = notify.broadcast_signature(admin, body.signed)  # the role decides, not the switch (§13)
         row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed, body.network_id,
                                                body.user_ids, body.require_ack, body.media_file_id,
                                                today_local() + timedelta(days=1) if body.only_unmarked_tomorrow else None,
-                                               body.media_kind, body.allow_reply)
-        notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], bool(row["signed"]), row["media_file_id"],
+                                               body.media_kind, body.allow_reply, signature)
+        notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], row["signature"], row["media_file_id"],
                                           bool(row["require_ack"]), row["media_kind"], bool(row["allow_reply"])))
         return {"broadcast": row}
 
@@ -1296,7 +1303,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Бот не запущен: проверка недоступна", 503, "no_bot")
         html, _ = svc.prepare_message(body.html)
         markup = notify_keyboard(0, body.require_ack, body.allow_reply)
-        if await notifier._deliver(admin["telegram_id"], notifier.broadcast_body(html, body.signed), body.media_file_id,
+        if await notifier._deliver(admin["telegram_id"], notifier.broadcast_body(html, notify.broadcast_signature(admin, body.signed)), body.media_file_id,
                                    markup, body.media_kind) is None:
             raise svc.ServiceError("Telegram не принял сообщение. Проверьте ссылки и форматирование", 502, "send_failed")
         return {"ok": True}

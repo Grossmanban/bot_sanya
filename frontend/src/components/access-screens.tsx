@@ -32,8 +32,8 @@ const COPY: Record<Kind, { icon: typeof Clock3; title: string; text: string }> =
   rejected: { icon: Lock, title: "Доступ закрыт", text: "Администратор отклонил заявку." },
   blocked: {
     icon: Ban,
-    title: "Аккаунт заблокирован",
-    text: "График и отчёты недоступны. Если это ошибка — свяжитесь с руководителем.",
+    title: "⛔ Доступ заблокирован",
+    text: "Обратитесь к администратору.",
   },
   error: { icon: TriangleAlert, title: "Не удалось загрузить", text: "" },
 };

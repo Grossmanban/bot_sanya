@@ -143,8 +143,15 @@ def set_member(conn: sqlite3.Connection, actor: dict, user_id: int, network_id: 
         if user["network_id"] == network_id:
             return user, False
         led = conn.execute("SELECT id FROM networks WHERE trainer_id = ? AND status = 'active'", (user_id,)).fetchone()
+        target_lead = conn.execute("SELECT trainer_id FROM networks WHERE id = ?", (network_id,)).fetchone() \
+            if network_id is not None else None
+        if user["role"] == "trainer" and target_lead is not None and target_lead[0] not in (None, user_id):
+            # ТЗ 28.10 В32: one trainer per network — the trainer of a network is networks.trainer_id
+            raise ServiceError("У этой сети уже есть тренер — сначала смените тренера сети", 409, "network_has_trainer")
         if led and led["id"] != network_id:
             conn.execute("UPDATE networks SET trainer_id = NULL WHERE id = ?", (led["id"],))
+        if user["role"] == "trainer" and target_lead is not None and target_lead[0] is None:
+            conn.execute("UPDATE networks SET trainer_id = ? WHERE id = ?", (user_id, network_id))
         # another network: the person leaves their instructor; an instructor's people go back to their trainer
         conn.execute("UPDATE users SET network_id = ?, instructor_id = NULL WHERE id = ?", (network_id, user_id))
         conn.execute("UPDATE users SET instructor_id = NULL WHERE instructor_id = ?", (user_id,))

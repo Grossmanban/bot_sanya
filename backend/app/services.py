@@ -158,12 +158,17 @@ def validate_payload(start_time, end_time, volume, location) -> dict:
 # ---------------------------------------------------------------- users
 
 
+# ТЗ 28.10 В32: the network a person leads is networks.trainer_id — the one definition of «тренер сети»
+_USER = """SELECT u.*, (SELECT n.id FROM networks n WHERE n.trainer_id = u.id AND n.status = 'active'
+                        ORDER BY n.id LIMIT 1) AS led_network_id FROM users u"""
+
+
 def get_user_by_tg(conn: sqlite3.Connection, telegram_id: int) -> dict | None:
-    return _row(conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone())
+    return _row(conn.execute(f"{_USER} WHERE u.telegram_id = ?", (telegram_id,)).fetchone())
 
 
 def get_user(conn: sqlite3.Connection, user_id: int) -> dict | None:
-    return _row(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+    return _row(conn.execute(f"{_USER} WHERE u.id = ?", (user_id,)).fetchone())
 
 
 def touch_username(conn: sqlite3.Connection, user: dict, username: str | None) -> dict:
@@ -323,6 +328,14 @@ def set_role(conn, actor: dict, user_id: int, role: str, key: str) -> tuple[dict
             raise ServiceError("Сначала откройте человеку доступ", 409, "not_approved")
         if user["role"] == role:
             return user, False
+        if role == "trainer" and user["network_id"] is not None:
+            # ТЗ 28.10 В32: a trainer is the head of their network (networks.trainer_id) — one per network
+            lead = conn.execute("SELECT trainer_id FROM networks WHERE id = ? AND status = 'active'",
+                                (user["network_id"],)).fetchone()
+            if lead is not None and lead[0] not in (None, user_id):
+                raise ServiceError("У этой сети уже есть тренер — смените его в «Сетях»", 409, "network_has_trainer")
+            if lead is not None:
+                conn.execute("UPDATE networks SET trainer_id = ? WHERE id = ?", (user_id, user["network_id"]))
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
         if role != "trainer":  # no longer leads a network
             conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
@@ -400,6 +413,8 @@ def set_account_state(conn, actor: dict, user_id: int, state: str, reason: str |
             raise ServiceError("Нет прав на этого сотрудника", 403, "forbidden")
         if state == "paused" and not reason:
             raise ServiceError("Укажите причину паузы", 422, "reason_required")
+        if state == "blocked" and not reason:  # ТЗ 28.10 §2, В2: a block always says why
+            raise ServiceError("Укажите причину блокировки", 422, "reason_required")
         if current == state:
             return user, False
         conn.execute(
@@ -696,12 +711,16 @@ def user_penalties(conn, user_id: int) -> list[dict]:
 # ---------------------------------------------------------------- shifts: employee mutations
 
 
-def _require_working(user: dict) -> None:
+def require_working(user: dict, what: str = "Запись в график недоступна") -> None:
+    """ТЗ 28.10 §9: a work action needs both the right and «Работаю» (checked on the server, the status field only)."""
     if user.get("account_state") == "paused":
         reason = f": {user['state_reason']}" if user.get("state_reason") else ""
-        raise ServiceError(f"Аккаунт на паузе{reason}. Запись в график недоступна", 403, "paused")
+        raise ServiceError(f"Аккаунт на паузе{reason}. {what}", 403, "paused")
     if user["work_status"] != "working":
         raise ServiceError("Сначала включите статус «Работаю» в профиле", 403, "not_working")
+
+
+_require_working = require_working
 
 
 def _require_bookable(day: date, today: date) -> None:
@@ -781,6 +800,7 @@ def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: 
         shift = _own_shift(conn, user, shift_id, now.date())
         if shift["status"] not in ACTIVE:
             raise ServiceError("Изменить можно только активную смену", 409, "bad_status")
+        _require_working(get_user(conn, user["id"]))  # «Не работаю»: cancelling stays possible, editing doesn't (В27)
         _require_no_report(shift)
         when = phase(date.fromisoformat(shift["shift_date"]), now)
         if when not in ("open", "late"):
@@ -1369,7 +1389,8 @@ def prepare_message(html: str) -> tuple[str, str]:
 def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True,
                      network_id: int | None = None, user_ids: list[int] | None = None, require_ack: bool = False,
                      media: str | None = None, only_unmarked: date | None = None, media_kind: str = "photo",
-                     allow_reply: bool = False) -> tuple[dict, list[dict]]:
+                     allow_reply: bool = False, signature: str | None = None) -> tuple[dict, list[dict]]:
+    """signature: the header decided by the author's role (notify.broadcast_signature); kept as sent."""
     if media_kind not in ("photo", "video"):
         raise ServiceError("Вложение — фото или видео", 422, "bad_media")
     clean, text = prepare_message(html)
@@ -1385,11 +1406,11 @@ def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, s
     with transaction(conn):
         cur = conn.execute(
             """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at, media_file_id,
-                                       require_ack, network_id, people, media_kind, allow_reply)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (admin["telegram_id"], audience, text, clean, int(signed), len(recipients), now_iso(), media,
-             int(require_ack), network_id, json.dumps(user_ids) if user_ids else None, media_kind if media else "photo",
-             int(allow_reply)),
+                                       require_ack, network_id, people, media_kind, allow_reply, signature)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (admin["telegram_id"], audience, text, clean, int(signed or signature is not None), len(recipients), now_iso(),
+             media, int(require_ack), network_id, json.dumps(user_ids) if user_ids else None,
+             media_kind if media else "photo", int(allow_reply), signature),
         )
     return dict(conn.execute("SELECT * FROM broadcasts WHERE id = ?", (cur.lastrowid,)).fetchone()), recipients
 

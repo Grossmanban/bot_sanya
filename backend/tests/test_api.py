@@ -391,6 +391,11 @@ def test_event_endpoints(client, conn):
     ev = client.post("/api/admin/events", json=body, headers=owner).json()["event"]
     assert client.get("/api/me", headers=h).json()["events"] == 1
     jpeg = b"\xff\xd8\xff\xe0" + b"1" * 64
+    # ТЗ 28.10 §9: «Не работаю» — no entries (the server says why); with «Работаю» the entry goes through
+    assert client.get(f"/api/events/{ev['id']}", headers=h).json()["event"]["my"]["not_working"] is True
+    r = client.post(f"/api/events/{ev['id']}/entries?value=7&idempotency_key={key()}", content=jpeg, headers=h)
+    assert r.status_code == 403 and r.json()["code"] == "not_working"
+    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
     r = client.post(f"/api/events/{ev['id']}/entries?value=7&idempotency_key={key()}", content=jpeg, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["event"]["my"]["pending"] is True and r.json()["event"]["leaderboard"][0]["score"] == 7

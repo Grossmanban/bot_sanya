@@ -187,7 +187,7 @@ def test_messages_to_employee_and_archive(conn, make_user):
     res = violations.waive(conn, owner, one(conn, b)["id"], "Больничный лист.", [], svc.new_key())
     run(n.violation_resolved(res.violation, None, owner))
     [msg] = [t for chat, t in n.sent if chat == b["telegram_id"]]
-    assert "СНЯТО АДМИНИСТРАЦИЕЙ" in msg and "Факт: 0 дней" in msg and "Документы: нет" in msg
+    assert "СНЯТО ВЛАДЕЛЬЦЕМ" in msg and "Факт: 0 дней" in msg and "Документы: нет" in msg
     [arch] = [t for chat, t in n.sent if chat == -1001]
     assert "#оправдание" in arch and "НАРУШЕНИЕ ПОГАШЕНО (БЕЗ ШТРАФА)" in arch and "Основание: Больничный лист." in arch
     assert n.albums == []

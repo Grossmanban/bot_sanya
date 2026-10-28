@@ -298,7 +298,9 @@ async def report_digest(conn, notifier: Notifier, today: date, audience: str) ->
     for chat in recipients:
         sent += await notifier.send(chat, full, _open_app())
     for t in trainers:
-        own = {r[0] for r in conn.execute("SELECT id FROM users WHERE network_id = ? AND id != ?", (t["network_id"], t["id"]))
+        own = {r[0] for r in conn.execute(
+            """SELECT u.id FROM users u JOIN networks n ON n.id = u.network_id
+               WHERE n.trainer_id = ? AND n.status = 'active' AND u.id != ?""", (t["id"], t["id"]))
                } if t["role"] == "trainer" else {r[0] for r in conn.execute("SELECT id FROM users WHERE instructor_id = ?", (t["id"],))}
         body = text(own)
         if body and t["telegram_id"] not in recipients:

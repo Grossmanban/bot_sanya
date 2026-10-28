@@ -108,7 +108,7 @@ export function Referrals() {
                 <li key={r.id} className="space-y-2 px-5 py-3.5 md:px-6">
                   <div className="flex items-center justify-between gap-3">
                     <button className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline"
-                            onClick={() => openProfile(r.username, r.telegram_id)}>{r.name}</button>
+                            onClick={() => openProfile(r.username, r.telegram_id, r.name)}>{r.name}</button>
                     <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", st.tone)}>
                       {p?.review ? "На проверке" : st.label}
                     </span>

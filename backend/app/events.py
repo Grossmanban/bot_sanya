@@ -187,7 +187,8 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
     phase = _phase(event, now)
     can_submit = (viewer is not None and eligible(event, viewer, conn) and phase == "live" and not pending
                   and event["visibility"] != "hidden"
-                  and rejected < event["max_attempts"] and not (event["mode"] == "first_to_reach" and won))
+                  and rejected < event["max_attempts"] and not (event["mode"] == "first_to_reach" and won)
+                  and viewer.get("work_status") == "working")  # ТЗ 28.10 §9: «Не работаю» — no entries
     return {
         "id": event["id"], "title": event["title"], "description": event["description"],
         "description_html": event["description_html"] or (richtext.plain_to_html(event["description"])
@@ -207,6 +208,7 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
         "winners_count": sum(r["winner"] for r in board),
         "my": {"score": me["score"] if me else 0, "confirmed": me["confirmed"] if me else 0, "winner": won,
                "attempts_left": max(0, event["max_attempts"] - rejected), "pending": pending, "can_submit": can_submit,
+               "not_working": viewer is not None and viewer.get("work_status") != "working",
                "entries": [{"id": e["id"], "attempt": e["attempt"], "value": e["value"], "status": e["status"],
                             "reason": e["reason"], "annulled": bool(e["annulled_at"]),
                             "submitted_at": e["submitted_at"]} for e in reversed(mine)]},
@@ -365,7 +367,9 @@ def submit(conn: sqlite3.Connection, user: dict, event_id: int, value: int, phot
             row = conn.execute("SELECT * FROM event_entries WHERE event_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
                                (event_id, user["id"])).fetchone()
             return dict(row), False
-        event = check_entry(conn, get(conn, event_id), svc.get_user(conn, user["id"]), now)
+        fresh = svc.get_user(conn, user["id"])
+        event = check_entry(conn, get(conn, event_id), fresh, now)
+        svc.require_working(fresh, "Заявки в событиях недоступны")  # ТЗ 28.10 §9, В27
         attempt = conn.execute("SELECT COUNT(*) FROM event_entries WHERE event_id = ? AND user_id = ?",
                                (event_id, user["id"])).fetchone()[0] + 1
         if event["mode"] == "first_to_reach" and value < event["target"]:

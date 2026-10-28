@@ -49,12 +49,62 @@ def person_tag(user: dict) -> str:
     return "#" + re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", svc.full_name(user)).strip("_")
 
 
-def who(user: dict) -> str:
-    name = escape(svc.full_name(user))
+def mention(telegram_id: int, name: str) -> str:
+    """The only place a tg://user link is built (ТЗ 28.10 §17). Telegram makes it clickable only when the person's
+    privacy settings allow it — so callers always show the ID (or @username) next to it, never «нажмите на имя»."""
+    return f'<a href="tg://user?id={int(telegram_id)}">{escape(name)}</a>'
+
+
+def person_link(user: dict, name: str | None = None) -> str:
+    """ТЗ 28.10 §17: one way to show a person in bot messages, by the Telegram ID (never the database id).
+    With a username — a t.me link, which every client opens; without — a mention plus the ID to copy."""
+    name = name or svc.full_name(user) or "Без имени"
     if user.get("username"):
-        return f"@{escape(user['username'])}, {name}"
-    # ТЗ 27.10 §11: the Telegram ID is the identifier; the name opens the profile wherever the client allows it
-    return f'<a href="tg://user?id={user["telegram_id"]}">{name}</a> (без username, ID <code>{user["telegram_id"]}</code>)'
+        return f'<a href="https://t.me/{escape(user["username"])}">{escape(name)}</a> (@{escape(user["username"])})'
+    return f'{mention(user["telegram_id"], name)} (без username, ID <code>{int(user["telegram_id"])}</code>)'
+
+
+def who(user: dict) -> str:
+    return person_link(user)
+
+
+BLOCKED_TEXT = "⛔ Доступ к боту заблокирован. Обратитесь к администратору."
+ADMIN_SIGNATURE = "📣 <b>Сообщение от администратора</b>"
+
+
+# ТЗ 28.10 §13: a person is named by their real role — a trainer is never «администратор»
+ROLE_OF = {perms.OWNER: "владельца", perms.ADMIN: "администратора", perms.TRAINER: "тренера",
+           perms.INSTRUCTOR: "инструктора", perms.EMPLOYEE: "сотрудника"}
+ROLE_BY = {perms.OWNER: "владельцем", perms.ADMIN: "администратором", perms.TRAINER: "тренером",
+           perms.INSTRUCTOR: "инструктором", perms.EMPLOYEE: "сотрудником"}
+# the Mini App tab with the staff tools is named after the role (ТЗ 28.10 §8, В25)
+STAFF_TAB = {perms.OWNER: "Админ", perms.ADMIN: "Админ", perms.TRAINER: "Тренер", perms.INSTRUCTOR: "Инструктор"}
+
+
+def role_title(user: dict | None) -> str:
+    return perms.ROLE_TITLES[perms.role_of(user)] if user else "Руководитель"
+
+
+def broadcast_signature(author: dict | None, signed: bool) -> str | None:
+    """ТЗ 28.10 §13: the header comes from the author's real role, not from a switch in the app. Owners and admins
+    may send without it; a trainer or an instructor always signs with their name and a link to their profile."""
+    role = perms.role_of(author) if author else perms.ADMIN
+    if role in (perms.TRAINER, perms.INSTRUCTOR):
+        title = "тренера" if role == perms.TRAINER else "инструктора"
+        return f"📣 <b>Сообщение от {title}</b>\n👤 {person_link(author)}"
+    return ADMIN_SIGNATURE if signed else None
+
+
+def plain(html: str | None) -> str | None:
+    """Telegram HTML as plain text, for showing a header inside the app."""
+    from html import unescape
+
+    return unescape(re.sub(r"<[^>]+>", "", html)) if html else None
+
+
+def broadcast_signature_of(row: dict) -> str | None:
+    """The header a sent broadcast carried (broadcasts before 28.10 kept only the «signed» flag)."""
+    return row.get("signature") or (ADMIN_SIGNATURE if row.get("signed") else None)
 
 
 def prize_line(item: dict) -> str:
@@ -86,9 +136,10 @@ def change_lines(old: dict | None, new: dict, fields: list[str]) -> list[str]:
 
 
 def handle(user: dict) -> str:
+    """Short form where the full name is printed next to it: @username, else the name as a mention."""
     if user.get("username"):
         return f"@{escape(user['username'])}"
-    return f'<a href="tg://user?id={user["telegram_id"]}">{escape(svc.full_name(user))}</a>'
+    return mention(user["telegram_id"], svc.full_name(user))
 
 
 def _day(shift: dict) -> date:
@@ -113,7 +164,7 @@ def registration_text(user: dict, invite: dict | None = None) -> str:
         f"ФИО: {escape(svc.full_name(user))}\n"
         f"Username: {username}\n"
         f"Telegram ID: <code>{user['telegram_id']}</code>\n"
-        f'Профиль: <a href="tg://user?id={user["telegram_id"]}">открыть</a>\n'
+        f"Профиль: {person_link(user)}\n"
         f"Подана: {user['created_at'][:16].replace('T', ' ')}"
     )
 
@@ -208,7 +259,7 @@ def admin_edited_text(admin: dict, user: dict, shift: dict, reason: str) -> str:
     else:
         what = f"изменил смену ({svc_status_ru(shift['status'])})"
     return (
-        f"⚙️ Админ {handle(admin)} {what} сотрудника {who(user)} на {ddmm_wd(_day(shift))}\n"
+        f"⚙️ {role_title(admin)} {handle(admin)} {what} сотрудника {who(user)} на {ddmm_wd(_day(shift))}\n"
         f"Причина: {escape(reason)}"
     )
 
@@ -219,7 +270,7 @@ STATUS_RU = {
     "cancelled": "отменена",
     "finally_cancelled": "окончательная отмена",
     "awaiting_approval": "ожидает решения",
-    "rejected_by_admin": "отклонена админом",
+    "rejected_by_admin": "не подтверждена",
     "pre_declared_off": "не выходит",
     "removed": "удалена",
 }
@@ -247,8 +298,7 @@ def _open_schedule() -> InlineKeyboardMarkup | None:
 
 def name_handle(user: dict) -> str:
     """Иван Петров (@ivan_p) — for the archive templates of ТЗ 12.4."""
-    name = escape(svc.full_name(user))
-    return f"{name} (@{escape(user['username'])})" if user.get("username") else f'<a href="tg://user?id={user["telegram_id"]}">{name}</a>'
+    return person_link(user)
 
 
 def stamp() -> str:
@@ -261,7 +311,7 @@ def files_word(n: int) -> str:
     return f"{n} {plural(n, 'файл', 'файла', 'файлов')}"
 
 
-def violation_text(v: dict, user: dict, tx: dict | None) -> str:
+def violation_text(v: dict, user: dict, tx: dict | None, resolver: dict | None = None) -> str:
     """The employee's message (ТЗ 12.4 Б): fine or waived."""
     from . import violations
 
@@ -272,7 +322,8 @@ def violation_text(v: dict, user: dict, tx: dict | None) -> str:
              f"📊 <b>Статистика:</b>\n• Требование: {req} {violations.days_word(req)}\n"
              f"• Факт: {act} {violations.days_word(act)}")
     head = (f"👤 Сотрудник: {escape(svc.full_name(user))}\n📅 Период: {violations.period(v)}\n\n")
-    comment = f"📝 Комментарий администратора: «{escape(v['resolution_comment'])}»" if v["resolution_comment"] else ""
+    role = perms.role_of(resolver) if resolver else perms.ADMIN
+    comment = f"📝 Комментарий {ROLE_OF[role]}: «{escape(v['resolution_comment'])}»" if v["resolution_comment"] else ""
     if v["status"] == "penalized":
         missed = max(0, req - act)
         return ("⚠️ <b>НАРУШЕНИЕ ГРАФИКА | ШТРАФ НАЗНАЧЕН</b>\n\n" + head + stats +
@@ -280,7 +331,7 @@ def violation_text(v: dict, user: dict, tx: dict | None) -> str:
                 f"💰 Штраф: <b>{finance.units_text(tx) or 'назначен'}</b>\n{comment}\n"
                 f"📎 Доказательства: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
                 "ℹ️ Ваш текущий баланс обновлён. Пожалуйста, ознакомьтесь с правилами выхода на работу.")
-    return ("✅ <b>НАРУШЕНИЕ ГРАФИКА | СНЯТО АДМИНИСТРАЦИЕЙ</b>\n\n" + head + stats +
+    return (f"✅ <b>НАРУШЕНИЕ ГРАФИКА | СНЯТО {ROLE_BY[role].upper()}</b>\n\n" + head + stats +
             f"\n\n💬 Решение: штраф не начислен.\n" + (f"{comment}\n" if comment else "") +
             f"📎 Документы: {files_word(len(files)) + ' — ниже' if files else 'нет'}\n\n"
             "ℹ️ Спасибо за своевременное информирование. Соблюдайте график в будущем.")
@@ -339,7 +390,7 @@ def reply_text(broadcast: dict, user: dict, text: str | None, network: str | Non
     contact = ", ".join(x for x in (f"@{user['username']}" if user.get("username") else None,
                                     f"ID {user['telegram_id']}", f"сеть «{network}»" if network else None) if x)
     head = (f"💬 <b>Ответ на рассылку</b> от {sent[8:10]}.{sent[5:7]} {sent[11:16]}\n<i>«{escape(quote)}»</i>\n\n"
-            f"👤 <a href=\"tg://user?id={user['telegram_id']}\">{escape(svc.full_name(user))}</a> ({escape(contact)})")
+            f"👤 {mention(user['telegram_id'], svc.full_name(user))} ({escape(contact)})")
     return head + (f"\n\n{escape(text)}" if text else "")
 
 
@@ -405,9 +456,25 @@ class Notifier:
                     raise
                 await asyncio.sleep(attempt)
 
+    def muted(self, chat_id: int | str) -> bool:
+        """ТЗ 28.10 §16: a blocked person gets no work messages, reminders or broadcasts — whatever sends them.
+        Only the message about the block itself goes through (force=True). Groups and owners are never muted."""
+        try:
+            chat = int(chat_id)
+        except (TypeError, ValueError):
+            return False
+        if chat <= 0 or chat in settings.admin_ids:
+            return False
+        row = self.conn.execute("SELECT account_state FROM users WHERE telegram_id = ?", (chat,)).fetchone()
+        return row is not None and row[0] == "blocked"
+
     async def send(
-        self, chat_id: int, text: str, markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None
+        self, chat_id: int, text: str, markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
+        force: bool = False,
     ) -> bool:
+        if not force and self.muted(chat_id):
+            log.info("[muted → %s] blocked person", chat_id)
+            return False
         if self.bot is None:
             log.info("[notify → %s] %s", chat_id, text)
             return False
@@ -424,6 +491,8 @@ class Notifier:
             return False
 
     async def send_document(self, chat_id: int, data: bytes, filename: str, caption: str | None = None) -> bool:
+        if self.muted(chat_id):
+            return False
         if self.bot is None:
             log.info("[document → %s] %s (%d bytes)", chat_id, filename, len(data))
             return False
@@ -439,12 +508,14 @@ class Notifier:
             return False
 
     @staticmethod
-    def broadcast_body(html: str, signed: bool) -> str:
-        return f"📣 <b>Сообщение от администратора</b>\n\n{html}" if signed else html
+    def broadcast_body(html: str, signature: str | None) -> str:
+        return f"{signature}\n\n{html}" if signature else html
 
     async def _deliver(self, chat_id: int, body: str, media: str | None, markup, kind: str = "photo") -> int | None:
         """Send one broadcast message (with a photo or a video); returns the message id of the part carrying
         the buttons."""
+        if self.muted(chat_id):
+            return None
         if self.bot is None:
             log.info("[broadcast → %s] %s", chat_id, body[:80])
             return None
@@ -462,11 +533,11 @@ class Notifier:
             log.warning("broadcast to %s failed: %s", chat_id, exc)
             return None
 
-    async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signed: bool = True,
+    async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signature: str | None = None,
                         media: str | None = None, require_ack: bool = False, media_kind: str = "photo",
                         allow_reply: bool = False) -> int:
         """html must already be sanitized (richtext.sanitize). Every delivery is recorded for read receipts."""
-        body = self.broadcast_body(html, signed)
+        body = self.broadcast_body(html, signature)
         markup = broadcast_keyboard(broadcast_id, require_ack, allow_reply)
         delivered = 0
         for i, user in enumerate(recipients):
@@ -490,7 +561,8 @@ class Notifier:
             return 0
         rows = [r for r in svc.broadcast_deliveries(self.conn, broadcast_id)
                 if r["read_at"] is None and (user_ids is None or r["user_id"] in user_ids)]
-        body = "⏰ <b>Напоминание:</b> подтвердите, что ознакомились с сообщением.\n\n" + self.broadcast_body(b["html"] or escape(b["text"]), bool(b["signed"]))
+        body = ("⏰ <b>Напоминание:</b> подтвердите, что ознакомились с сообщением.\n\n"
+                + self.broadcast_body(b["html"] or escape(b["text"]), broadcast_signature_of(dict(b))))
         sent = 0
         for r in rows:
             message_id = await self._deliver(r["telegram_id"], body, b["media_file_id"],
@@ -502,6 +574,8 @@ class Notifier:
         return sent
 
     async def send_photo(self, chat_id: int | str, photo: str, caption: str, markup=None) -> bool:
+        if self.muted(chat_id):
+            return False
         if self.bot is None:
             log.info("[photo → %s] %s", chat_id, caption)
             return False
@@ -640,8 +714,7 @@ class Notifier:
 
         user = svc.get_user(self.conn, app["user_id"])
         ref = svc.get_user(self.conn, app["referrer_id"]) if app["referrer_id"] else None
-        return (f"👤 <a href=\"tg://user?id={user['telegram_id']}\">{escape(app['full_name'])}</a>"
-                f"{' @' + escape(user['username']) if user['username'] else ''}, {app['age']} лет, м. {escape(app['metro'])}\n"
+        return (f"👤 {person_link(user, app['full_name'])}, {app['age']} лет, м. {escape(app['metro'])}\n"
                 f"Дней в неделю: от {app['min_days']}, обучение: {recruiting.days_text(app)}, общение: {app['communication']}/10"
                 + (f"\nПригласил(а): {escape(svc.full_name(ref))}" if ref else ""))
 
@@ -730,7 +803,7 @@ class Notifier:
     async def contact_answered(self, app: dict) -> None:
         name = escape(app["full_name"])
         user = svc.get_user(self.conn, app["user_id"])
-        link = f"<a href=\"tg://user?id={user['telegram_id']}\">{name}</a>" + (f" @{escape(user['username'])}" if user["username"] else "")
+        link = person_link(user, app["full_name"])
         text = (f"✍️ Кандидат {link} сообщил, что связался с вами (@{escape(app['contact_manager'])})."
                 if app["contact_answer"] == "wrote" else
                 f"⚠️ Кандидат {link} просит написать ему сам. Причина: ограничения аккаунта или стеснение. "
@@ -836,7 +909,8 @@ class Notifier:
 
     async def network_changed(self, user: dict, network_name: str | None, actor: dict, trainer: bool = False) -> None:
         if trainer:
-            text = f"🧭 Вы назначены тренером сети «{escape(network_name or '')}». В приложении во вкладке «Админ» — ваша команда."
+            tab = STAFF_TAB.get(perms.role_of(user), "Тренер")
+            text = f"🧭 Вы назначены тренером сети «{escape(network_name or '')}». В приложении во вкладке «{tab}» — ваша команда."
         elif network_name:
             text = f"🧭 Вы в сети «{escape(network_name)}»."
         else:
@@ -845,27 +919,34 @@ class Notifier:
         await self.archive(["сеть"], f"🧭 {who(user)}: {'тренер сети' if trainer else 'сеть'} "
                            f"«{escape(network_name or '—')}»\nИзменил: {who(actor)}", user)
 
-    async def profile_card(self, chat_id: int, person: dict) -> bool:
-        """ТЗ 27.10 §11: a person without a username — the bot sends a card where the name opens the profile
-        (a text mention works for people who started the bot), with a button when Telegram allows it."""
+    async def profile_card(self, chat_id: int, person: dict) -> dict:
+        """ТЗ 28.10 §17: a person without a username. The bot sends the viewer a card with a «Открыть профиль»
+        button; Telegram refuses that button when the person's privacy settings hide the profile — then the card
+        says so honestly and gives the ID. Returns {"sent": bool, "opens": bool | None}."""
         from aiogram.exceptions import TelegramBadRequest
 
-        name = escape(" ".join(x for x in (person.get("first_name"), person.get("last_name")) if x) or "Без имени")
-        text = (f'👤 <a href="tg://user?id={person["telegram_id"]}">{name}</a>\n'
+        name = " ".join(x for x in (person.get("first_name"), person.get("last_name")) if x) or "Без имени"
+        tg_id = int(person["telegram_id"])
+        head = (f"👤 <b>{escape(name)}</b>\n"
                 + (f"@{escape(person['username'])}\n" if person.get("username") else "Username нет\n")
-                + f"Telegram ID: <code>{person['telegram_id']}</code>\n\nНажмите на имя, чтобы открыть профиль.")
+                + f"Telegram ID: <code>{tg_id}</code> (нажмите, чтобы скопировать)")
         if self.bot is None:
-            return False
-        button = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="Открыть профиль", url=f"tg://user?id={person['telegram_id']}")]])
+            return {"sent": False, "opens": None}
+        button = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 Открыть профиль",
+                                                                             url=f"tg://user?id={tg_id}")]])
         try:
-            await self._retry(lambda: self.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=button))
-            return True
-        except TelegramBadRequest:  # the person's privacy settings forbid the button: the name still works
-            return await self.send(chat_id, text)
+            await self._retry(lambda: self.bot.send_message(chat_id, head + "\n\nОткройте профиль кнопкой ниже.",
+                                                            parse_mode="HTML", reply_markup=button))
+            return {"sent": True, "opens": True}
+        except TelegramBadRequest as exc:  # BUTTON_USER_PRIVACY_RESTRICTED / the bot never met the person
+            log.info("profile button for %s refused: %s", tg_id, exc)
         except Exception as exc:
             log.warning("profile card to %s failed: %s", chat_id, exc)
-            return False
+            return {"sent": False, "opens": None}
+        sent = await self.send(chat_id, head + "\n\n🔒 Telegram не даёт открыть этот профиль: его скрыли настройки "
+                                               "приватности или человек ещё не писал боту. Связаться можно, если он "
+                                               "напишет первым, или найдите его по ID.")
+        return {"sent": sent, "opens": False}
 
     async def product_access(self, user: dict, product: str, allow: bool, actor: dict) -> None:
         from . import products
@@ -930,14 +1011,14 @@ class Notifier:
             plan = f"{shift['start_time']}–{shift['end_time']}, {escape(shift['location'] or '')}, {shift['volume']} шт."
         await self.to_managers(user, f"📨 <b>Сотрудник просит изменить смену</b>\n{who(user)}\n"
                                      f"Смена {ddmm_wd(_day(shift))}: {plan}\n💬 {escape(text)}\n"
-                                     "Смена не изменена — если согласны, поправьте её в «Админ → День».")
+                                     "Смена не изменена — если согласны, поправьте её в приложении, раздел «День».")
 
     async def urgent_decided(self, shift: dict, approved: bool) -> None:
         user = svc.get_user(self.conn, shift["user_id"])
         if approved:
             text = f"✅ Ваша срочная заявка на сегодня ({ddmm(_day(shift))}) одобрена! Ждём вас в {shift['start_time']}."
         else:
-            text = f"❌ Ваша срочная заявка на сегодня ({ddmm(_day(shift))}) отклонена администратором."
+            text = f"❌ Ваша срочная заявка на сегодня ({ddmm(_day(shift))}) отклонена."
         await self.send(user["telegram_id"], text)
 
     async def penalty_assigned(self, shift: dict, actor_name: str | None = None) -> None:
@@ -988,14 +1069,14 @@ class Notifier:
         elif user["role"] == "trainer":
             await self.send(
                 user["telegram_id"],
-                "Вы назначены тренером. В приложении появилась вкладка «Админ» — там ваша команда, "
+                "Вы назначены тренером. В приложении появилась вкладка «Тренер» — там ваша команда, "
                 "её смены и отчёты.",
                 ReplyKeyboardRemove(),
             )
         elif user["role"] == "instructor":
             await self.send(
                 user["telegram_id"],
-                "Вы назначены инструктором. В приложении появилась вкладка «Админ» — там закреплённые за вами "
+                "Вы назначены инструктором. В приложении появилась вкладка «Инструктор» — там закреплённые за вами "
                 "сотрудники, их смены и отчёты.",
                 ReplyKeyboardRemove(),
             )
@@ -1010,13 +1091,13 @@ class Notifier:
             personal = "⏸ Ваш аккаунт поставлен на паузу: новые смены пока недоступны." + why
         elif state == "blocked":
             tags, line = ["блок"], "⛔ Заблокирован"
-            personal = "⛔ Ваш аккаунт заблокирован." + why
+            personal = BLOCKED_TEXT + why
         else:
             tags = ["блок"] if previous == "blocked" else ["пауза"]
             line = "✅ Разблокирован" if previous == "blocked" else "▶️ Пауза снята"
             personal = "✅ Доступ восстановлен. Можно снова записываться на смены."
         await self.send(user["telegram_id"], personal,
-                        ReplyKeyboardRemove() if state == "blocked" else None)
+                        ReplyKeyboardRemove() if state == "blocked" else None, force=True)
         await self.archive(tags, f"{line} — {who(user)}{why}\nИзменил: {who(actor)}", user)
 
     # ------------------------------------------------------------ reports (ТЗ 3.2–3.4)
@@ -1133,7 +1214,7 @@ class Notifier:
         place = shift_place(shift)
         note = f"\nКомментарий: {escape(shift['report_note'])}" if shift["report_note"] else ""
         text = f"План {shift['volume']}, факт {report['fact_volume']} шт."
-        await self.send(user["telegram_id"], f"✍️ Администратор внёс результат: {place}\n{text}{note}")
+        await self.send(user["telegram_id"], f"✍️ {role_title(actor)} внёс(ла) результат: {place}\n{text}{note}")
         await self._archive_report(["отчёт", "ручной"], f"✍️ РЕЗУЛЬТАТ ВНЕСЁН ВРУЧНУЮ — {who(user)}\n{place}\n{text}{note}\n"
                                    f"Внёс: {who(actor)}", user, report)
 
@@ -1225,6 +1306,8 @@ class Notifier:
     async def send_album(self, chat_id: int, files: list[str]) -> int:
         """Proof photos after a message: one photo, or an album of up to 10. Local dev files are skipped."""
         real = [f for f in files if not f.startswith("local:")]
+        if self.muted(chat_id):
+            return 0
         if not real or self.bot is None:
             if files:
                 log.info("[album → %s] %d file(s)", chat_id, len(files))
@@ -1287,7 +1370,7 @@ class Notifier:
 
         user = svc.get_user(self.conn, v["user_id"])
         files = violations.media_ids(v)
-        if await self.send(user["telegram_id"], violation_text(v, user, tx)):
+        if await self.send(user["telegram_id"], violation_text(v, user, tx, resolver)):
             await self.send_album(user["telegram_id"], files)
         tags = ["нарушение", "штраф" if v["status"] == "penalized" else "оправдание"]
         if await self.archive(tags, violation_archive_text(v, user, resolver, tx, approver), user):
@@ -1393,7 +1476,8 @@ class Notifier:
                 if goal["kind"] in ("team", "network") else None)
         sent = 0
         for user in svc.list_users(self.conn):
-            if user["account_state"] == "active" and goals.eligible(self.conn, goal, user):
+            # «Не работаю» — no announcements for active staff (ТЗ 28.10 §9, В27)
+            if user["account_state"] == "active" and user["work_status"] == "working" and goals.eligible(self.conn, goal, user):
                 sent += await self._photo_or_text(user["telegram_id"], goal["prize_photo"], text, join)
                 await asyncio.sleep(0.05)
         return sent
@@ -1463,7 +1547,7 @@ class Notifier:
             text += "\n\n" + (event["description_html"] or escape(event["description"]))
         sent = 0
         for user in svc.list_users(self.conn):
-            if events.eligible(event, user, self.conn):
+            if user["work_status"] == "working" and events.eligible(event, user, self.conn):
                 # the prize photo or video carries the text (or goes first when the text is too long for a caption)
                 sent += await self._deliver(user["telegram_id"], text, event["prize_photo"], self._event_markup(),
                                             event["prize_media_kind"]) is not None

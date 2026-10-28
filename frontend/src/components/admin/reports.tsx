@@ -8,7 +8,7 @@ import { api, type QueueItem, type QueueKind, type ReportAttempt, type ReportCou
 import { useCan } from "@/lib/caps";
 import { addDays, dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
-import { openChat, tapHaptic } from "@/lib/telegram";
+import { openProfile, tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { deadlineText } from "../report/report-block";
 import { PhotoPicker, PhotoThumb } from "../report/photo";
@@ -123,14 +123,17 @@ function ReportCard({ item, onDone }: { item: QueueItem; onDone: () => void }) {
     <li className="row-in space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-semibold">{item.name}</p>
+          <button type="button" className="block max-w-full truncate text-left font-semibold underline-offset-2 hover:underline"
+                  onClick={() => openProfile(item.username, item.telegram_id, item.name)}>{item.name}</button>
           <p className="text-sm text-muted-foreground">
             {dayMonth(item.date)}, {item.start_time}–{item.end_time}, {item.location}
           </p>
         </div>
-        <Button variant="secondary" size="sm" className="press h-9 shrink-0 rounded-xl" onClick={() => openChat(item)}>
-          <MessageCircle /> Написать
-        </Button>
+        {item.username && (
+          <Button variant="secondary" size="sm" className="press h-9 shrink-0 rounded-xl" onClick={() => openProfile(item.username, item.telegram_id)}>
+            <MessageCircle /> Написать
+          </Button>
+        )}
       </div>
       <ReportDecision subject={{ ...item, volume: item.volume }} onDone={onDone} />
     </li>

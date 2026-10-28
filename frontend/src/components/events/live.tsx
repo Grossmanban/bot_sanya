@@ -237,6 +237,11 @@ function EventView({ event, onBack, onChanged }: { event: LiveEvent; onBack?: ()
             </div>
           )}
           {event.my.can_submit && <EntryForm event={event} onDone={onChanged} />}
+          {!event.my.can_submit && event.my.not_working && event.phase === "live" && (
+            <p className="rounded-2xl bg-muted/60 px-4 py-3 text-sm text-muted-foreground">
+              Заявки в событии — только со статусом «Работаю». Включите его в профиле.
+            </p>
+          )}
         </section>
       </div>
 

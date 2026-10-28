@@ -135,9 +135,9 @@ def test_profile_card_for_people_without_username(conn, make_user):
     plain = make_user(first="Без", username=None)
     other = make_user(first="Чужой")
     r = client.post("/api/profile-link", json={"telegram_id": plain["telegram_id"]}, headers=owner)
-    assert r.json() == {"sent": True, "bot_username": "test_bot"}
+    assert r.json() == {"sent": True, "opens": True, "bot_username": "test_bot"}
     chat, text, markup = sent[-1]
-    assert chat == 999 and f'tg://user?id={plain["telegram_id"]}' in text and str(plain["telegram_id"]) in text
+    assert chat == 999 and str(plain["telegram_id"]) in text and "Нажмите на имя" not in text
     assert markup.inline_keyboard[0][0].url == f"tg://user?id={plain['telegram_id']}"
     # an employee may not ask about anyone; a stranger from the access log — only for those who see the log
     assert client.post("/api/profile-link", json={"telegram_id": plain["telegram_id"]},
@@ -145,3 +145,41 @@ def test_profile_card_for_people_without_username(conn, make_user):
     invites.log_attempt(conn, {"id": 8301, "first_name": "Ольга"}, "no_link")
     assert client.post("/api/profile-link", json={"telegram_id": 8301}, headers=owner).json()["sent"]
     assert "(без username, ID <code>" in notify.who(svc.get_user(conn, plain["id"]))
+
+
+def test_profile_card_is_honest_when_privacy_hides_the_profile(conn, make_user):
+    """ТЗ 28.10 §17: Telegram refuses the profile button (BUTTON_USER_PRIVACY_RESTRICTED) — the card says so and
+    gives the ID; it never promises «нажмите на имя»."""
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    sent = []
+
+    class Bot:
+        async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, disable_web_page_preview=None):
+            if reply_markup is not None:
+                raise TelegramBadRequest(SendMessage(chat_id=chat_id, text=text), "BUTTON_USER_PRIVACY_RESTRICTED")
+            sent.append((chat_id, text))
+
+    n = Notifier(Bot(), conn)
+    client = TestClient(create_app(conn, n, "test_bot"))
+    owner = headers(999, "Саня", "Владелец", "boss")
+    client.get("/api/me", headers=owner)
+    plain = make_user(first="Скрытый", username=None)
+    r = client.post("/api/profile-link", json={"telegram_id": plain["telegram_id"]}, headers=owner).json()
+    assert r["sent"] is True and r["opens"] is False
+    chat, text = sent[-1]
+    assert chat == 999 and str(plain["telegram_id"]) in text and "приватности" in text and "Нажмите на имя" not in text
+
+
+def test_one_person_link_everywhere(conn, make_user):
+    """ТЗ 28.10 §17: with a username — a t.me link (opens in every client); without — a mention plus the ID."""
+    from app import notify
+
+    named = make_user(first="Аня", username="anya")
+    plain = make_user(first="Без", username=None)
+    assert notify.who(named) == '<a href="https://t.me/anya">Аня Петров</a> (@anya)'
+    assert notify.who(plain) == (f'<a href="tg://user?id={plain["telegram_id"]}">Без Петров</a> '
+                                 f'(без username, ID <code>{plain["telegram_id"]}</code>)')
+    assert notify.name_handle(named) == notify.who(named)
+    assert notify.person_link(plain, "Кандидат <b>") .count("&lt;b&gt;") == 1  # names are escaped

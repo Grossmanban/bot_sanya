@@ -24,7 +24,7 @@ class FakeNotifier(Notifier):
         self.photos: list[tuple[int, str]] = []
         self.markups: list = []
 
-    async def send(self, chat_id, text, markup=None):
+    async def send(self, chat_id, text, markup=None, force=False):
         self.sent.append((chat_id, text))
         return True
 
@@ -198,6 +198,9 @@ def test_report_permissions(conn, make_user):
     trainer = make_user(first="Вера", last="Тренер")
     conn.execute("UPDATE users SET network_id = 1 WHERE id IN (?, ?)", (u["id"], trainer["id"]))
     conn.execute("UPDATE users SET role = 'trainer' WHERE id = ?", (trainer["id"],))
+    # ТЗ 28.10 В32: the network's trainer is networks.trainer_id — the one who leads it
+    conn.execute("INSERT INTO networks (id, name, trainer_id, created_by, created_at) VALUES (1, 'Север', ?, 0, '')",
+                 (trainer["id"],))
     trainer, u = svc.get_user(conn, trainer["id"]), svc.get_user(conn, u["id"])
     s = shift(conn, u, payload={**P, "volume": 20})
     report(conn, u, s, 10)
