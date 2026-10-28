@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, ArrowRight, Check, ChevronRight, LoaderCircle, Play, QrCode, RotateCcw, Search, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -158,6 +159,33 @@ export function StatusChip({ task }: { task: AliceTask }) {
   return <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", tone)}>{task.status_title}</span>;
 }
 
+/** The QR must be read by a phone camera from this screen: a wide white quiet zone (the dark theme around it hides
+ * the code's edges), no rounded corners over the finder squares, sharp pixels; a tap — full screen. */
+function QrView({ url }: { url: string }) {
+  const [full, setFull] = useState(false);
+  const img = (big: boolean) => (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={url} alt="QR-код" draggable={false} style={{ imageRendering: "pixelated" }}
+         className={cn("block h-auto w-full", big && "max-h-[80dvh] object-contain")} />
+  );
+  return (
+    <>
+      <button type="button" aria-label="QR-код на весь экран" onClick={() => setFull(true)}
+              className="mx-auto block w-full max-w-sm rounded-2xl bg-white p-[8%]">
+        {img(false)}
+      </button>
+      {full && createPortal(  // over everything, the tab bar too: a parent's transform would trap a fixed layer
+        <button type="button" aria-label="Закрыть QR-код" onClick={() => setFull(false)}
+                className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-4 bg-white p-[10vw]">
+          {img(true)}
+          <span className="text-sm text-neutral-500">Нажмите, чтобы закрыть</span>
+        </button>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function TaskFlow({ task, busy, act, onClose }: {
   task: AliceTask; busy: string | null; onClose: () => void;
   act: (name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string) => Promise<unknown>;
@@ -183,11 +211,11 @@ function TaskFlow({ task, busy, act, onClose }: {
 
       {task.step === 0 && (
         <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">Покажите QR-код человеку — он сканирует его своим телефоном.</p>
-          {task.qr_url && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={task.qr_url} alt="QR-код" className="mx-auto w-full max-w-72 rounded-2xl bg-white p-2" />
-          )}
+          <p className="text-sm text-muted-foreground">
+            Покажите QR-код человеку — он сканирует его камерой своего телефона. Нажмите на код, чтобы открыть его на весь экран;
+            если не считывается — прибавьте яркость экрана.
+          </p>
+          {task.qr_url && <QrView url={task.qr_url} />}
           {task.qr_number && <p className="text-center text-sm font-semibold">№ {task.qr_number}</p>}
           <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
                   onClick={() => act("scanned", () => api.aliceScanned(task.id))}>
