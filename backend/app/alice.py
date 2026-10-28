@@ -60,7 +60,17 @@ def _tmp_dir() -> Path:
 
 
 def number(task_id: int) -> str:
-    return f"№{task_id:06d}"
+    """ТЗ 28.10 §18: «#152» — the task's own id, through-numbered, never reset, never reused."""
+    return f"#{task_id}"
+
+
+def title(task_id: int) -> str:
+    return f"Алиса {number(task_id)}"
+
+
+def qr_label(task: dict) -> str:
+    """A QR code by its own number, or «QR 5» — never «#5», which is how tasks are numbered now (В40)."""
+    return task.get("qr_number") or f"QR {task['qr_id']}"
 
 
 # ---------------------------------------------------------------- QR codes
@@ -187,7 +197,7 @@ def qr_history(conn: sqlite3.Connection, qr_id: int) -> list[dict]:
     rows += [{"at": r["removed_at"], "what": f"Снят: {people.get(r['user_id'])}", "by": names.get(r["removed_by"])}
              for r in conn.execute("SELECT * FROM alice_qr_assign WHERE qr_id = ? AND removed_at IS NOT NULL", (qr_id,))]
     rows += [{"at": r["completed_at"] or r["started_at"],
-              "what": f"Выполнение {number(r['id'])}: {people.get(r['user_id'])} — {STATUS[r['status']]}", "by": None}
+              "what": f"{title(r['id'])}: {people.get(r['user_id'])} — {STATUS[r['status']]}", "by": None}
              for r in conn.execute("SELECT * FROM alice_tasks WHERE qr_id = ? AND status != 'abandoned'", (qr_id,))]
     return sorted(rows, key=lambda r: r["at"] or "", reverse=True)[:200]
 
@@ -293,12 +303,47 @@ def start(conn: sqlite3.Connection, user: dict, key: str) -> dict:
 
 
 def scanned(conn: sqlite3.Connection, user: dict, task_id: int) -> dict:
-    """«QR-код отсканирован»: the picture is hidden from now on; the QR stays in the record."""
+    """«QR-код отсканирован»: the picture is hidden from now on; the QR stays in the record. After going back to
+    the QR the first scan is kept (В41)."""
     with transaction(conn):
         task = _own(conn, user, task_id)
         if task["step"] == 0:
-            conn.execute("UPDATE alice_tasks SET step = 1, scanned_at = ? WHERE id = ?", (now_iso(), task_id))
+            conn.execute("UPDATE alice_tasks SET step = 1, scanned_at = COALESCE(scanned_at, ?) WHERE id = ?",
+                         (now_iso(), task_id))
     return get(conn, task_id)
+
+
+def goto(conn: sqlite3.Connection, user: dict, task_id: int, stage: int) -> dict:
+    """ТЗ 28.10 §19: back to an earlier stage (0 — the QR code again). Photos, the QR and the scan stay; the stages
+    from there on are fixed again with «Далее», each one checking its photo."""
+    with transaction(conn):
+        task = _own(conn, user, task_id)
+        if not 0 <= stage < task["step"]:
+            raise ServiceError("На этот этап перейти нельзя — обновите экран", 409, "wrong_stage")
+        unfix = ", ".join(f"stage{s}_at = NULL" for s in STAGES if s >= stage)
+        conn.execute(f"UPDATE alice_tasks SET step = ?{', ' + unfix if unfix else ''} WHERE id = ?", (stage, task_id))
+        log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="ALICE_STEP_BACK", key=svc.new_key(),
+                  old={"step": task["step"]}, new={"step": stage, "task": task_id})
+    return get(conn, task_id)
+
+
+def check_photo(photo: dict | None, stage: int) -> None:
+    """§19: a database row is not enough — the file must be there and unchanged. A missing or broken photo stops the
+    way forward with the stage named; a failure to read is reported as a retry, never as «no photo»."""
+    what = f"Фото этапа {stage} «{STAGES[stage][0]}»"
+    if photo is None:
+        raise ServiceError(f"Прикрепите фото этапа {stage}", 409, f"photo_missing_{stage}")
+    if photo.get("file_id") and not photo.get("temp_path"):
+        return  # already in Telegram
+    path = Path(photo["temp_path"] or "")
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        raise ServiceError(f"{what} пропало — загрузите его заново", 409, f"photo_missing_{stage}") from None
+    except OSError as exc:
+        raise ServiceError("Не удалось проверить фото — повторите через минуту", 503, "photo_check_failed") from exc
+    if hashlib.sha256(data).hexdigest() != photo["sha256"]:
+        raise ServiceError(f"{what} повреждено — загрузите его заново", 409, f"photo_missing_{stage}")
 
 
 def put_photo(conn: sqlite3.Connection, user: dict, task_id: int, stage: int, data: bytes, ext: str) -> dict:
@@ -343,8 +388,7 @@ def fix_stage(conn: sqlite3.Connection, user: dict, task_id: int) -> dict:
         step = task["step"]
         if step not in STAGES:
             raise ServiceError("Сначала отметьте, что QR-код отсканирован", 409, "wrong_stage")
-        if step not in photos(conn, task_id):
-            raise ServiceError("Прикрепите фото этого этапа", 409, "photo_required")
+        check_photo(photos(conn, task_id).get(step), step)
         conn.execute(f"UPDATE alice_tasks SET step = ?, stage{step}_at = ? WHERE id = ?", (step + 1, now_iso(), task_id))
     return get(conn, task_id)
 
@@ -358,8 +402,10 @@ def finish(conn: sqlite3.Connection, user: dict, task_id: int, key: str) -> dict
             return task
         task = _own(conn, user, task_id)
         have = photos(conn, task_id)
-        if task["step"] != 4 or any(s not in have for s in STAGES):
+        if task["step"] != 4:
             raise ServiceError("Нужны все три фото — пройдите этапы по порядку", 409, "photos_required")
+        for s in STAGES:  # §19: every photo really there before sending
+            check_photo(have.get(s), s)
         conn.execute("UPDATE alice_tasks SET status = 'sending', completed_at = ? WHERE id = ?", (now_iso(), task_id))
         log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="ALICE_FINISHED", key=key,
                   new={"task": task_id})
@@ -367,13 +413,19 @@ def finish(conn: sqlite3.Connection, user: dict, task_id: int, key: str) -> dict
 
 
 def abandon(conn: sqlite3.Connection, user: dict, task_id: int) -> dict:
-    """Stop an execution before it is finished (the person changed their mind — it is voluntary)."""
+    """«⛔ Прервать выполнение» (§20): the photos are deleted, the execution never counts as done. A second tap
+    (or a tap on a stale screen) changes nothing and is not an error."""
     with transaction(conn):
+        task = get(conn, task_id)
+        if task is not None and task["user_id"] == user["id"] and task["status"] == "abandoned":
+            return task
         _own(conn, user, task_id)
-        conn.execute("UPDATE alice_tasks SET status = 'abandoned' WHERE id = ?", (task_id,))
+        conn.execute("UPDATE alice_tasks SET status = 'abandoned' WHERE id = ? AND status = 'in_progress'", (task_id,))
         for p in photos(conn, task_id).values():
             _drop(p)
-            conn.execute("UPDATE alice_photos SET temp_path = NULL WHERE id = ?", (p["id"],))
+            conn.execute("UPDATE alice_photos SET temp_path = NULL, replaced_at = ? WHERE id = ?", (now_iso(), p["id"]))
+        log_event(conn, user_id=user["id"], actor_id=user["telegram_id"], event_type="ALICE_ABANDONED", key=svc.new_key(),
+                  new={"task": task_id})
     return get(conn, task_id)
 
 
@@ -391,7 +443,8 @@ def view(conn: sqlite3.Connection, task: dict, staff: bool = False) -> dict:
     names = {} if not staff else {r["telegram_id"]: svc.full_name(dict(r)) for r in conn.execute(
         "SELECT telegram_id, first_name, last_name FROM users WHERE telegram_id = ?", (task["moderated_by"] or 0,))}
     out = {
-        "id": task["id"], "number": number(task["id"]), "status": task["status"], "status_title": STATUS[task["status"]],
+        "id": task["id"], "number": number(task["id"]), "title": title(task["id"]), "status": task["status"],
+        "status_title": STATUS[task["status"]], "qr_label": qr_label(task),
         "step": task["step"], "query": task["query"], "qr_number": task["qr_number"],
         # the QR picture only before «QR-код отсканирован» (§31.6), for the staff always
         "qr_url": media.photo_url(qr["id"], kind="aliceqr") if qr and (task["step"] == 0 or staff) else None,
@@ -431,15 +484,25 @@ def connect_forum(conn: sqlite3.Connection, chat_id: int | None, title: str | No
     app_settings.set_raw(conn, "alice_chat_title", title if chat_id is not None else None)
 
 
-def caption(conn: sqlite3.Connection, task: dict) -> str:
-    user = svc.get_user(conn, task["user_id"])
+def _person(conn, task: dict) -> str:
+    from .notify import person_link  # notify imports services; this module is imported by notify lazily
+
+    return person_link(svc.get_user(conn, task["user_id"]))
+
+
+def caption(conn: sqlite3.Connection, task: dict, stage: int = 1) -> str:
+    """ТЗ 28.10 §22: every photo says which task and which stage it is, the name opens the profile; the common block
+    (time, QR, query, status) — once, on the first photo. Telegram shows the captions of an album's photos when a
+    photo is opened; under the album it shows the text only of a single captioned photo — so nothing is lost."""
+    head = f"📸 <b>{title(task['id'])}</b> · фото {stage}/3 — {STAGES[stage][0]}\n👤 {_person(conn, task)}"
+    if stage != 1:
+        return head
     at = datetime.fromisoformat(task["completed_at"] or task["started_at"]).strftime("%d.%m.%Y %H:%M")
     mark = {"moderation": "🟡", "accepted": "🟢", "paid": "💰", "rejected": "🔴"}.get(task["status"], "⚪")
     status = STATUS[task["status"]] + (f": {escape(task['reject_reason'])}" if task["status"] == "rejected" and task["reject_reason"] else "")
-    return (f"📸 <b>Выполнение {number(task['id'])}</b> · Яндекс Алиса\n"
-            f"👤 {escape(svc.full_name(user))} · ID <code>{user['telegram_id']}</code>\n"
+    return (f"{head}\n"
             f"🕒 {at} (МСК)\n"
-            f"🔳 QR: {escape(task['qr_number'] or f'#{task['qr_id']}')}\n"
+            f"🔳 QR: {escape(qr_label(task))}\n"
             f"🔎 Запрос: «{escape(task['query'])}»\n"
             f"Статус: {mark} {status}")
 
@@ -458,15 +521,32 @@ async def _topic(conn: sqlite3.Connection, bot, user: dict, chat_id: int, fresh:
     return topic.message_thread_id
 
 
-async def deliver(conn: sqlite3.Connection, bot, task_id: int) -> dict:
+async def deliver(conn: sqlite3.Connection, bot, task_id: int, notifier=None) -> dict:
     """Three photos with the caption into the person's topic. Success → «На модерации», the files on the server
     are removed; failure → «Не отправлено» with the reason, retried later — never a silent success."""
-    from aiogram.exceptions import TelegramAPIError
-    from aiogram.types import BufferedInputFile, InputMediaPhoto
-
     task = get(conn, task_id)
     if task is None or task["status"] not in ("sending", "send_failed"):
         return task
+    # §19: one sender at a time — «Завершить» and the retry job never send the same album twice
+    with transaction(conn):
+        claimed = conn.execute(
+            """UPDATE alice_tasks SET send_claimed_at = ? WHERE id = ? AND status IN ('sending','send_failed')
+               AND (send_claimed_at IS NULL OR send_claimed_at < ?)""",
+            (now_iso(), task_id, (now_local() - timedelta(minutes=5)).isoformat(timespec="seconds"))).rowcount
+    if not claimed:
+        return get(conn, task_id)
+    try:
+        return await _deliver(conn, bot, task, notifier)
+    finally:
+        with transaction(conn):
+            conn.execute("UPDATE alice_tasks SET send_claimed_at = NULL WHERE id = ?", (task_id,))
+
+
+async def _deliver(conn: sqlite3.Connection, bot, task: dict, notifier=None) -> dict:
+    from aiogram.exceptions import TelegramAPIError
+    from aiogram.types import BufferedInputFile, InputMediaPhoto
+
+    task_id = task["id"]
     group = forum(conn)
     error = None
     if bot is None:
@@ -476,20 +556,27 @@ async def deliver(conn: sqlite3.Connection, bot, task_id: int) -> dict:
     if error is None:
         user = svc.get_user(conn, task["user_id"])
         have = photos(conn, task_id)
-        try:
-            files = {s: Path(have[s]["temp_path"]).read_bytes() for s in STAGES}
-        except (OSError, TypeError, KeyError):
-            files, error = None, "Файлы фото не найдены на сервере"
+        files, missing = {}, None
+        for s in STAGES:
+            try:
+                files[s] = Path(have[s]["temp_path"]).read_bytes()
+            except (OSError, TypeError, KeyError):
+                missing = s
+                break
+        if missing is not None:
+            return await _photo_lost(conn, task, missing, notifier)
         if files:
-            text = caption(conn, {**task, "status": "moderation"})
             album = [InputMediaPhoto(media=BufferedInputFile(files[s], filename=f"{task_id}_{s}.jpg"),
-                                     caption=(text + f"\n\n1/3 · {STAGES[1][0]}") if s == 1 else f"{s}/3 · {STAGES[s][0]}",
-                                     parse_mode="HTML") for s in STAGES]
+                                     caption=caption(conn, {**task, "status": "moderation"}, s), parse_mode="HTML")
+                     for s in STAGES]
             sent = None
             for attempt in range(2):
                 try:
                     thread = await _topic(conn, bot, user, group["chat_id"], fresh=attempt == 1)
                     sent = await bot.send_media_group(group["chat_id"], media=album, message_thread_id=thread)
+                    if attempt == 1 and notifier is not None:  # В44: the deleted topic is made again — admins know
+                        await notifier.to_admins(f"📸 Тема сотрудника {escape(svc.full_name(user))} в группе фотоотчётов "
+                                                 "«Алисы» была удалена — бот создал её заново.")
                     break
                 except TelegramAPIError as exc:
                     error = str(exc)[:300]
@@ -513,6 +600,28 @@ async def deliver(conn: sqlite3.Connection, bot, task_id: int) -> dict:
     return get(conn, task_id)
 
 
+async def _photo_lost(conn: sqlite3.Connection, task: dict, stage: int, notifier=None) -> dict:
+    """§19: a photo vanished before sending — the execution goes back to the person at that stage (if they have no
+    other one going), with the reason; nothing is sent half-done."""
+    reason = f"Фото этапа {stage} «{STAGES[stage][0]}» пропало — загрузите его заново"
+    with transaction(conn):
+        busy = conn.execute("SELECT 1 FROM alice_tasks WHERE user_id = ? AND status = 'in_progress' AND id != ?",
+                            (task["user_id"], task["id"])).fetchone()
+        if busy:
+            conn.execute("UPDATE alice_tasks SET status = 'send_failed', send_error = ?, send_attempts = send_attempts + 1 "
+                         "WHERE id = ?", (reason, task["id"]))
+        else:
+            unfix = ", ".join(f"stage{s}_at = NULL" for s in STAGES if s >= stage)
+            conn.execute(f"""UPDATE alice_tasks SET status = 'in_progress', step = ?, completed_at = NULL, send_error = ?,
+                             {unfix} WHERE id = ?""", (stage, reason, task["id"]))
+        log_event(conn, user_id=task["user_id"], actor_id=0, event_type="ALICE_PHOTO_LOST", key=svc.new_key(),
+                  new={"task": task["id"], "stage": stage})
+    if notifier is not None:
+        user = svc.get_user(conn, task["user_id"])
+        await notifier.send(user["telegram_id"], f"⚠️ {title(task['id'])}: {reason}. Откройте «Работа» → «Алиса».")
+    return get(conn, task["id"])
+
+
 def to_retry(conn: sqlite3.Connection, limit: int = 10) -> list[int]:
     return [r[0] for r in conn.execute(
         "SELECT id FROM alice_tasks WHERE status IN ('sending','send_failed') AND send_attempts < 20 ORDER BY id LIMIT ?",
@@ -528,14 +637,14 @@ async def post_status(conn: sqlite3.Connection, bot, task_id: int) -> None:
         return
     first = json.loads(task["message_ids"])[0]
     try:
-        await bot.edit_message_caption(chat_id=task["chat_id"], message_id=first,
-                                       caption=caption(conn, task) + f"\n\n1/3 · {STAGES[1][0]}", parse_mode="HTML")
+        await bot.edit_message_caption(chat_id=task["chat_id"], message_id=first, caption=caption(conn, task), parse_mode="HTML")
     except TelegramAPIError:
         pass
-    mark = {"accepted": "🟢 Принято", "rejected": "🔴 Отклонено", "paid": "💰 Оплачено"}.get(task["status"], STATUS[task["status"]])
+    mark = {"accepted": "🟢 Принято, ожидает оплаты", "rejected": "🔴 Отклонено администратором",
+            "paid": "💰 Оплачено"}.get(task["status"], STATUS[task["status"]])
     reason = f"\nПричина: {escape(task['reject_reason'])}" if task["status"] == "rejected" and task["reject_reason"] else ""
     try:
-        await bot.send_message(task["chat_id"], f"{mark} — выполнение {number(task_id)}{reason}",
+        await bot.send_message(task["chat_id"], f"{title(task_id)} — {mark}{reason}",
                                message_thread_id=task["thread_id"], reply_to_message_id=first, parse_mode="HTML")
     except TelegramAPIError:
         pass

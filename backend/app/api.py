@@ -962,6 +962,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def work_alice_photo_delete(task_id: int, stage: int, user: dict = Depends(current_user)):
         return alice_task(user, alice.delete_photo(conn, user, task_id, stage))
 
+    @api.post("/work/alice/{task_id}/goto/{stage}")
+    async def work_alice_goto(task_id: int, stage: int, user: dict = Depends(current_user)):
+        """§19: back to an earlier stage (0 — the QR code); the photos stay."""
+        return alice_task(user, alice.goto(conn, user, task_id, stage))
+
     @api.post("/work/alice/{task_id}/next")
     async def work_alice_next(task_id: int, user: dict = Depends(current_user)):
         return alice_task(user, alice.fix_stage(conn, user, task_id))
@@ -970,7 +975,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def work_alice_finish(task_id: int, body: KeyOnly, user: dict = Depends(current_user)):
         task = alice.finish(conn, user, task_id, body.idempotency_key)
         if task["status"] in ("sending", "send_failed"):
-            task = await alice.deliver(conn, notifier.bot, task_id)
+            task = await alice.deliver(conn, notifier.bot, task_id, notifier)
         return alice_task(user, task)
 
     @api.post("/work/alice/{task_id}/retry")
@@ -978,7 +983,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         task = alice.get(conn, task_id)
         if task is None or task["user_id"] != user["id"]:
             raise svc.ServiceError("Выполнение не найдено", 404, "not_found")
-        return alice_task(user, await alice.deliver(conn, notifier.bot, task_id))
+        return alice_task(user, await alice.deliver(conn, notifier.bot, task_id, notifier))
 
     @api.post("/work/alice/{task_id}/abandon")
     async def work_alice_abandon(task_id: int, user: dict = Depends(current_user)):
@@ -1042,6 +1047,17 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             notifier.spawn(alice.post_status(conn, notifier.bot, task_id))
         return {"task": alice.view(conn, task, staff=True)}
 
+    @api.post("/admin/alice/{task_id}/retry")
+    async def admin_alice_retry(task_id: int, body: KeyOnly, admin: dict = Depends(staff("alice"))):
+        """В56: «Не отправлено» after all automatic attempts — an admin sends it again."""
+        task = alice.get(conn, task_id)
+        if task is None or task["status"] not in ("sending", "send_failed"):
+            raise svc.ServiceError("Это выполнение не ждёт отправки", 409, "bad_status")
+        with transaction(conn):
+            conn.execute("UPDATE alice_tasks SET send_attempts = 0 WHERE id = ?", (task_id,))
+        task = await alice.deliver(conn, notifier.bot, task_id, notifier)
+        return {"task": alice.view(conn, task, staff=True)}
+
     @api.get("/admin/alice/qr")
     async def admin_alice_qrs(archived: bool = False, _: dict = Depends(staff("alice"))):
         return {"items": alice.qr_list(conn, archived)}
@@ -1102,6 +1118,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                        svc.parse_date(body.date_to), body.confirmed, body.proof_media, body.idempotency_key)
         batch = payouts.batch(conn, batch_id)
         notifier.spawn(notifier.alice_paid(batch))
+        for (tid,) in conn.execute("SELECT id FROM alice_tasks WHERE payout_id = ?", (batch_id,)).fetchall():
+            notifier.spawn(alice.post_status(conn, notifier.bot, tid))  # §21: «💰 Оплачено» in the forum too
         return {"batch": batch, "bank_text": payouts.bank_text(batch)}
 
     @api.get("/admin/access-attempts")

@@ -1307,6 +1307,11 @@ CREATE TABLE manual_progress (
 );
 """)
 
+# 36 — ТЗ 28.10 §19: one sender per «Алиса» album at a time (no double send by «Завершить» and the retry job)
+MIGRATIONS.append("""
+ALTER TABLE alice_tasks ADD COLUMN send_claimed_at TEXT;
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

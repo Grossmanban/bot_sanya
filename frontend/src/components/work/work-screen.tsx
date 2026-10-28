@@ -2,10 +2,14 @@
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ArrowRight, Check, ChevronRight, LoaderCircle, Play, QrCode, RotateCcw, Search, Send, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronLeft, ChevronRight, LoaderCircle, Play, QrCode, RotateCcw, Search, Send, X } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, PRODUCT_TITLES, type AliceCounts, type AliceStats, type AliceTask, type Product } from "@/lib/api";
+import { api, ApiError, PRODUCT_TITLES, type AliceCounts, type AliceStats, type AliceTask, type Product } from "@/lib/api";
 import { useAction, useLoad } from "@/lib/hooks";
 import { haptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
@@ -39,7 +43,7 @@ const COUNTS: { key: keyof AliceCounts; label: string; tone: string }[] = [
   { key: "completed", label: "Всего завершено", tone: "" },
   { key: "moderation", label: "На модерации", tone: "text-wait" },
   { key: "rejected", label: "Отклонено", tone: "text-cancel" },
-  { key: "accepted", label: "Принято, ждёт оплаты", tone: "text-go" },
+  { key: "accepted", label: "Принято, ожидает оплаты", tone: "text-go" },
   { key: "paid", label: "Оплачено", tone: "text-go" },
 ];
 
@@ -50,13 +54,15 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
   // «Закрыть»: the execution is folded away, not stopped — everything done so far is kept on the server
   const [folded, setFolded] = useState(false);
 
-  async function act(name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string) {
+  async function act(name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string,
+                     raise = false) {
     try {
       const res = await run(name, fn, ok);
       if (res && data) setData({ ...data, task: res.task?.status === "in_progress" ? res.task : null, stats: res.stats ?? data.stats });
       if (res?.task && res.task.status !== "in_progress") void reload();
       return res;
-    } catch {
+    } catch (e) {
+      if (raise) throw e;
       return undefined;
     }
   }
@@ -70,13 +76,13 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
     <div className="mx-auto max-w-2xl space-y-4">
       <div className="flex items-center gap-2">
         {onBack && <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={onBack}>← Назад</Button>}
-        <h1 className="font-display text-2xl font-semibold">Яндекс Алиса</h1>
+        <h1 className="font-display text-2xl font-semibold">Алиса</h1>
       </div>
 
       {task && folded ? (
         <section className="flex items-center gap-3 rounded-3xl bg-card p-5 shadow-lift">
           <span className="min-w-0 flex-1">
-            <span className="block font-semibold">Выполнение {task.number} не завершено</span>
+            <span className="block font-semibold">{task.title ?? `Алиса ${task.number}`} не завершена</span>
             <span className="block text-sm text-muted-foreground">
               {task.step === 0 ? "QR-код ещё на экране" : task.step <= 3 ? `Фото ${task.step} из 3` : "Все фото есть — осталось завершить"}
             </span>
@@ -105,7 +111,7 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
 
       {failed.map((t) => (
         <section key={t.id} className="space-y-2 rounded-3xl bg-cancel-soft p-5 text-cancel">
-          <p className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4" /> Выполнение {t.number} не отправлено</p>
+          <p className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4" /> {t.title ?? `Алиса ${t.number}`} — не отправлено</p>
           <p className="text-sm">{t.send_error ?? "Ошибка отправки"}. Мы повторим отправку автоматически, можно и сейчас.</p>
           <Button size="sm" className="press h-9 rounded-xl" disabled={!!busy}
                   onClick={() => act(`retry-${t.id}`, () => api.aliceRetry(t.id), "Отправлено на модерацию")}>
@@ -143,7 +149,7 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
             {data.history.map((t) => (
               <li key={t.id} className="flex items-center justify-between gap-3 px-5 py-3 md:px-6">
                 <span className="min-w-0">
-                  <span className="block font-medium">{t.number}</span>
+                  <span className="block font-medium">{t.title ?? `Алиса ${t.number}`}</span>
                   <span className="block truncate text-xs text-muted-foreground">
                     {(t.completed_at ?? t.started_at).slice(8, 10)}.{(t.completed_at ?? t.started_at).slice(5, 7)} · «{t.query}»
                     {t.reject_reason ? ` · ${t.reject_reason}` : ""}
@@ -202,26 +208,49 @@ function QrView({ url }: { url: string }) {
 
 function TaskFlow({ task, busy, act, onClose }: {
   task: AliceTask; busy: string | null; onClose: () => void;
-  act: (name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string) => Promise<unknown>;
+  act: (name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string, raise?: boolean) => Promise<unknown>;
 }) {
   const [confirmStop, setConfirmStop] = useState(false);
+  const [broken, setBroken] = useState<Record<number, boolean>>({});
   const stage = task.stages.find((s) => s.stage === task.step);
+  // §19: back to an earlier stage (the QR included) — the photos stay; forward again with «Далее»
+  const goto = (n: number) => act(`goto-${n}`, () => api.aliceGoto(task.id, n));
+  // «Далее» / «Завершить» name the stage whose photo is gone: take the person straight there
+  const forward = async (name: string, fn: (k: string) => Promise<{ task: AliceTask | null; stats?: AliceStats }>, ok?: string) => {
+    try {
+      return await act(name, fn, ok, true);
+    } catch (e) {
+      const m = e instanceof ApiError ? /^photo_missing_(\d)$/.exec(e.code) : null;
+      if (m && Number(m[1]) < task.step) await goto(Number(m[1]));
+      return undefined;
+    }
+  };
   return (
     <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <div className="flex items-center justify-between gap-3">
         <span className="min-w-0">
-          <h2 className="font-semibold">Выполнение {task.number}</h2>
-          <span className="flex items-center gap-1 text-xs text-muted-foreground"><QrCode className="size-3.5" /> {task.qr_number ?? "назначен"}</span>
+          <h2 className="font-semibold">{task.title ?? `Алиса ${task.number}`}</h2>
+          <span className="flex items-center gap-1 text-xs text-muted-foreground"><QrCode className="size-3.5" /> {task.qr_label ?? task.qr_number ?? "назначен"}</span>
         </span>
         <Button variant="secondary" size="sm" className="press h-9 shrink-0 rounded-xl" onClick={onClose}>
           <X /> Закрыть
         </Button>
       </div>
-      <ol className="flex gap-1.5">
+      <ol className="flex gap-1.5" aria-label="Этапы">
         {[0, 1, 2, 3, 4].map((i) => (
-          <li key={i} className={cn("h-1.5 flex-1 rounded-full", i < task.step ? "bg-go" : i === task.step ? "bg-primary" : "bg-muted")} />
+          <li key={i} className="flex-1">
+            <button type="button" disabled={i >= task.step || !!busy} onClick={() => goto(i)}
+                    aria-label={i === 0 ? "К QR-коду" : i === 4 ? "Проверка" : `К фото ${i}`}
+                    className={cn("block h-1.5 w-full rounded-full", i < task.step ? "bg-go" : i === task.step ? "bg-primary" : "bg-muted")} />
+          </li>
         ))}
       </ol>
+      {task.step > 0 && (
+        <button type="button" disabled={!!busy} onClick={() => goto(task.step - 1)}
+                className="press inline-flex items-center gap-1 text-sm font-semibold text-muted-foreground">
+          <ChevronLeft className="size-4" /> {task.step === 1 ? "Назад к QR-коду" : "Назад"}
+        </button>
+      )}
 
       {task.step === 0 && (
         <div className="space-y-3">
@@ -233,7 +262,7 @@ function TaskFlow({ task, busy, act, onClose }: {
           {task.qr_number && <p className="text-center text-sm font-semibold">№ {task.qr_number}</p>}
           <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
                   onClick={() => act("scanned", () => api.aliceScanned(task.id))}>
-            {busy === "scanned" ? <LoaderCircle className="animate-spin" /> : <QrCode />} QR-код отсканирован
+            {busy === "scanned" ? <LoaderCircle className="animate-spin" /> : <QrCode />} {task.scanned_at ? "Дальше — к фото" : "QR-код отсканирован"}
           </Button>
         </div>
       )}
@@ -250,11 +279,12 @@ function TaskFlow({ task, busy, act, onClose }: {
               Запрос — введите точно так: <b className="select-all">{task.query}</b>
             </p>
           )}
-          {stage.photo_url ? (
+          {stage.photo_url && !broken[stage.stage] ? (
             <div className="space-y-3">
               <div className="relative">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={stage.photo_url} alt={stage.title} className="w-full rounded-2xl bg-muted object-contain" />
+                <img src={stage.photo_url} alt={stage.title} onError={() => setBroken({ ...broken, [stage.stage]: true })}
+                     className="w-full rounded-2xl bg-muted object-contain" />
                 <button aria-label="Удалить фото" disabled={!!busy}
                         onClick={() => act("drop", () => api.aliceDropPhoto(task.id, stage.stage))}
                         className="press absolute top-2 right-2 grid size-9 place-items-center rounded-full bg-black/60 text-white">
@@ -262,14 +292,21 @@ function TaskFlow({ task, busy, act, onClose }: {
                 </button>
               </div>
               <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
-                      onClick={() => act("next", () => api.aliceNext(task.id))}>
+                      onClick={() => forward("next", () => api.aliceNext(task.id))}>
                 {busy === "next" ? <LoaderCircle className="animate-spin" /> : <ArrowRight />}
                 {stage.stage < 3 ? "Далее" : "Зафиксировать последнее фото"}
               </Button>
             </div>
           ) : (
-            <Camera key={`${task.id}-${stage.stage}`} busy={busy === "photo"}
-                    onAttach={(blob) => { haptic("success"); void act("photo", () => api.alicePhoto(task.id, stage.stage, blob)); }} />
+            <>
+              {stage.photo_url && (
+                <p className="rounded-2xl bg-cancel-soft px-4 py-3 text-sm text-cancel">
+                  Фото этого этапа недоступно — сделайте его заново.
+                </p>
+              )}
+              <Camera key={`${task.id}-${stage.stage}`} busy={busy === "photo"}
+                      onAttach={(blob) => { haptic("success"); setBroken({ ...broken, [stage.stage]: false }); void act("photo", () => api.alicePhoto(task.id, stage.stage, blob)); }} />
+            </>
           )}
         </div>
       )}
@@ -279,31 +316,57 @@ function TaskFlow({ task, busy, act, onClose }: {
           <ul className="grid grid-cols-3 gap-2">
             {task.stages.map((s) => (
               <li key={s.stage} className="space-y-1">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                {s.photo_url && <img src={s.photo_url} alt={s.title} className="aspect-[3/4] w-full rounded-xl bg-muted object-cover" />}
+                <button type="button" onClick={() => goto(s.stage)} disabled={!!busy} className="block w-full">
+                  {s.photo_url && !broken[s.stage] ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={s.photo_url} alt={s.title} onError={() => setBroken({ ...broken, [s.stage]: true })}
+                         className="aspect-[3/4] w-full rounded-xl bg-muted object-cover" />
+                  ) : (
+                    <span className="grid aspect-[3/4] w-full place-items-center rounded-xl bg-cancel-soft p-2 text-center text-xs text-cancel">
+                      Фото недоступно — нажмите, чтобы переснять
+                    </span>
+                  )}
+                </button>
                 <p className="flex items-center gap-1 text-xs"><Check className="size-3 text-go" /> {s.title}</p>
               </li>
             ))}
           </ul>
           <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
-                  onClick={() => act("finish", (k) => api.aliceFinish(task.id, k), "Отправлено на модерацию")}>
+                  onClick={() => forward("finish", (k) => api.aliceFinish(task.id, k), "Отправлено на модерацию")}>
             {busy === "finish" ? <LoaderCircle className="animate-spin" /> : <Send />} Завершить выполнение
           </Button>
         </div>
       )}
 
-      {confirmStop ? (
-        <div className="flex items-center gap-2 rounded-2xl bg-muted/60 p-3 text-sm">
-          <span className="flex-1">Прервать выполнение? Фото удалятся, в статистику не попадёт.</span>
-          <Button size="sm" variant="ghost" className="h-8 rounded-lg" onClick={() => setConfirmStop(false)}>Нет</Button>
-          <Button size="sm" className="h-8 rounded-lg bg-cancel text-white hover:bg-cancel/90" disabled={!!busy}
-                  onClick={() => act("abandon", () => api.aliceAbandon(task.id), "Выполнение прервано")}>Прервать</Button>
-        </div>
-      ) : (
-        <button className="text-xs text-muted-foreground underline-offset-2 hover:underline" onClick={() => setConfirmStop(true)}>
-          Человек передумал — прервать выполнение
-        </button>
-      )}
+      <Button variant="ghost" className="press h-11 w-full rounded-2xl font-semibold text-cancel hover:bg-cancel-soft hover:text-cancel"
+              disabled={!!busy} onClick={() => setConfirmStop(true)}>
+        ⛔ Прервать выполнение
+      </Button>
+      <AlertDialog open={confirmStop} onOpenChange={setConfirmStop}>
+        <AlertDialogContent className="max-h-[90dvh] overflow-y-auto rounded-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-display">⛔ Прервать выполнение задания?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-left text-sm">
+                <p>При прерывании все прикреплённые фотографии будут удалены, а задание не попадёт в статистику выполненных заданий.</p>
+                <p>
+                  Используйте прерывание только тогда, когда задание не удалось завершить до конца: человек передумал; задание уже было выполнено;
+                  не удалось собрать полный фотоотчёт; из трёх необходимых фотографий удалось сделать только одну или две; либо задание невозможно
+                  корректно завершить по другой причине.
+                </p>
+                <p>Если полный фотоотчёт собран и задание выполнено, не прерывайте его без необходимости.</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="gap-2">
+            <AlertDialogCancel className="h-11 rounded-xl">↩️ Продолжить выполнение</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" className="h-11 rounded-xl" disabled={!!busy}
+                               onClick={() => act("abandon", () => api.aliceAbandon(task.id), "Выполнение прервано")}>
+              ⛔ Да, прервать
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

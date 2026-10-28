@@ -102,7 +102,7 @@ def test_stages_in_order_photos_replaced_and_hidden_qr(conn, setup):
     assert e.value.code == "wrong_stage"
     with pytest.raises(svc.ServiceError) as e:
         alice.fix_stage(conn, u, task["id"])
-    assert e.value.code == "photo_required"
+    assert e.value.code == "photo_missing_1"
     alice.put_photo(conn, u, task["id"], 1, JPG + b"a", "jpg")
     alice.put_photo(conn, u, task["id"], 1, JPG + b"b", "jpg")  # «Переснять»: the new one replaces the old
     assert len(alice.photos(conn, task["id"])) == 1
@@ -132,8 +132,11 @@ def test_forum_delivery_failure_retry_moderation(conn, setup):
     task = run(alice.deliver(conn, bot, task["id"]))
     assert task["status"] == "moderation" and task["thread_id"] == 101
     chat, thread, captions = bot.albums[0]
-    assert chat == FORUM and "Выполнение №" in captions[0] and "QR: 7" in captions[0] and "На модерации" in captions[0]
-    assert captions[1].startswith("2/3") and captions[2].startswith("3/3 · Поисковый запрос выполнен")
+    # ТЗ 28.10 §22: every photo says the task and its stage, the name opens the profile; the common block — on the first
+    assert chat == FORUM and "Алиса #" in captions[0] and "фото 1/3 — Подтверждение участия" in captions[0]
+    assert "QR: 7" in captions[0] and "На модерации" in captions[0] and "https://t.me/ivan" in captions[0]
+    assert "фото 2/3 — Участие подтверждено" in captions[1] and "фото 3/3 — Поисковый запрос выполнен" in captions[2]
+    assert all("Алиса #" in c and "https://t.me/ivan" in c for c in captions) and "Запрос" not in captions[1]
     shots = alice.photos(conn, task["id"])
     assert all(p["temp_path"] is None and p["file_id"] for p in shots.values())  # nothing kept on the server
     # moderation: once, with a reason; the topic shows it
@@ -248,3 +251,54 @@ def test_http_work_section(conn, make_user, tmp_path):
     assert client.get("/api/admin/alice/queue?status=send_failed", headers=owner_h).json()["items"][0]["id"] == t["id"]
     assert json.loads(json.dumps(client.get("/api/admin/alice/stats?from=2026-01-01&to=2030-01-01",
                                             headers=owner_h).json()))["total"]["completed"] == 1
+
+
+def test_back_and_forth_keeps_photos_and_checks_the_files(conn, setup):
+    """ТЗ 28.10 §19–§20: back to the QR and forward without rescanning, photos kept; a vanished photo stops the way
+    with its stage named; «Прервать» deletes the photos and a second tap is harmless."""
+    from pathlib import Path
+
+    owner, u = setup
+    products.set_access(conn, owner, u["id"], "alice", True, svc.new_key())
+    qr = alice.create_qr(conn, owner, "local:qr.png", None, svc.new_key())
+    alice.assign(conn, owner, qr["id"], u["id"], True, svc.new_key())
+    task = alice.start(conn, u, svc.new_key())
+    alice.scanned(conn, u, task["id"])
+    first_scan = alice.get(conn, task["id"])["scanned_at"]
+    for stage in (1, 2):
+        alice.put_photo(conn, u, task["id"], stage, JPG + bytes([stage]), "jpg")
+        alice.fix_stage(conn, u, task["id"])
+    task = alice.goto(conn, u, task["id"], 0)  # back to the QR code
+    assert task["step"] == 0 and alice.view(conn, task)["qr_url"] and task["stage1_at"] is None
+    task = alice.scanned(conn, u, task["id"])
+    assert task["scanned_at"] == first_scan and set(alice.photos(conn, task["id"])) == {1, 2}  # nothing re-uploaded
+    alice.fix_stage(conn, u, task["id"])
+    # the stage-2 photo disappears from the server: «Далее» names it
+    Path(alice.photos(conn, task["id"])[2]["temp_path"]).unlink()
+    with pytest.raises(svc.ServiceError) as e:
+        alice.fix_stage(conn, u, task["id"])
+    assert e.value.code == "photo_missing_2" and "пропало" in e.value.message
+    alice.put_photo(conn, u, task["id"], 2, JPG + b"new", "jpg")  # uploaded again — the way continues
+    task = alice.fix_stage(conn, u, task["id"])
+    assert task["step"] == 3
+    with pytest.raises(svc.ServiceError):
+        alice.goto(conn, u, task["id"], 3)  # only back
+    left = alice.photos(conn, task["id"])
+    alice.abandon(conn, u, task["id"])
+    assert alice.get(conn, task["id"])["status"] == "abandoned" and alice.abandon(conn, u, task["id"])["status"] == "abandoned"
+    assert alice.photos(conn, task["id"]) == {} and not any(Path(p["temp_path"]).exists() for p in left.values())
+    assert alice.my_stats(conn, u["id"], now_local().date())["all"]["completed"] == 0
+
+
+def test_a_photo_lost_before_sending_goes_back_to_the_person(conn, setup):
+    from pathlib import Path
+
+    owner, u = setup
+    products.set_access(conn, owner, u["id"], "alice", True, svc.new_key())
+    qr = alice.create_qr(conn, owner, "local:qr.png", None, svc.new_key())
+    alice.assign(conn, owner, qr["id"], u["id"], True, svc.new_key())
+    task = full_run(conn, u)
+    Path(alice.photos(conn, task["id"])[3]["temp_path"]).unlink()
+    bot = ForumBot()
+    task = run(alice.deliver(conn, bot, task["id"]))
+    assert task["status"] == "in_progress" and task["step"] == 3 and "этапа 3" in task["send_error"] and bot.albums == []

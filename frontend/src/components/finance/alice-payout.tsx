@@ -82,7 +82,7 @@ export function AlicePayout({ onClose }: { onClose: (id?: number) => void }) {
                   <li key={r.qr_id} className="space-y-2 px-5 py-4 md:px-6">
                     <div className="flex items-start justify-between gap-3">
                       <span className="min-w-0">
-                        <span className="block font-semibold">QR {r.number ?? `#${r.qr_id}`}</span>
+                        <span className="block font-semibold">QR {r.number ?? r.qr_id}</span>
                         <span className="block text-xs text-muted-foreground">{r.people.map((p) => p.name).join(", ")}</span>
                       </span>
                       <label className="w-28 shrink-0 space-y-1 text-right">

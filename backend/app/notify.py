@@ -1209,26 +1209,34 @@ class Notifier:
                                        f"\nИзменил: {who(actor)}", user)
 
     async def alice_qr_changed(self, user: dict, on: bool) -> None:
-        await self.send(user["telegram_id"], "🔳 Вам назначен QR-код для «Яндекс Алисы» — можно начинать выполнения."
-                        if on else "🔳 QR-код для «Яндекс Алисы» с вас снят. Новый назначит администратор.")
+        await self.send(user["telegram_id"], "🔳 Вам назначен QR-код для «Алисы» — можно начинать выполнения."
+                        if on else "🔳 QR-код для «Алисы» с вас снят. Новый назначит администратор.")
 
     async def alice_decided(self, task: dict) -> None:
-        """§39: the person learns the moderator's decision; the money comes after Yandex confirms it."""
+        """§21: «Алиса #152 — Принято» — the product, the number and the status, and where to look."""
         from . import alice
 
         user = svc.get_user(self.conn, task["user_id"])
+        where = "\nСтатус — в приложении: «Работа» → «Алиса»."
         if task["status"] == "accepted":
-            text = f"✅ Выполнение {alice.number(task['id'])} принято и ждёт оплаты — оплата после подтверждения Яндекса."
+            text = (f"✅ Ваша {alice.title(task['id'])} — принята, ожидает оплаты. "
+                    "Оплата — после подтверждения Яндекса." + where)
         else:
             reason = f"\nПричина: {escape(task['reject_reason'])}" if task["reject_reason"] else ""
-            text = f"❌ Выполнение {alice.number(task['id'])} отклонено и не оплачивается.{reason}"
-        await self.send(user["telegram_id"], text)
+            text = f"❌ Ваша {alice.title(task['id'])} — отклонена администратором и не оплачивается.{reason}" + where
+        await self.send(user["telegram_id"], text, _open_app())
 
     async def alice_paid(self, batch: dict) -> None:
+        from . import alice
+
         for it in batch["items"]:
             user = svc.get_user(self.conn, it["user_id"])
-            await self.send(user["telegram_id"], f"💰 «Яндекс Алиса»: оплачено выполнений — {it['personal_volume']}.")
-        await self.archive(["выплата", "алиса"], f"💰 Выплата «{escape(batch['title'])}» по «Яндекс Алисе»: "
+            ids = [r[0] for r in self.conn.execute("SELECT id FROM alice_tasks WHERE payout_id = ? AND user_id = ? ORDER BY id",
+                                                   (batch["id"], it["user_id"]))]
+            numbers = ", ".join(alice.number(i) for i in ids[:30]) + ("…" if len(ids) > 30 else "")
+            await self.send(user["telegram_id"], f"💰 «Алиса» — оплачено: {numbers} ({it['personal_volume']} шт.), {it['total']} ₽."
+                                                 "\nСтатус — в приложении: «Работа» → «Алиса».")
+        await self.archive(["выплата", "алиса"], f"💰 Выплата «{escape(batch['title'])}» по «Алисе»: "
                                                  f"{len(batch['items'])} чел., {batch['total']} ₽")
 
     async def group_invited(self, user: dict, kind: str, inv: dict) -> bool:

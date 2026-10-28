@@ -117,7 +117,7 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
     # ТЗ 27.10 §36: an execution whose photos didn't reach the group is sent again (never left as «sent»)
     if notifier.bot is not None and _every(conn, "alice_retry", now, minutes=10):
         for task_id in alice.to_retry(conn):
-            task = await alice.deliver(conn, notifier.bot, task_id)
+            task = await alice.deliver(conn, notifier.bot, task_id, notifier)
             if task and task["status"] == "moderation":
                 ran.append("alice_sent")
     done = goals.check_completions(conn, today, now)

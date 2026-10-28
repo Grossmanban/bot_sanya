@@ -81,6 +81,9 @@ export interface AliceStage {
 /** ТЗ 27.10 §31: one execution; step 0 — the QR on screen, 1..3 — the photo stage, 4 — ready to finish */
 export interface AliceTask {
   id: number;
+  /** ТЗ 28.10 §18, §21: «Алиса #152» and the QR as «QR 5» when it has no own number */
+  title?: string;
+  qr_label?: string;
   number: string;
   status: AliceStatus;
   status_title: string;
@@ -1299,6 +1302,7 @@ export const api = {
   aliceDropPhoto: (id: number, stage: number) =>
     request<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/photo/${stage}`, { method: "DELETE" }),
   aliceNext: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/next`, {}),
+  aliceGoto: (id: number, stage: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/goto/${stage}`, {}),
   aliceFinish: (id: number, key: string) =>
     post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/finish`, { idempotency_key: key }),
   aliceRetry: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/retry`, {}),
@@ -1561,6 +1565,7 @@ export const api = {
     ) => post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/payouts", { ...body, idempotency_key: key }),
     reportCounts: () => request<ReportCounts>("/api/admin/pending"),
     reasons: () => request<{ kinds: ReasonKind[] }>("/api/reasons"),
+    aliceRetry: (id: number, key: string) => post<{ task: AliceTask }>(`/api/admin/alice/${id}/retry`, { idempotency_key: key }),
     globalLink: () => request<{ link: { title: string; url: string; active: boolean } | null }>("/api/admin/global-link"),
     saveGlobalLink: (body: { title: string; url: string; active: boolean }) =>
       request<{ link: { title: string; url: string; active: boolean } }>("/api/admin/global-link", { method: "PUT", body: JSON.stringify(body) }),

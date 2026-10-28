@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { AlertTriangle, Archive, Check, ExternalLink, History, ImageUp, LoaderCircle, Save, UserPlus, X } from "lucide-react";
+import { AlertTriangle, Archive, Check, ExternalLink, History, ImageUp, LoaderCircle, RotateCcw, Save, UserPlus, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,12 +11,13 @@ import { addDays } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile, webApp } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
+import { ReasonChips } from "../reason-chips";
 import { StatusChip } from "../work/work-screen";
 
 type Tab = "queue" | "qr" | "queries" | "stats";
 const field = "h-10 max-w-full min-w-0 rounded-xl border-0 bg-muted px-3 text-sm outline-none focus:ring-2 focus:ring-ring/25";
 const STATUSES: [string, string][] = [
-  ["moderation", "На модерации"], ["accepted", "Принято"], ["rejected", "Отклонено"], ["paid", "Оплачено"],
+  ["moderation", "На модерации"], ["accepted", "Принято, ожидает оплаты"], ["rejected", "Отклонено"], ["paid", "Оплачено"],
   ["send_failed", "Не отправлено"], ["", "Все"],
 ];
 
@@ -103,13 +104,13 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
     <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="font-semibold">{task.number}
+          <p className="font-semibold">{task.title ?? task.number}
             <button className="ml-2 font-normal underline-offset-2 hover:underline" onClick={() => openProfile(task.username, task.telegram_id, task.name)}>
               {task.name}
             </button>
           </p>
           <p className="text-xs text-muted-foreground">
-            {when.slice(8, 10)}.{when.slice(5, 7)} {when.slice(11, 16)} · QR {task.qr_number ?? `#${task.qr_id}`} · запрос «{task.query}»
+            {when.slice(8, 10)}.{when.slice(5, 7)} {when.slice(11, 16)} · {task.qr_label ?? `QR ${task.qr_number ?? task.qr_id}`} · запрос «{task.query}»
           </p>
         </div>
         <StatusChip task={task} />
@@ -131,7 +132,7 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
       {big && <img src={big} alt="Фото крупно" className="w-full rounded-2xl bg-muted object-contain" onClick={() => setBig(null)} />}
       {!!task.duplicates?.length && (
         <p className="flex items-center gap-1.5 text-sm text-wait">
-          <AlertTriangle className="size-4 shrink-0" /> Такое же фото уже было в {task.duplicates.map((d) => `№${String(d).padStart(6, "0")}`).join(", ")}
+          <AlertTriangle className="size-4 shrink-0" /> Такое же фото уже было в {task.duplicates.map((d) => `Алиса #${d}`).join(", ")}
         </p>
       )}
       {task.reject_reason && <p className="text-sm text-cancel">Причина отказа: {task.reject_reason}</p>}
@@ -142,8 +143,15 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
           <ExternalLink className="size-3.5" /> Открыть в группе
         </button>
       )}
+      {task.status === "send_failed" && (
+        <Button variant="secondary" className="press h-10 w-full rounded-xl" disabled={!!busy}
+                onClick={async () => { try { const r = await run("retry", (k) => api.admin.aliceRetry(task.id, k), "Отправка повторена"); if (r) onDone(r.task); } catch { /* */ } }}>
+          <RotateCcw /> Отправить в группу ещё раз{task.send_error ? ` (${task.send_error})` : ""}
+        </Button>
+      )}
       {task.status === "moderation" && (rejecting ? (
         <div className="space-y-2">
+          <ReasonChips kind="alice_reject" value={reason} onPick={setReason} />
           <textarea rows={2} autoFocus value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)}
                     placeholder="Причина (по желанию): например, не видно запроса"
                     className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-ring/25" />
@@ -391,7 +399,7 @@ function Stats() {
           </section>
           <section className="space-y-2 rounded-3xl bg-card p-5 shadow-lift">
             <h3 className="font-semibold">По QR-кодам</h3>
-            {table(data.qrs.map((q) => ({ ...q, key: String(q.qr_id), name: q.number ? `QR ${q.number}` : `QR #${q.qr_id}` })))}
+            {table(data.qrs.map((q) => ({ ...q, key: String(q.qr_id), name: q.number ? `QR ${q.number}` : `QR ${q.qr_id}` })))}
           </section>
           <section className="space-y-2 rounded-3xl bg-card p-5 shadow-lift">
             <h3 className="font-semibold">По дням</h3>
