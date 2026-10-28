@@ -28,9 +28,8 @@ python3 -m venv .venv && .venv/bin/pip install -q -r backend/requirements-dev.tx
 cd backend && ../.venv/bin/pytest -q
 # фронтенд (нужен Node 22):
 cd frontend && npm ci && npm run lint && npm run build
-# если Node нет — собрать образ целиком, это тоже проверяет сборку фронтенда:
-docker build -t bot_sanya_dev .
 ```
+Агент работает под отдельным пользователем без root и без docker — это сделано намеренно, не пытаться это обойти.
 Новая логика — новые тесты в backend/tests (по образцу соседних файлов).
 
 ## Жёсткие запреты
@@ -46,5 +45,5 @@ docker build -t bot_sanya_dev .
 - Рабочая ветка `claude/schedule-bot-miniapp`; `main` держать равной ей.
 - Коммит — после зелёных тестов и сборки, сообщение по-русски, что изменилось для пользователя.
 - Пуш: `git push origin claude/schedule-bot-miniapp && git push origin claude/schedule-bot-miniapp:main`
-- Выкладка на боевой сервер — ТОЛЬКО когда заказчик прямо скажет «выкладывай»:
-  `sudo bash /opt/bot_sanya/deploy/install.sh` (скачивает ветку, пересобирает, .env и база сохраняются).
+- Выкладку на боевой сервер делает сам заказчик под root: `bash /opt/bot_sanya/deploy/install.sh`
+  (скачивает ветку, пересобирает, .env и база сохраняются). Агент только пушит и сообщает, что готово к выкладке.
