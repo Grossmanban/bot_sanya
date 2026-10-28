@@ -163,9 +163,17 @@ export function StatusChip({ task }: { task: AliceTask }) {
  * the code's edges), no rounded corners over the finder squares, sharp pixels; a tap — full screen. */
 function QrView({ url }: { url: string }) {
   const [full, setFull] = useState(false);
+  const [lost, setLost] = useState(false);
+  if (lost) {
+    return (
+      <p className="rounded-2xl bg-cancel-soft p-4 text-sm text-cancel">
+        Картинка QR-кода недоступна. Обратитесь к администратору — он загрузит её заново в «Админ → Алиса → QR-коды».
+      </p>
+    );
+  }
   const img = (big: boolean) => (
     // eslint-disable-next-line @next/next/no-img-element
-    <img src={url} alt="QR-код" draggable={false} style={{ imageRendering: "pixelated" }}
+    <img src={url} alt="QR-код" draggable={false} onError={() => setLost(true)} style={{ imageRendering: "pixelated" }}
          className={cn("block h-auto w-full", big && "max-h-[80dvh] object-contain")} />
   );
   return (

@@ -205,9 +205,12 @@ function Qrs({ people }: { people: { id: number; name: string }[] }) {
           <input ref={file} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void create(f); }} />
         </div>
       </section>
-      <button className="text-sm font-semibold text-primary" onClick={() => setArchived((v) => !v)}>
-        {archived ? "← Действующие" : "Архив QR-кодов"}
-      </button>
+      <div className="flex items-center justify-between px-1">
+        <h3 className="font-semibold">{archived ? "Архив QR-кодов" : "Действующие QR-коды"}</h3>
+        <button className="text-sm font-semibold text-primary" onClick={() => setArchived((v) => !v)}>
+          {archived ? "← Действующие" : "Показать архив →"}
+        </button>
+      </div>
       {!data ? <Skeleton className="h-40 rounded-3xl" /> : data.items.length === 0 ? (
         <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift">QR-кодов нет.</p>
       ) : data.items.map((q) => <QrCard key={q.id} qr={q} people={people} onChanged={setData} />)}
@@ -220,6 +223,7 @@ function QrCard({ qr, people, onChanged }: { qr: AliceQr; people: { id: number; 
   const [adding, setAdding] = useState("");
   const [history, setHistory] = useState<{ at: string; what: string; by: string | null }[] | null>(null);
   const [number, setNumber] = useState(qr.number ?? "");
+  const [lost, setLost] = useState(false);  // the picture file is gone: ask for it again
   const image = useRef<HTMLInputElement>(null);
   const act = async (name: string, fn: (k: string) => Promise<{ items: AliceQr[] }>, ok: string) => {
     try {
@@ -233,8 +237,15 @@ function QrCard({ qr, people, onChanged }: { qr: AliceQr; people: { id: number; 
   return (
     <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift">
       <div className="flex gap-4">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={qr.image_url} alt="QR" className="size-24 shrink-0 rounded-xl bg-white object-contain p-1" />
+        {lost ? (
+          <button className="grid size-24 shrink-0 place-items-center rounded-xl bg-cancel-soft p-2 text-center text-[11px] font-semibold leading-tight text-cancel"
+                  onClick={() => image.current?.click()}>
+            Картинка потерялась — загрузите заново
+          </button>
+        ) : (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={qr.image_url} alt="QR" onError={() => setLost(true)} className="size-24 shrink-0 rounded-xl bg-white object-contain p-1" />
+        )}
         <div className="min-w-0 flex-1 space-y-1.5">
           <div className="flex gap-2">
             <input className={cn(field, "w-full")} aria-label="Номер QR" placeholder="Без номера" value={number}

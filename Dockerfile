@@ -9,7 +9,7 @@ RUN npm run build
 # 2) one Python process: Telegram bot + API + static Mini App
 FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    DB_PATH=/data/bot.db FRONTEND_DIST=/app/frontend/out PORT=8000
+    DB_PATH=/data/bot.db MEDIA_DIR=/data/media FRONTEND_DIST=/app/frontend/out PORT=8000
 WORKDIR /app
 COPY backend/requirements.txt backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt

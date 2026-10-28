@@ -910,13 +910,16 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_alice_qr_create(request: Request, idempotency_key: str, number: str | None = None,
                                     admin: dict = Depends(staff("alice"))):
         data, ext = await read_photo(request, required=True)
-        alice.create_qr(conn, admin, media.save_local(data, ext), number, idempotency_key)
+        # kept in Telegram like every other photo here: survives a rebuild and the loss of the server
+        image = await notifier.store_photo(admin["telegram_id"], data, ext, f"🔳 QR-код «Яндекс Алисы» {number or ''}".strip())
+        alice.create_qr(conn, admin, image, number, idempotency_key)
         return {"items": alice.qr_list(conn)}
 
     @api.put("/admin/alice/qr/{qr_id}/image")
     async def admin_alice_qr_image(qr_id: int, request: Request, idempotency_key: str, admin: dict = Depends(staff("alice"))):
         data, ext = await read_photo(request, required=True)
-        alice.update_qr(conn, admin, qr_id, idempotency_key, image=media.save_local(data, ext))
+        image = await notifier.store_photo(admin["telegram_id"], data, ext, "🔳 Новая картинка QR-кода «Яндекс Алисы»")
+        alice.update_qr(conn, admin, qr_id, idempotency_key, image=image)
         return {"items": alice.qr_list(conn)}
 
     @api.patch("/admin/alice/qr/{qr_id}")
