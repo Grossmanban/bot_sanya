@@ -333,7 +333,9 @@ def attempts(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
 def qr_svg(text: str) -> str:
     import segno
 
-    return segno.make(text, error="m").svg_inline(scale=8, border=2, dark="#111827", light="#ffffff")
+    # viewBox (omitsize) — the picture scales to any width instead of being cut off; the standard 4-module white border
+    svg = segno.make(text, error="m").svg_inline(border=4, omitsize=True, dark="#111827", light="#ffffff")
+    return svg.replace("<svg ", '<svg shape-rendering="crispEdges" ', 1)
 
 
 def ref_view(conn: sqlite3.Connection, user: dict, bot_username: str | None, now: datetime | None = None) -> dict:

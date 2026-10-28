@@ -100,7 +100,8 @@ def test_http_access(conn, make_user):
                                                 "idempotency_key": key()}, headers=owner)
     assert r.status_code == 200 and r.json()["invite"]["url"].startswith("https://t.me/test_bot?start=inv_")
     inv = r.json()["invite"]
-    assert client.get(f"/api/admin/invites/{inv['id']}/qr", headers=owner).json()["svg"].startswith("<svg")
+    svg = client.get(f"/api/admin/invites/{inv['id']}/qr", headers=owner).json()["svg"]
+    assert svg.startswith("<svg") and "viewBox" in svg and "width=" not in svg.split(">")[0]  # scales, never cropped
     assert client.post(f"/api/admin/invites/{inv['id']}/revoke", json={"idempotency_key": key()},
                        headers=owner).json()["items"][0]["state"] == "revoked"
     attempts = client.get("/api/admin/access-attempts", headers=owner).json()["items"]
