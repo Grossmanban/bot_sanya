@@ -238,3 +238,49 @@ def test_not_working_gets_no_goal_announcements(conn, make_user):
     run(Notifier(rec, conn).goal_created(goal))
     chats = {c for c, _ in rec.sent}
     assert on["telegram_id"] in chats and off["telegram_id"] not in chats
+
+
+def test_a_block_takes_the_person_out_of_every_work_group_and_nobody_brings_them_back(conn, make_user):
+    """ТЗ 28.10 §16 (В37): «Предзакреп», the main group and the «Алиса» forum — where Telegram says they are;
+    a failure is reported; after unblocking there's no automatic invitation."""
+    from app import alice, groups
+
+    from .test_groups import MAIN, PRE, FakeBot, connected
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    connected(conn, owner)
+    alice.connect_forum(conn, -1003, "Алиса")
+    u = make_user(first="Блок")
+
+    class Bot(FakeBot):
+        async def get_chat_member(self, chat_id, user_id):
+            if chat_id == -1003:
+                from types import SimpleNamespace
+                return SimpleNamespace(status=self.members.get((chat_id, user_id), "left"))
+            return await super().get_chat_member(chat_id, user_id)
+
+    bot = Bot()
+    bot.members[(MAIN, u["telegram_id"])] = "member"
+    bot.members[(-1003, u["telegram_id"])] = "member"
+    told = []
+
+    class N:
+        async def to_admins(self, text, *a, **k):
+            told.append(text)
+
+    svc.set_account_state(conn, owner, u["id"], "blocked", "нарушение", svc.new_key())
+    out = run(groups.kick_blocked(conn, bot, N(), svc.get_user(conn, u["id"]), owner))
+    assert out == {"pre": "not_member", "main": "removed", "alice": "removed"} and told == []
+    assert bot.members[(MAIN, u["telegram_id"])] == "left" and bot.members[(-1003, u["telegram_id"])] == "left"
+    weak = Bot(rights=False)
+    weak.members[(PRE, u["telegram_id"])] = "member"
+    out = run(groups.kick(conn, weak, N(), svc.get_user(conn, u["id"]), ("pre",), owner, attempts=1))
+    assert out == {"pre": "failed"} and "Не удалось исключить" in told[-1]
+    svc.set_account_state(conn, owner, u["id"], "active", None, svc.new_key())
+    sent = []
+
+    async def notify(user, kind, inv):
+        sent.append(user["id"])
+
+    run(groups.auto_invites(conn, bot, notify))
+    assert u["id"] not in sent

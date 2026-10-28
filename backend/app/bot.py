@@ -813,7 +813,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             return
         await notifier.training_request_decided(req, actor, effect)
         if effect and effect["kind"] == "refuse":
-            await groups.kick(conn, notifier.bot, notifier, svc.get_user(conn, effect["app"]["user_id"]), ("pre",), actor)
+            await groups.kick_blocked(conn, notifier.bot, notifier, svc.get_user(conn, effect["app"]["user_id"]), actor)
         if call:
             await call.answer("Одобрено" if approve else "Отклонено")
         else:

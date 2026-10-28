@@ -1296,6 +1296,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         user, changed = svc.set_account_state(conn, admin, user_id, body.state, body.reason, body.idempotency_key)
         if changed:
             notifier.spawn(notifier.account_state_changed(user, admin, before["account_state"]))
+            if user["account_state"] == "blocked":  # §16: out of the work groups, where Telegram says they are
+                notifier.spawn(groups.kick_blocked(conn, notifier.bot, notifier, user, admin))
         return {"user": public_user(user), "changed": changed}
 
     @api.get("/admin/points")
@@ -2125,7 +2127,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         """§6: the refusal message, then out of «Предзакреп» if Telegram says they're there."""
         await notifier.application_rejected(a)
         user = svc.get_user(conn, a["user_id"])
-        await groups.kick(conn, notifier.bot, notifier, user, ("pre",), actor)
+        await groups.kick_blocked(conn, notifier.bot, notifier, user, actor)
 
     @api.post("/admin/onboarding/{app_id}/reject")
     async def admin_application_reject(app_id: int, body: RejectBody, admin: dict = Depends(staff("registrations"))):
@@ -2196,7 +2198,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             await notifier.training_request_decided(req, admin, effect)
             if effect and effect["kind"] == "refuse":
                 user = svc.get_user(conn, effect["app"]["user_id"])
-                notifier.spawn(groups.kick(conn, notifier.bot, notifier, user, ("pre",), admin))
+                notifier.spawn(groups.kick_blocked(conn, notifier.bot, notifier, user, admin))
         return {"request": req, "requests": training.pending_requests(conn)}
 
     @api.post("/admin/team/{user_id}/training-access")

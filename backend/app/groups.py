@@ -112,6 +112,43 @@ async def invite_person(conn: sqlite3.Connection, bot, notifier, user: dict, kin
     return "sent" if await notifier.group_invite_button(user, kind, inv, text) else "failed"
 
 
+async def kick_blocked(conn: sqlite3.Connection, bot, notifier, user: dict, actor: dict | None) -> dict[str, str]:
+    """ТЗ 28.10 §16 (В37): a block takes the person out of «Предзакреп», the main group and the «Алиса» photo-report
+    group — where Telegram says they are. The archive chat is not touched. Unblocking returns nobody."""
+    from . import alice
+
+    out = await kick(conn, bot, notifier, user, tuple(KINDS), actor)
+    forum = alice.forum(conn)
+    if forum and bot is not None:
+        out["alice"] = await _kick_chat(conn, bot, notifier, user, forum["chat_id"], "фотоотчёты «Алисы»", actor)
+    with transaction(conn):
+        log_event(conn, user_id=user["id"], actor_id=actor["telegram_id"] if actor else 0, event_type="BLOCK_GROUPS",
+                  key=svc.new_key(), new=out)
+    return out
+
+
+async def _kick_chat(conn, bot, notifier, user: dict, chat_id: int, title: str, actor: dict | None, attempts: int = 3) -> str:
+    import asyncio
+
+    if await member_state(bot, chat_id, user["telegram_id"]) == "out":
+        return "not_member"
+    for attempt in range(attempts):
+        try:
+            await bot.ban_chat_member(chat_id, user["telegram_id"])
+            await bot.unban_chat_member(chat_id, user["telegram_id"], only_if_banned=True)
+            return "removed"
+        except TelegramAPIError:
+            if attempt + 1 < attempts:
+                await asyncio.sleep(1 + attempt)
+    await notifier.to_admins(f"⚠️ Не удалось исключить {svc.full_name(user)} из группы «{title}»: у бота нет права банить "
+                             "участников или Telegram не ответил. Исключите вручную.")
+    return "failed"
+
+
+def was_blocked(conn: sqlite3.Connection, user_id: int) -> bool:
+    return conn.execute("SELECT 1 FROM event_logs WHERE user_id = ? AND event_type = 'ACCOUNT_BLOCKED'", (user_id,)).fetchone() is not None
+
+
 async def kick(conn: sqlite3.Connection, bot, notifier, user: dict, kinds: tuple[str, ...], actor: dict | None,
                attempts: int = 3) -> dict[str, str]:
     """ТЗ 28.10 §6, §16: out of the work groups where Telegram says the person is. A network hiccup is retried;
@@ -441,6 +478,8 @@ async def auto_invites(conn: sqlite3.Connection, bot, notify) -> list[tuple[dict
     sent = []
     for u in workers(conn):
         if u["id"] in apps:  # candidates are invited by their own steps: training agreed, «Принять в команду» (§6)
+            continue
+        if was_blocked(conn, u["id"]):  # §16: after an unblock nobody is brought back automatically
             continue
         need = required(conn, u, apps)  # ТЗ 28.10 В11: without a questionnaire — straight to the main group
         if not need:
