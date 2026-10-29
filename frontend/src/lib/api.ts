@@ -255,7 +255,11 @@ export interface Me {
   manuals?: number;
   /** ТЗ 28.10 §10: the button to another bot, when created and active */
   global_link?: { title: string; url: string } | null;
+  /** ТЗ 29.10 §7: the label above the role in the header; null — hidden */
+  header?: string | null;
 }
+
+export type HeaderTitleState = { header: { text: string; visible: boolean; default: boolean }; fallback: string };
 
 export type ApplicationStatus = "new" | "scheduled" | "internship" | "done" | "rejected" | "returned";
 
@@ -700,11 +704,17 @@ export interface ReasonKind {
 export interface ManualSummary { id: number; title: string; read: number; total: number }
 export interface ManualRead {
   id: number; title: string; read: number; total: number;
-  sections: { id: number; title: string; read: boolean; html: string }[];
+  /** ТЗ 29.10 §3: the page's cleaned style sheet and body class — shown in a sandboxed frame */
+  css?: string; body_class?: string;
+  /** heading — the section's HTML carries its own heading (then the app doesn't add the title above it) */
+  sections: { id: number; title: string; read: boolean; html: string; heading?: boolean }[];
 }
 export interface ManualAdmin {
   id: number; title: string; version: number; created_at: string;
-  sections: { id: number; title: string; html: string }[];
+  css?: string; body_class?: string;
+  sections: { id: number; title: string; html: string; heading?: boolean }[];
+  /** the whole manual as one page body — for the visual editor (ТЗ 29.10 §4) */
+  document?: string;
   versions: { version: number; created_at: string; note: string | null }[];
 }
 export interface ManualListItem { id: number; title: string; version: number; sections: number; people: number }
@@ -725,6 +735,20 @@ export interface UnmarkedPerson {
   username: string | null;
   telegram_id: number;
   network: string | null;
+  /** one fine unit in rubles — for the «Оштрафовать» form */
+  unit_rate?: number;
+  /** ТЗ 29.10 §5–6: the «не отмечен день» violation already on record for this day (the 22:00 check or a manager) */
+  violation?: { id: number; status: "pending" | "penalized" | "waived"; state: string;
+    fine: { status: string; units: number | null; amount: number } | null } | null;
+}
+
+export interface AdminDay {
+  date: string; items: AdminShift[]; total_count: number; total_volume: number; unmarked: UnmarkedPerson[];
+  can_mark: boolean;
+  /** ТЗ 29.10 §5.3: the project's today / tomorrow (its time zone) */
+  today?: string; tomorrow?: string;
+  /** ТЗ 29.10 §6: «Оштрафовать» allowed for this day (today — at once, tomorrow — after the deadline) */
+  can_fine?: boolean; fine_note?: string | null; suggested_units?: number; default_comment?: string;
 }
 
 /** ТЗ 12.4: a week below the norm of work days, waiting for «штраф» or «оправдание». */
@@ -1593,6 +1617,9 @@ export const api = {
     globalLink: () => request<{ link: { title: string; url: string; active: boolean } | null }>("/api/admin/global-link"),
     saveGlobalLink: (body: { title: string; url: string; active: boolean }) =>
       request<{ link: { title: string; url: string; active: boolean } }>("/api/admin/global-link", { method: "PUT", body: JSON.stringify(body) }),
+    headerTitle: () => request<HeaderTitleState>("/api/admin/header-title"),
+    saveHeaderTitle: (body: { text: string; visible: boolean }) => put<HeaderTitleState>("/api/admin/header-title", body),
+    resetHeaderTitle: () => request<HeaderTitleState>("/api/admin/header-title", { method: "DELETE" }),
     deleteGlobalLink: () => request<{ link: null }>("/api/admin/global-link", { method: "DELETE" }),
     manuals: () => request<{ items: ManualListItem[] }>("/api/admin/manuals"),
     createManual: (title: string, key: string) =>
@@ -1602,9 +1629,12 @@ export const api = {
     deleteManual: (id: number, key: string) => post<{ items: ManualListItem[] }>(`/api/admin/manuals/${id}/delete`, { idempotency_key: key }),
     saveManual: (id: number, sections: { id?: number; title: string; html: string }[], key: string) =>
       request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}/sections`, { method: "PUT", body: JSON.stringify({ sections, idempotency_key: key }) }),
-    uploadManual: (id: number, html: string, key: string) =>
-      request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}/upload?idempotency_key=${key}`, { method: "POST", body: html,
-        headers: { "Content-Type": "text/html" } }),
+    // the file itself, as bytes: the server finds its encoding (ТЗ 29.10 §3)
+    uploadManual: (id: number, file: Blob, key: string) =>
+      request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}/upload?idempotency_key=${key}`, { method: "POST", body: file,
+        headers: { "Content-Type": "application/octet-stream" } }),
+    saveManualDocument: (id: number, html: string, key: string) =>
+      request<{ manual: ManualAdmin }>(`/api/admin/manuals/${id}/document`, { method: "PUT", body: JSON.stringify({ html, idempotency_key: key }) }),
     userManuals: (userId: number) => request<{ items: { id: number; title: string; assigned: boolean }[] }>(`/api/admin/users/${userId}/manuals`),
     setUserManual: (userId: number, manualId: number | null, allow: boolean, key: string) =>
       post<{ items: { id: number; title: string; assigned: boolean }[] }>(`/api/admin/users/${userId}/manuals`, { manual_id: manualId, allow, idempotency_key: key }),
@@ -1621,6 +1651,8 @@ export const api = {
     violations: (status: "pending" | "resolved") =>
       request<{ items: Violation[]; pending: number; quota: number; personal: boolean }>(`/api/admin/violations?status=${status}`),
     scanViolations: () => post<{ created: number }>("/api/admin/violations/scan", {}),
+    fineUnmarked: (day: string, body: { user_id: number; units: number; comment: string; media_files: string[] }, key: string) =>
+      post<{ violation: Violation; changed: boolean }>(`/api/admin/day/${day}/fine`, { ...body, idempotency_key: key }),
     fineViolation: (id: number, body: { units: number; comment: string; media_files: string[] }, key: string) =>
       post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/fine`, { ...body, idempotency_key: key }),
     waiveViolation: (id: number, body: { comment: string; media_files: string[] }, key: string) =>
@@ -1646,8 +1678,7 @@ export const api = {
     setNorm: (userId: number, norm: number | null, key: string) =>
       post<{ user: User }>(`/api/admin/team/${userId}/norm`, { norm, idempotency_key: key }),
     day: (day: string) =>
-      request<{ date: string; items: AdminShift[]; total_count: number; total_volume: number; unmarked: UnmarkedPerson[];
-        can_mark: boolean }>(`/api/admin/day?day=${day}`),
+      request<AdminDay>(`/api/admin/day?day=${day}`),
     stats: (userId: number, from: string, to: string) =>
       request<Stats>(`/api/admin/stats?user_id=${userId}&from=${from}&to=${to}`),
     penalties: (params: { userId?: number; from?: string; to?: string }) => {

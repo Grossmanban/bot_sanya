@@ -198,3 +198,37 @@ def set_global_link(conn: sqlite3.Connection, title: str | None, url: str | None
 
 def delete_global_link(conn: sqlite3.Connection) -> None:
     set_raw(conn, "global_link", None)
+
+
+# ---------------------------------------------------------------- ТЗ 29.10 §7: the label above the role in the app header
+
+HEADER_DEFAULT = "выход"  # the design's wordmark — what the header always showed
+HEADER_MAX = 32
+
+
+def header_title(conn: sqlite3.Connection) -> dict:
+    """{"text", "visible", "default"}: the wordmark above the role; nothing stored — the original «выход», shown."""
+    import json
+
+    raw = get_raw(conn, "header_title")
+    value = json.loads(raw) if raw else {}
+    text = value.get("text") or HEADER_DEFAULT
+    return {"text": text, "visible": bool(value.get("visible", True)), "default": text == HEADER_DEFAULT}
+
+
+def set_header_title(conn: sqlite3.Connection, text: str | None, visible: bool) -> dict:
+    """Owners and admins (settings): any short text — a job, an organisation, a project — or hidden altogether."""
+    import json
+
+    text = " ".join((text or "").split())
+    if visible and not text:
+        raise ServiceError("Напишите надпись или скройте её", 422, "title_required")
+    if len(text) > HEADER_MAX:
+        raise ServiceError(f"Надпись — не длиннее {HEADER_MAX} символов", 422, "too_long")
+    set_raw(conn, "header_title", json.dumps({"text": text or HEADER_DEFAULT, "visible": bool(visible)}, ensure_ascii=False))
+    return header_title(conn)
+
+
+def reset_header_title(conn: sqlite3.Connection) -> dict:
+    set_raw(conn, "header_title", None)
+    return header_title(conn)

@@ -311,18 +311,108 @@ def fine(conn: sqlite3.Connection, actor: dict, violation_id: int, units: int, c
             v = get(conn, violation_id)
             return Resolution(v, False, finance.get(conn, v["linked_fine_transaction_id"]) if v else None)
         v, actor, target = _open(conn, actor, violation_id)
-        status = finance.fine_status(actor, target)
-        tx = finance.record_fine(conn, user_id=v["user_id"], units=units, reason=comment,
-                                 actor_tg=actor["telegram_id"], status=status, source="attendance",
-                                 event_date=v["week_end_date"], media=files[0] if files else None)
-        conn.execute(
-            """UPDATE attendance_violations SET status = 'penalized', resolution_admin_id = ?, resolution_comment = ?,
-                   resolution_media_ids = ?, linked_fine_transaction_id = ?, resolved_at = ? WHERE id = ?""",
-            (actor["id"], comment, json.dumps(files), tx["id"], now_iso(), violation_id))
-        log_event(conn, user_id=v["user_id"], actor_id=actor["telegram_id"], event_type="VIOLATION_PENALIZED", key=key,
-                  new={"violation": violation_id, "tx": tx["id"], "units": units, "amount": tx["amount"], "status": status},
-                  description=comment)
+        tx = _penalize(conn, v, actor, target, units, comment, files, key)
     return Resolution(get(conn, violation_id), True, tx)
+
+
+def _penalize(conn, v: dict, actor: dict, target: dict, units: int, comment: str, files: list[str], key: str) -> dict:
+    """Inside the caller's transaction, for a pending violation: the one way a violation becomes a fine — from
+    «Дисциплина» and from «День» alike (ТЗ 29.10 §6.2: one mechanism for automatic and manual violations).
+    A trainer's fine waits for an owner (pending_admin_approval); nothing is ever written off past that step."""
+    status = finance.fine_status(actor, target)
+    tx = finance.record_fine(conn, user_id=v["user_id"], units=units, reason=comment,
+                             actor_tg=actor["telegram_id"], status=status, source="attendance",
+                             event_date=v["week_end_date"], media=files[0] if files else None)
+    cur = conn.execute(
+        """UPDATE attendance_violations SET status = 'penalized', resolution_admin_id = ?, resolution_comment = ?,
+               resolution_media_ids = ?, linked_fine_transaction_id = ?, resolved_at = ? WHERE id = ? AND status = 'pending'""",
+        (actor["id"], comment, json.dumps(files), tx["id"], now_iso(), v["id"]))
+    if cur.rowcount != 1:  # can't happen inside BEGIN IMMEDIATE — but never leave a fine without its violation
+        raise ServiceError("Нарушение уже обработано — обновите список", 409, "already_resolved")
+    log_event(conn, user_id=v["user_id"], actor_id=actor["telegram_id"], event_type="VIOLATION_PENALIZED", key=key,
+              new={"violation": v["id"], "tx": tx["id"], "units": units, "amount": tx["amount"], "status": status},
+              description=comment)
+    return tx
+
+
+# ---------------------------------------------------------------- ТЗ 29.10 §5–6: «День» — today and tomorrow
+
+FINE_STATE = {"pending_admin_approval": "штраф на согласовании", "active": "штраф назначен", "draft": "штраф без суммы",
+              "paid": "штраф удержан", "offset": "штраф удержан", "cancelled": "штраф аннулирован",
+              "rejected": "штраф отклонён"}
+
+
+def state_text(conn: sqlite3.Connection, v: dict) -> str:
+    """What already happened to the violation, in words for the admin («уже оштрафован…»)."""
+    if v["status"] == "waived":
+        return "нарушение прощено"
+    if v["status"] == "pending":
+        return "нарушение ждёт решения"
+    tx = finance.get(conn, v["linked_fine_transaction_id"]) if v["linked_fine_transaction_id"] else None
+    return FINE_STATE.get(tx["status"], "штраф назначен") if tx else "штраф назначен"
+
+
+def unmarked_violation(conn: sqlite3.Connection, user_id: int, day: date) -> dict | None:
+    row = conn.execute("SELECT * FROM attendance_violations WHERE user_id = ? AND kind = 'unmarked' AND week_start_date = ?",
+                       (user_id, day.isoformat())).fetchone()
+    return dict(row) if row else None
+
+
+def fine_window(day: date, today: date | None = None, now=None) -> tuple[bool, str | None]:
+    """When «Оштрафовать» is allowed for an unmarked day: today — at once; tomorrow — once the deadline to mark it has
+    passed (22:00 by default; before that the person may still mark it). Other days — through «Дисциплина»."""
+    today = today or today_local()
+    if day == today:
+        return True, None
+    if day == today + timedelta(days=1):
+        deadline = svc.mark_deadline(day)
+        if svc.clock(today, now) >= deadline:
+            return True, None
+        return False, f"Штраф за завтра — после {deadline.strftime('%H:%M')}: до этого времени можно отметиться"
+    return False, "Здесь — только сегодня и завтра; остальные нарушения — в «Дисциплине»"
+
+
+def fine_unmarked(conn: sqlite3.Connection, actor: dict, user_id: int, day: date, units: int, comment: str,
+                  files: list[str] | None, key: str, today: date | None = None, now=None) -> Resolution:
+    """«Оштрафовать» from «День» (ТЗ 29.10 §6): the violation «не отмечен день» of this person for this day — the very
+    row the 22:00 check creates (UNIQUE user + kind + day), created here if the check hasn't run yet — then the same
+    fine as in «Дисциплина». One transaction (BEGIN IMMEDIATE), so the automatic check and a second tap or request
+    can never make a second violation or a second fine; a decided violation is a 409 with what happened to it."""
+    units, comment, files = finance.units_of(units), _comment(comment), _media(files)
+    _check_key(key)
+    today = today or today_local()
+    allowed, why = fine_window(day, today, now)
+    if not allowed:
+        raise ServiceError(why, 409, "fine_not_yet")
+    with transaction(conn):
+        if _seen(conn, key):
+            v = unmarked_violation(conn, user_id, day)
+            return Resolution(v, False, finance.get(conn, v["linked_fine_transaction_id"]) if v and v["linked_fine_transaction_id"] else None)
+        actor = _fresh_actor(conn, actor)
+        target = svc.get_user(conn, user_id)
+        if target is None:
+            raise ServiceError("Сотрудник не найден", 404, "not_found")
+        if not perms.can(actor, "review", target):
+            raise ServiceError("Недостаточно прав", 403, "forbidden")
+        v = unmarked_violation(conn, user_id, day)
+        if v is None:
+            # the same rule as the 22:00 check: only those who must mark the day and haven't
+            if user_id not in {u["id"] for u in unmarked(conn, day)}:
+                raise ServiceError("Сотрудник уже отметил этот день или не обязан его отмечать — обновите список",
+                                   409, "not_unmarked")
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO attendance_violations (user_id, kind, week_start_date, week_end_date, required_days,
+                       actual_days, absent_dates, status, created_at) VALUES (?, 'unmarked', ?, ?, 1, 0, ?, 'pending', ?)""",
+                (user_id, day.isoformat(), day.isoformat(), json.dumps([day.isoformat()]), now_iso()))
+            v = unmarked_violation(conn, user_id, day)
+            if cur.rowcount:
+                log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="UNMARKED_DAY_VIOLATION",
+                          key=svc.new_key(), new={"violation": v["id"], "day": day.isoformat(), "manual": True})
+        if v["status"] != "pending":
+            raise ServiceError(f"За {ddmm(day)} уже есть решение: {state_text(conn, v)}. Второй штраф не создаётся.",
+                               409, "already_resolved")
+        tx = _penalize(conn, v, actor, target, units, comment, files, key)
+    return Resolution(get(conn, v["id"]), True, tx)
 
 
 def waive(conn: sqlite3.Connection, actor: dict, violation_id: int, comment: str, files: list[str] | None,

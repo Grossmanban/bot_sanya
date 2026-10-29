@@ -228,7 +228,43 @@ function DecisionDrawer({ open, onClose, onDone }: {
   );
 }
 
-function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive"; onDone: () => void }) {
+/** What the fine form needs: a violation from «Дисциплина», or a person without a mark in «День» (ТЗ 29.10 §6). */
+type FineTarget = Pick<Violation, "suggested_units" | "default_comment" | "unit_rate"> & { id?: number };
+type FineCall = (body: { units: number; comment: string; media_files: string[] }, key: string) => Promise<unknown>;
+
+/** ТЗ 29.10 §6: «Оштрафовать» from «День» — the same form and the same fine as «Дисциплина» (the server finds or
+ * creates that day's violation and never makes a second fine). */
+export function UnmarkedFineDrawer({ open, onClose, onDone }: {
+  open: { day: string; userId: number; name: string; suggestedUnits: number; defaultComment: string; unitRate: number } | null;
+  onClose: () => void; onDone: () => void;
+}) {
+  const wide = useWide();
+  return (
+    <Drawer open={!!open} onOpenChange={(o) => !o && onClose()} direction={wide ? "right" : "bottom"} repositionInputs={false}>
+      <DrawerContent className={cn("border-0 bg-card",
+        wide ? "w-[28rem] max-w-[28rem] sm:max-w-[28rem]" : "mx-auto max-h-[92dvh] max-w-2xl rounded-t-[1.75rem]")}>
+        {open && (
+          <div className={cn("overflow-y-auto px-5", wide ? "h-full py-8" : "pb-safe pt-2")}>
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <DrawerTitle className="font-display text-xl font-semibold">Штраф: не отмечен день</DrawerTitle>
+                <DrawerDescription>{open.name} · {dayChip(open.day)} — ни смены, ни выходного</DrawerDescription>
+              </div>
+              {wide && (
+                <DrawerClose className="grid size-9 place-items-center rounded-full bg-muted" aria-label="Закрыть"><X className="size-4" /></DrawerClose>
+              )}
+            </div>
+            <DecisionForm key={`${open.userId}-${open.day}`} mode="fine" onDone={onDone}
+                          v={{ suggested_units: open.suggestedUnits, default_comment: open.defaultComment, unit_rate: open.unitRate }}
+                          fineCall={(body, k) => api.admin.fineUnmarked(open.day, { user_id: open.userId, ...body }, k)} />
+          </div>
+        )}
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+function DecisionForm({ v, mode, onDone, fineCall }: { v: FineTarget; mode: "fine" | "waive"; onDone: () => void; fineCall?: FineCall }) {
   const fine = mode === "fine";
   const direct = useCan("fine_direct");
   const excuses = useReasons("excuse", EXCUSES);  // the editable templates (ТЗ 28.10 §2)
@@ -244,8 +280,8 @@ function DecisionForm({ v, mode, onDone }: { v: Violation; mode: "fine" | "waive
   async function submit() {
     try {
       await run(mode, (k) => fine
-        ? api.admin.fineViolation(v.id, { units: sum, comment: comment.trim(), media_files: files }, k)
-        : api.admin.waiveViolation(v.id, { comment: comment.trim(), media_files: files }, k),
+        ? (fineCall ?? ((body, key) => api.admin.fineViolation(v.id!, body, key)))({ units: sum, comment: comment.trim(), media_files: files }, k)
+        : api.admin.waiveViolation(v.id!, { comment: comment.trim(), media_files: files }, k),
       fine ? (direct ? "Штраф назначен, сотрудник получил уведомление" : "Штраф отправлен на согласование администраторам")
         : "Нарушение снято, сотрудник получил уведомление");
       setSent(true);  // the buttons stay disabled: one violation, one decision

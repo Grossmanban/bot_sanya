@@ -3,6 +3,7 @@
 import { Ban, Clock3, LoaderCircle, Lock, Send, TriangleAlert, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { webApp } from "@/lib/telegram";
+import { Wordmark } from "./wordmark";
 
 type Kind = "outside" | "unregistered" | "invited" | "stale" | "pending" | "rejected" | "blocked" | "error";
 
@@ -10,7 +11,7 @@ const COPY: Record<Kind, { icon: typeof Clock3; title: string; text: string }> =
   outside: {
     icon: Send,
     title: "Откройте из Telegram",
-    text: "Приложение работает внутри Telegram. Откройте бота и нажмите кнопку «График».",
+    text: "Приложение работает внутри Telegram. Откройте чат с ботом и нажмите кнопку «Приложение» слева от поля ввода.",
   },
   // ТЗ 27.10 §5: a stranger without an invitation — nothing to do here, no instructions
   unregistered: { icon: Lock, title: "Нет доступа", text: "" },
@@ -52,7 +53,7 @@ export function AccessScreen({
   const { icon: Icon, title, text } = COPY[kind];
   return (
     <div className="pt-safe flex min-h-dvh flex-col items-center justify-center px-8 pb-12 text-center">
-      <span className="font-display text-lg font-semibold lowercase">выход</span>
+      <Wordmark className="text-lg" />
       <div className="mt-10 grid size-16 place-items-center rounded-3xl bg-card shadow-lift">
         <Icon className="size-7" strokeWidth={1.8} />
       </div>
@@ -78,7 +79,7 @@ export function AccessScreen({
 export function LoadingScreen() {
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center gap-4">
-      <span className="font-display text-2xl font-semibold lowercase">выход</span>
+      <Wordmark className="text-2xl" />
       <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
     </div>
   );

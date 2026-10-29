@@ -29,12 +29,13 @@ def scope(conn: sqlite3.Connection, viewer: dict) -> set[int] | None:
     return {u["id"] for u in svc.list_users(conn) if u["id"] == viewer["id"] or perms.manages(viewer, u)}
 
 
-def unmarked(conn: sqlite3.Connection, viewer: dict, day: date) -> list[dict]:
+def unmarked(conn: sqlite3.Connection, viewer: dict, day: date, with_violations: bool = False) -> list[dict]:
     """«День»: people with «Работаю» who have neither a shift nor a day off on `day`, in the viewer's scope.
-    Those who already got an «unmarked» violation for that day are left to «Дисциплина»."""
+    The count leaves those who already got an «unmarked» violation for that day to «Дисциплина» (one request — one
+    key); the «День» list (with_violations) keeps them, so nobody gets lost there (ТЗ 29.10 §5.1)."""
     if not perms.can(viewer, "schedule"):
         return []
-    taken = {r[0] for r in conn.execute(
+    taken = set() if with_violations else {r[0] for r in conn.execute(
         """SELECT user_id FROM attendance_violations WHERE kind = 'unmarked' AND week_start_date = ?""",
         (day.isoformat(),))}
     return [u for u in violations.unmarked(conn, day)
@@ -91,7 +92,8 @@ def counts(conn: sqlite3.Connection, viewer: dict, today: date | None = None) ->
         out["urgent"] = sum(1 for r in conn.execute(
             "SELECT user_id FROM shifts WHERE status = 'awaiting_approval' AND shift_date = ?", (today.isoformat(),))
             if mine(r["user_id"]) and r["user_id"] != viewer["id"])
-        out["unmarked"] = len(unmarked(conn, viewer, today + timedelta(days=1)))
+        # ТЗ 29.10 §5: today and tomorrow (each person-day once; with a violation it is «Дисциплина»'s)
+        out["unmarked"] = len(unmarked(conn, viewer, today)) + len(unmarked(conn, viewer, today + timedelta(days=1)))
     if perms.can(viewer, "alice"):
         out["alice_moderation"] = conn.execute("SELECT COUNT(*) FROM alice_tasks WHERE status = 'moderation'").fetchone()[0]
         out["alice_failed"] = conn.execute(
@@ -120,7 +122,7 @@ def _actual_start(conn: sqlite3.Connection) -> str:
 
 LABELS = {
     "review": "📝 Отчёты на проверке", "no_show": "🚫 Неявки без решения", "violations": "⚖️ Дисциплина",
-    "urgent": "⚡ Срочные заявки на сегодня", "unmarked": "🗓 Не отметили завтрашний день",
+    "urgent": "⚡ Срочные заявки на сегодня", "unmarked": "🗓 Не отметили день (сегодня, завтра)",
     "events_pending": "🏁 Заявки в событиях", "fines_pending": "🧾 Штрафы тренеров на согласовании",
     "fines_draft": "💸 Штрафы без суммы", "registrations": "👤 Заявки на доступ", "onboarding_new": "🧑‍🎓 Новые анкеты",
     "internship_review": "🎯 Стажировки на проверку", "training_requests": "⏳ Обучение: ожидает согласования",

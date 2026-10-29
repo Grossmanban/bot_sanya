@@ -7,6 +7,8 @@ import { api, isStaff, ROLE_TITLES, type Me, type User } from "@/lib/api";
 import { getThemePref, initData, openTelegramLinkSafe, setBotUsername, setThemePref, setupWebApp, tapHaptic, type ThemePref } from "@/lib/telegram";
 import { ThemeContext } from "@/lib/theme";
 import { usePending } from "@/lib/pending";
+import { rememberHeader } from "@/lib/header";
+import { Wordmark } from "./wordmark";
 import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
 import { ApplicationStatus, Registration } from "./register/register";
@@ -51,10 +53,6 @@ function GlobalLink({ link, className }: { link: { title: string; url: string };
   );
 }
 
-export function Wordmark({ className }: { className?: string }) {
-  return <span className={cn("font-display font-semibold tracking-tight lowercase", className)}>выход</span>;
-}
-
 export function MiniApp() {
   const [scheme, setScheme] = useState<"light" | "dark">("light");
   const [pref, setPrefState] = useState<ThemePref>("auto");
@@ -76,6 +74,7 @@ export function MiniApp() {
     try {
       const loaded = await api.me();
       setBotUsername(loaded.bot_username);
+      rememberHeader(loaded.header);
       setMe(loaded);
       setFatal(null);
     } catch (e) {
@@ -152,7 +151,7 @@ export function MiniApp() {
       <div className="lg:grid lg:min-h-dvh lg:grid-cols-[15.5rem_minmax(0,1fr)]">
         {/* iPad landscape / desktop: side rail */}
         <aside className="sticky top-0 hidden h-dvh flex-col border-r bg-card/50 px-5 pt-8 pb-6 lg:flex">
-          <Wordmark className="px-3 text-2xl" />
+          <Wordmark className="block px-3 text-2xl" text={me.header} />
           {me.global_link && <GlobalLink link={me.global_link} className="mx-3 mt-3 max-w-full self-start py-1 text-xs" />}
           <nav className="mt-10 space-y-1">
             {tabs.map(({ id, label, icon: Icon }) => (
@@ -197,7 +196,7 @@ export function MiniApp() {
           {/* phone / iPad portrait: compact top bar under Telegram's controls */}
           <header className="pt-safe flex items-center justify-between gap-3 px-5 pb-3 lg:hidden">
             <div className="min-w-0">
-              <Wordmark className="block text-xl leading-tight" />
+              <Wordmark className="block text-xl leading-tight" text={me.header} />
               <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
                 <span className={cn("size-1.5 shrink-0 rounded-full", ROLE_DOT[user.role])} />
                 <span className="truncate">{ROLE_TITLES[user.role]}{me.network ? ` · ${me.network}` : ""}</span>

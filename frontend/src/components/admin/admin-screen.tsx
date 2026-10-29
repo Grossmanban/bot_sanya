@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Check, ChevronRight, Copy, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type AdminShift, type Capability, type ReportCounts, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
+import { api, type AdminDay, type AdminShift, type Capability, type ReportCounts, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
+import { TONE_CHIP } from "@/lib/tone";
 import {
   STATUS_META,
   WEEKDAYS_SHORT,
@@ -36,7 +37,7 @@ import { GoalsSection } from "../goals/goals";
 import { EventsAdmin } from "../events/events-admin";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
 import { BroadcastSection } from "./broadcast-section";
-import { ViolationsSection } from "./violations-section";
+import { UnmarkedFineDrawer, ViolationsSection } from "./violations-section";
 import { OnboardingSection } from "./onboarding-section";
 import { AccessSection } from "./access-section";
 import { GroupsSection } from "./groups-section";
@@ -114,12 +115,20 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
   useEffect(() => {
     void refreshPending();
   }, [version, section]);
+  // ТЗ 29.10 §2: the active group / section pill is brought into view only when the section changes, and only by
+  // scrolling its own horizontal strip. (A scrollIntoView in a ref ran on every re-render — the 30-second counts, any
+  // action — and scrolled the whole page back up to this menu.)
+  const groupStrip = useRef<HTMLDivElement>(null);
+  const sectionStrip = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    for (const strip of [groupStrip.current, sectionStrip.current]) revealInStrip(strip);
+  }, [section]);
 
   return (
     <CapsContext.Provider value={caps}>
     <div className="mx-auto max-w-3xl space-y-5">
       <nav className="space-y-2">
-        <div className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+        <div ref={groupStrip} className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
           <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift lg:w-full lg:flex-wrap">
             {groups.map((g) => {
               const active = group?.id === g.id;
@@ -128,9 +137,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
               return (
                 <button
                   key={g.id}
-                  ref={(el) => {
-                    if (el && active) el.scrollIntoView({ block: "nearest", inline: "nearest" });
-                  }}
+                  data-active={active || undefined}
                   onClick={() => {
                     tapHaptic();
                     openGroup(g);
@@ -148,14 +155,12 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
           </div>
         </div>
         {group && group.sections.length > 1 && (
-          <div className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+          <div ref={sectionStrip} className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
             <div className="flex w-max gap-1.5">
               {group.sections.map((id) => (
                 <button
                   key={id}
-                  ref={(el) => {
-                    if (el && section === id) el.scrollIntoView({ block: "nearest", inline: "nearest" });
-                  }}
+                  data-active={section === id || undefined}
                   onClick={() => {
                     tapHaptic();
                     setSection(id);
@@ -211,6 +216,17 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
     </div>
     </CapsContext.Provider>
   );
+}
+
+/** Scrolls a horizontal strip so its active pill is visible — the page itself never moves. */
+function revealInStrip(strip: HTMLElement | null) {
+  const el = strip?.querySelector<HTMLElement>("[data-active]");
+  if (!strip || !el) return;
+  const pad = 16;
+  const left = el.offsetLeft - strip.offsetLeft;
+  if (left - pad < strip.scrollLeft) strip.scrollTo({ left: Math.max(0, left - pad) });
+  else if (left + el.offsetWidth + pad > strip.scrollLeft + strip.clientWidth)
+    strip.scrollTo({ left: left + el.offsetWidth + pad - strip.clientWidth });
 }
 
 function Count({ n, active, red }: { n: number; active: boolean; red: boolean }) {
@@ -402,81 +418,136 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
   const today = moscowToday();
   const [day, setDay] = useState(() => addDays(today, 1));
   const { data, loading, reload } = useLoad(() => api.admin.day(day), [day, version]);
+  // ТЗ 29.10 §5: today and tomorrow — the project's own dates from the server — each with its own list of the unmarked
+  const [tick, setTick] = useState(0);
+  const near = useLoad(async () => {
+    const first = await api.admin.day(today);
+    const t = first.today && first.today !== first.date ? await api.admin.day(first.today) : first;
+    return [t, await api.admin.day(t.tomorrow ?? addDays(t.date, 1))] as const;
+  }, [version, tick]);
+  const refresh = () => {
+    setTick((n) => n + 1);
+    void reload();
+  };
+  const serverToday = near.data?.[0].date ?? today;
   const chips = [
-    { label: "Сегодня", value: today },
-    { label: "Завтра", value: addDays(today, 1) },
-    { label: "Послезавтра", value: addDays(today, 2) },
+    { label: "Сегодня", value: serverToday },
+    { label: "Завтра", value: addDays(serverToday, 1) },
+    { label: "Послезавтра", value: addDays(serverToday, 2) },
   ];
   const { weekday } = parseDay(day);
   const going = data?.items.filter((s) => s.status === "active" || s.status === "restored") ?? [];
+  const isNear = day === serverToday || day === addDays(serverToday, 1);
 
   return (
-    <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
-      <div className="flex flex-wrap gap-2">
-        {chips.map((c) => (
-          <button key={c.label} onClick={() => setDay(c.value)}
-                  className={cn("press rounded-full px-4 py-2 text-sm font-semibold", day === c.value ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
-            {c.label}
+    <div className="space-y-4">
+      <UnmarkedPanel days={near.data ?? null} onDone={refresh} />
+      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <div className="flex flex-wrap gap-2">
+          {chips.map((c) => (
+            <button key={c.label} onClick={() => setDay(c.value)}
+                    className={cn("press rounded-full px-4 py-2 text-sm font-semibold", day === c.value ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+              {c.label}
+            </button>
+          ))}
+          <input type="date" aria-label="Другая дата" className="h-9 rounded-full border-0 bg-muted px-4 text-sm outline-none"
+                 value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
+        </div>
+        <h2 className="mt-5 font-display text-2xl font-semibold">{WEEKDAYS[weekday]}, {dayMonth(day)}</h2>
+        <p className="mt-1 text-[15px] text-muted-foreground">
+          {data ? `Выходят ${data.total_count} ${plural(data.total_count, "человек", "человека", "человек")}, ${data.total_volume} шт.` : " "}
+        </p>
+        {/* today and tomorrow are in the panel above; any other day — its own list here */}
+        {data && data.date === day && !isNear && data.unmarked.length > 0 && (
+          <div className="mt-5"><UnmarkedList data={data} onDone={refresh} /></div>
+        )}
+
+        {loading && !data ? (
+          <Skeleton className="mt-5 h-32 rounded-2xl" />
+        ) : data && data.items.length === 0 ? (
+          <p className="mt-5 rounded-2xl bg-muted p-4 text-sm text-muted-foreground">На эту дату записей нет.</p>
+        ) : (
+          <>
+            {going.length > 0 && (
+              <div className="mt-5">
+                <DayLanes lanes={lanesFrom(going)} />
+              </div>
+            )}
+            <ul className="mt-5 divide-y border-t">
+              {data?.items.map((s) => {
+                const meta = STATUS_META[s.status];
+                return (
+                  <li key={s.id}>
+                    <button onClick={() => onEdit({ ...s })} className="press flex w-full items-center justify-between gap-3 py-3 text-left">
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{s.name}</span>
+                        <span className={cn("flex items-center gap-1.5 text-sm", meta.text)}>
+                          <span className={cn("size-1.5 rounded-full", meta.dot)} />
+                          {meta.label}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-right text-sm">
+                        <span className="block font-semibold tabular">{s.start_time ? timeRange(s) : ""}</span>
+                        <span className="text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
+                        {s.fact_volume != null && (
+                          <span className={cn("block text-xs font-semibold", s.shortfall ? "text-cancel" : "text-go")}>
+                            факт {s.fact_volume}{s.shortfall ? ` (−${s.shortfall})` : ""}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/** ТЗ 29.10 §5: «Не отметили» for today and for tomorrow, side by side as two tabs — nobody gets lost because they
+ * have no shift and no day-off record. */
+function UnmarkedPanel({ days, onDone }: { days: readonly [AdminDay, AdminDay] | null; onDone: () => void }) {
+  const [which, setWhich] = useState<0 | 1>(0);
+  if (!days) return <Skeleton className="h-24 rounded-3xl" />;
+  const [t, m] = days;
+  if (t.unmarked.length === 0 && m.unmarked.length === 0) {
+    return (
+      <p className="rounded-3xl bg-card px-5 py-4 text-sm text-muted-foreground shadow-lift">
+        ✅ Сегодня и завтра все, кто работает, отметили день — смену или выходной.
+      </p>
+    );
+  }
+  const d = days[which];
+  return (
+    <section className="space-y-3 rounded-3xl bg-wait-soft p-4 md:p-5">
+      <div className="flex gap-1 rounded-2xl bg-card p-1">
+        {([0, 1] as const).map((i) => (
+          <button key={i} onClick={() => { tapHaptic(); setWhich(i); }}
+                  className={cn("press inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl text-sm font-semibold",
+                    which === i ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>
+            {i === 0 ? "Сегодня" : "Завтра"} · {dayMonth(days[i].date)}
+            {days[i].unmarked.length > 0 && (
+              <span className={cn("rounded-full px-1.5 text-xs tabular", which === i ? "bg-white/20" : "bg-wait text-white")}>{days[i].unmarked.length}</span>
+            )}
           </button>
         ))}
-        <input type="date" aria-label="Другая дата" className="h-9 rounded-full border-0 bg-muted px-4 text-sm outline-none"
-               value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
       </div>
-      <h2 className="mt-5 font-display text-2xl font-semibold">{WEEKDAYS[weekday]}, {dayMonth(day)}</h2>
-      <p className="mt-1 text-[15px] text-muted-foreground">
-        {data ? `Выходят ${data.total_count} ${plural(data.total_count, "человек", "человека", "человек")}, ${data.total_volume} шт.` : " "}
-      </p>
-      {data && data.date === day && data.unmarked.length > 0 && (
-        <Unmarked day={day} people={data.unmarked} canMark={data.can_mark} onDone={reload} />
-      )}
-
-      {loading && !data ? (
-        <Skeleton className="mt-5 h-32 rounded-2xl" />
-      ) : data && data.items.length === 0 ? (
-        <p className="mt-5 rounded-2xl bg-muted p-4 text-sm text-muted-foreground">На эту дату записей нет.</p>
-      ) : (
-        <>
-          {going.length > 0 && (
-            <div className="mt-5">
-              <DayLanes lanes={lanesFrom(going)} />
-            </div>
-          )}
-          <ul className="mt-5 divide-y border-t">
-            {data?.items.map((s) => {
-              const meta = STATUS_META[s.status];
-              return (
-                <li key={s.id}>
-                  <button onClick={() => onEdit({ ...s })} className="press flex w-full items-center justify-between gap-3 py-3 text-left">
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium">{s.name}</span>
-                      <span className={cn("flex items-center gap-1.5 text-sm", meta.text)}>
-                        <span className={cn("size-1.5 rounded-full", meta.dot)} />
-                        {meta.label}
-                      </span>
-                    </span>
-                    <span className="shrink-0 text-right text-sm">
-                      <span className="block font-semibold tabular">{s.start_time ? timeRange(s) : ""}</span>
-                      <span className="text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
-                      {s.fact_volume != null && (
-                        <span className={cn("block text-xs font-semibold", s.shortfall ? "text-cancel" : "text-go")}>
-                          факт {s.fact_volume}{s.shortfall ? ` (−${s.shortfall})` : ""}
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
+      <UnmarkedList key={d.date} data={d} onDone={onDone} bare />
     </section>
   );
 }
 
-/** Customer 28.10: who hasn't marked the day (no shift, no day off) — a manager marks it for them right here. */
-function Unmarked({ day, people, canMark, onDone }: { day: string; people: UnmarkedPerson[]; canMark: boolean; onDone: () => void }) {
+/** Customer 28.10, ТЗ 29.10 §5–6: who hasn't marked the day (no shift, no day off) — a manager marks it for them right
+ * here, or fines them through the same violation and fine as «Дисциплина». */
+function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => void; bare?: boolean }) {
+  const day = data.date;
+  const people = data.unmarked;
+  const canMark = data.can_mark;
   const [form, setForm] = useState<{ user: UnmarkedPerson; start: string; end: string; volume: string; location: string } | null>(null);
+  const [fining, setFining] = useState<UnmarkedPerson | null>(null);
   const { busy, run } = useAction();
   const mark = async (person: UnmarkedPerson, kind: "off" | "shift") => {
     try {
@@ -489,49 +560,79 @@ function Unmarked({ day, people, canMark, onDone }: { day: string; people: Unmar
       /* toast shown */
     }
   };
+  if (people.length === 0) {
+    return <p className="rounded-xl bg-card p-3 text-sm text-muted-foreground">✅ {dayMonth(day)}: все отметили день.</p>;
+  }
   return (
-    <div className="mt-5 rounded-2xl bg-wait-soft p-4">
-      <p className="font-semibold text-wait">Не отметили этот день: {people.length}</p>
+    <div className={cn(!bare && "rounded-2xl bg-wait-soft p-4")}>
+      <p className="font-semibold text-wait">Не отметили {dayMonth(day)}: {people.length}</p>
       <p className="mt-0.5 text-sm text-muted-foreground">
         Ни смены, ни выходного. {canMark ? "Можно отметить за человека — он получит сообщение." : "День прошёл."}
+        {data.can_fine === false && data.fine_note && people.some((p) => !p.violation || p.violation.status === "pending") ? ` ${data.fine_note}.` : ""}
       </p>
       <ul className="mt-3 space-y-2">
-        {people.map((p) => (
-          <li key={p.user_id} className="rounded-xl bg-card p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <button className="min-w-0 flex-1 truncate text-left font-medium underline-offset-2 hover:underline"
-                      onClick={() => openProfile(p.username, p.telegram_id, p.name)}>
-                {p.name}{p.network && <span className="font-normal text-muted-foreground"> · {p.network}</span>}
-              </button>
-              {canMark && (
-                <span className="flex shrink-0 gap-1.5">
-                  <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy}
-                          onClick={() => mark(p, "off")}>Выходной</Button>
-                  <Button size="sm" className="press h-9 rounded-lg" disabled={!!busy}
-                          onClick={() => setForm(form?.user.user_id === p.user_id ? null
-                            : { user: p, start: "10:00", end: "18:00", volume: "", location: "" })}>В график</Button>
+        {people.map((p) => {
+          const v = p.violation;
+          const decided = !!v && v.status !== "pending";
+          return (
+            <li key={p.user_id} className="rounded-xl bg-card p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="min-w-0 flex-1">
+                  <button className="block max-w-full truncate text-left font-medium underline-offset-2 hover:underline"
+                          onClick={() => openProfile(p.username, p.telegram_id, p.name)}>
+                    {p.name}{p.network && <span className="font-normal text-muted-foreground"> · {p.network}</span>}
+                  </button>
+                  <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs">
+                    <span className={cn("rounded-full px-2 py-0.5 font-semibold", TONE_CHIP.wait)}>
+                      {dayMonth(day)} · Не в графике и не на выходном
+                    </span>
+                    {v && (
+                      <span className={cn("rounded-full px-2 py-0.5 font-semibold",
+                        TONE_CHIP[v.status === "waived" ? "archive" : v.status === "pending" ? "wait" : v.fine?.status === "rejected" ? "bad" : "ok"])}>
+                        {v.state}{v.fine?.units ? ` · ${v.fine.units} ед.` : ""}
+                      </span>
+                    )}
+                  </span>
                 </span>
-              )}
-            </div>
-            {form?.user.user_id === p.user_id && (
-              <div className="row-in mt-3 grid grid-cols-2 gap-2">
-                <input type="time" aria-label="С" className={cn(field, "h-10")} value={form.start}
-                       onChange={(e) => setForm({ ...form, start: e.target.value })} />
-                <input type="time" aria-label="До" className={cn(field, "h-10")} value={form.end}
-                       onChange={(e) => setForm({ ...form, end: e.target.value })} />
-                <input inputMode="numeric" placeholder="Объём, шт." className={cn(field, "h-10")} value={form.volume}
-                       onChange={(e) => setForm({ ...form, volume: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
-                <input placeholder="Точка" className={cn(field, "h-10")} value={form.location}
-                       onChange={(e) => setForm({ ...form, location: e.target.value.slice(0, 100) })} />
-                <Button className="press col-span-2 h-10 rounded-xl" disabled={!!busy || !form.volume || !form.location.trim()}
-                        onClick={() => mark(p, "shift")}>
-                  {busy === `shift-${p.user_id}` && <LoaderCircle className="animate-spin" />} Записать
-                </Button>
+                {canMark && (
+                  <span className="flex shrink-0 flex-wrap gap-1.5">
+                    <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy}
+                            onClick={() => mark(p, "off")}>Выходной</Button>
+                    <Button size="sm" className="press h-9 rounded-lg" disabled={!!busy}
+                            onClick={() => setForm(form?.user.user_id === p.user_id ? null
+                              : { user: p, start: "10:00", end: "18:00", volume: "", location: "" })}>В график</Button>
+                    {data.can_fine && !decided && (
+                      <Button size="sm" variant="ghost" className="press h-9 rounded-lg text-cancel hover:bg-cancel-soft hover:text-cancel"
+                              disabled={!!busy} onClick={() => setFining(p)}>Оштрафовать</Button>
+                    )}
+                  </span>
+                )}
               </div>
-            )}
-          </li>
-        ))}
+              {form?.user.user_id === p.user_id && (
+                <div className="row-in mt-3 grid grid-cols-2 gap-2">
+                  <input type="time" aria-label="С" className={cn(field, "h-10")} value={form.start}
+                         onChange={(e) => setForm({ ...form, start: e.target.value })} />
+                  <input type="time" aria-label="До" className={cn(field, "h-10")} value={form.end}
+                         onChange={(e) => setForm({ ...form, end: e.target.value })} />
+                  <input inputMode="numeric" placeholder="Объём, шт." className={cn(field, "h-10")} value={form.volume}
+                         onChange={(e) => setForm({ ...form, volume: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
+                  <input placeholder="Точка" className={cn(field, "h-10")} value={form.location}
+                         onChange={(e) => setForm({ ...form, location: e.target.value.slice(0, 100) })} />
+                  <Button className="press col-span-2 h-10 rounded-xl" disabled={!!busy || !form.volume || !form.location.trim()}
+                          onClick={() => mark(p, "shift")}>
+                    {busy === `shift-${p.user_id}` && <LoaderCircle className="animate-spin" />} Записать
+                  </Button>
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ul>
+      <UnmarkedFineDrawer
+        open={fining ? { day, userId: fining.user_id, name: fining.name, suggestedUnits: data.suggested_units ?? 3,
+          defaultComment: data.default_comment ?? "", unitRate: fining.unit_rate ?? 0 } : null}
+        onClose={() => setFining(null)}
+        onDone={() => { setFining(null); onDone(); }} />
     </div>
   );
 }

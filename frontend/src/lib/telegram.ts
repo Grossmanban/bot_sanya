@@ -27,6 +27,9 @@ interface TelegramWebApp {
   onEvent(event: string, cb: () => void): void;
   offEvent(event: string, cb: () => void): void;
   openTelegramLink(url: string): void;
+  openLink?: (url: string) => void;
+  enableClosingConfirmation?: () => void;
+  disableClosingConfirmation?: () => void;
   disableVerticalSwipes?: () => void;
   HapticFeedback?: {
     notificationOccurred(type: HapticNotification): void;
@@ -126,6 +129,28 @@ export function openTelegramLinkSafe(url: string) {
     else window.open(url, "_blank");
   } catch {
     window.open(url, "_blank");
+  }
+}
+
+/** An ordinary web link (a manual's link): t.me inside Telegram, others in the browser. */
+export function openExternal(url: string) {
+  if (/^https:\/\/t\.me\//i.test(url)) return openTelegramLinkSafe(url);
+  const app = webApp();
+  try {
+    if (app?.openLink) app.openLink(url);
+    else window.open(url, "_blank", "noopener");
+  } catch {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
+/** ТЗ 29.10 §4: while an editor has unsaved changes, Telegram asks before closing the app. */
+export function setClosingConfirmation(on: boolean) {
+  try {
+    if (on) webApp()?.enableClosingConfirmation?.();
+    else webApp()?.disableClosingConfirmation?.();
+  } catch {
+    /* older Telegram */
   }
 }
 

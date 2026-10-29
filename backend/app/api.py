@@ -85,6 +85,11 @@ class GlobalLink(BaseModel):
     active: bool = True
 
 
+class HeaderTitle(BaseModel):
+    text: str | None = None
+    visible: bool = True
+
+
 class ManualBody(BaseModel):
     title: str | None = None
     idempotency_key: str
@@ -94,6 +99,11 @@ class ManualSection(BaseModel):
     id: int | None = None
     title: str = ""
     html: str = ""
+
+
+class ManualDocument(BaseModel):
+    html: str
+    idempotency_key: str
 
 
 class ManualSections(BaseModel):
@@ -476,6 +486,14 @@ class NormBody(BaseModel):
     idempotency_key: str
 
 
+class UnmarkedFine(BaseModel):
+    user_id: int
+    units: int
+    comment: str
+    media_files: list[str] = []
+    idempotency_key: str
+
+
 class ViolationFine(BaseModel):
     units: int
     comment: str
@@ -779,7 +797,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if user["status"] != "approved":
             # a candidate: the questionnaire (none yet / returned to the reserve) or where it stands
             return {"registered": True, "user": public_user(user), "bot_username": app.state.bot_username,
-                    "application": {"status": application["status"], "training": {
+                    "header": header(), "application": {"status": application["status"], "training": {
                         k: application[k] for k in ("training_date", "training_time", "training_location")}}
                     if application else None}
         return {
@@ -804,6 +822,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             # a trainee's shifts are training ones and not paid
             "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user)},
             "bot_username": app.state.bot_username,
+            # ТЗ 29.10 §7: the label above the role (null — hidden)
+            "header": header(),
         }
 
     @api.post("/register")
@@ -1566,11 +1586,28 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             counted = [i for i in items if i["status"] in svc.ACTIVE]
             count, volume = len(counted), sum(i["volume"] or 0 for i in counted)
         nets = networks.names(conn)
-        # customer 28.10: who hasn't marked this day (no shift, no day off) — visible and fixable right here
+        # customer 28.10, ТЗ 29.10 §5: who hasn't marked this day (no shift, no day off) — visible and fixable right
+        # here, today and tomorrow alike; someone the 22:00 check already gave a violation stays on the list with it
+        def violation_of(u: dict) -> dict | None:
+            v = violations.unmarked_violation(conn, u["id"], d)
+            if v is None:
+                return None
+            tx = finance.get(conn, v["linked_fine_transaction_id"]) if v["linked_fine_transaction_id"] else None
+            return {"id": v["id"], "status": v["status"], "state": violations.state_text(conn, v),
+                    "fine": {"status": tx["status"], "units": tx["pieces"], "amount": tx["amount"]} if tx else None}
+
         unmarked = [{"user_id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
-                     "network": nets.get(u["network_id"])} for u in pending.unmarked(conn, admin, d)]
+                     "network": nets.get(u["network_id"]), "unit_rate": violations._rate(conn, u["id"]),
+                     "violation": violation_of(u)}
+                    for u in pending.unmarked(conn, admin, d, with_violations=True)]
+        can_fine, fine_note = violations.fine_window(d, today)
         return {"date": d.isoformat(), "items": items, "total_count": count, "total_volume": volume,
-                "unmarked": unmarked, "can_mark": d >= today}
+                "unmarked": unmarked, "can_mark": d >= today,
+                # ТЗ 29.10 §5.3: the project's own today / tomorrow (TIMEZONE), not the phone's clock
+                "today": today.isoformat(), "tomorrow": (today + timedelta(days=1)).isoformat(),
+                "can_fine": can_fine and perms.can(admin, "review"), "fine_note": fine_note,
+                "suggested_units": violations._units(conn),
+                "default_comment": f"Не отмечен график на {d.strftime('%d.%m')}: ни смены, ни выходного."}
 
     @api.post("/admin/day/{day}/mark")
     async def admin_day_mark(day: str, body: DayMark, admin: dict = Depends(staff("schedule"))):
@@ -1580,6 +1617,16 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if result.changed:
             notifier.spawn(notifier.day_marked_by_manager(result.shift, admin))
         return {"shift": svc.serialize_shift(result.shift, today_local()), "changed": result.changed}
+
+    @api.post("/admin/day/{day}/fine")
+    async def admin_day_fine(day: str, body: UnmarkedFine, admin: dict = Depends(staff("review"))):
+        """ТЗ 29.10 §6: «Оштрафовать» someone who hasn't marked today / tomorrow — the same violation and fine as in
+        «Дисциплина», never a second one."""
+        result = violations.fine_unmarked(conn, admin, body.user_id, svc.parse_date(day), body.units, body.comment,
+                                          body.media_files, body.idempotency_key)
+        if result.changed:
+            notifier.spawn(notifier.violation_resolved(result.violation, result.tx, admin))
+        return {"violation": violation_out(result.violation), "changed": result.changed}
 
     @api.get("/admin/stats")
     async def admin_stats(user_id: int, date_from: str = Query(..., alias="from"), date_to: str = Query(..., alias="to"),
@@ -2328,6 +2375,33 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     # ------------------------------------------------------------ manuals (ТЗ 28.10 §12)
 
+    def header() -> str | None:
+        h = app_settings.header_title(conn)
+        return h["text"] if h["visible"] else None
+
+    # ТЗ 29.10 §7: the label above the role — owners and admins (settings), with a log entry like the button above
+    @api.get("/admin/header-title")
+    async def admin_header_title(_: dict = Depends(staff("settings"))):
+        return {"header": app_settings.header_title(conn), "fallback": app_settings.HEADER_DEFAULT}
+
+    @api.put("/admin/header-title")
+    async def admin_header_title_save(body: HeaderTitle, admin: dict = Depends(staff("settings"))):
+        old = app_settings.header_title(conn)
+        new = app_settings.set_header_title(conn, body.text, body.visible)
+        with transaction(conn):
+            svc.log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="HEADER_TITLE_SAVED",
+                          key=svc.new_key(), old=old, new=new)
+        return {"header": new, "fallback": app_settings.HEADER_DEFAULT}
+
+    @api.delete("/admin/header-title")
+    async def admin_header_title_reset(admin: dict = Depends(staff("settings"))):
+        old = app_settings.header_title(conn)
+        new = app_settings.reset_header_title(conn)
+        with transaction(conn):
+            svc.log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="HEADER_TITLE_RESET",
+                          key=svc.new_key(), old=old, new=new)
+        return {"header": new, "fallback": app_settings.HEADER_DEFAULT}
+
     @api.get("/admin/global-link")
     async def admin_global_link(_: dict = Depends(staff("settings"))):
         return {"link": app_settings.global_link(conn)}
@@ -2380,11 +2454,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/manuals/{manual_id}/upload")
     async def admin_manual_upload(manual_id: int, request: Request, idempotency_key: str, admin: dict = Depends(staff("manuals"))):
-        raw = await request.body()
-        if len(raw) > manuals.MAX_HTML:
-            raise svc.ServiceError("Файл слишком большой (до 2 МБ)", 413, "too_big")
-        html = raw.decode("utf-8", errors="replace")
-        return {"manual": manuals.upload(conn, admin, manual_id, html, idempotency_key)}
+        raw = await request.body()  # the file's own bytes: the encoding is found on the server (ТЗ 29.10 §3)
+        return {"manual": manuals.upload(conn, admin, manual_id, raw, idempotency_key)}
+
+    @api.put("/admin/manuals/{manual_id}/document")
+    async def admin_manual_document(manual_id: int, body: ManualDocument, admin: dict = Depends(staff("manuals"))):
+        """ТЗ 29.10 §4: the visual editor saves the whole page — the same manual, a new version."""
+        return {"manual": manuals.save_document(conn, admin, manual_id, body.html, body.idempotency_key)}
 
     @api.get("/admin/users/{user_id}/manuals")
     async def admin_user_manuals(user_id: int, _: dict = Depends(staff("manuals"))):

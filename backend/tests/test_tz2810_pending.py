@@ -98,7 +98,9 @@ def test_day_shows_the_unmarked_and_a_manager_marks_them(conn, make_user):
     day = client.get(f"/api/admin/day?day={tomorrow}", headers=oh).json()
     names = {p["user_id"] for p in day["unmarked"]}
     assert {mine["id"], other["id"], trainer["id"]} <= names and day["can_mark"] is True
-    assert pending.counts(conn, owner)["unmarked"] == len(names)
+    # ТЗ 29.10 §5: the count is today + tomorrow (nobody here marked today either)
+    today_names = {p["user_id"] for p in client.get(f"/api/admin/day?day={today_local()}", headers=oh).json()["unmarked"]}
+    assert pending.counts(conn, owner)["unmarked"] == len(names) + len(today_names)
     # a trainer sees and marks only their network
     tday = client.get(f"/api/admin/day?day={tomorrow}", headers=th).json()
     assert other["id"] not in {p["user_id"] for p in tday["unmarked"]}
@@ -130,10 +132,10 @@ def test_unmarked_with_a_violation_counts_once(conn, make_user):
     u = make_user()
     tomorrow = today_local() + timedelta(days=1)
     before = pending.counts(conn, owner)
-    assert before["unmarked"] == 1 and before["violations"] == 0
+    assert before["unmarked"] == 2 and before["violations"] == 0  # ТЗ 29.10 §5: today and tomorrow
     violations.scan_unmarked(conn, tomorrow)  # the deadline passed: now it's «Дисциплина»
     after = pending.counts(conn, owner)
-    assert after["unmarked"] == 0 and after["violations"] == 1 and after["total"] == before["total"]
+    assert after["unmarked"] == 1 and after["violations"] == 1 and after["total"] == before["total"]
 
 
 def test_an_urgent_request_nobody_decided_expires(conn, make_user):

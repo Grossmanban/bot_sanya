@@ -9,11 +9,20 @@ let counts: ReportCounts | null = null;
 let active = 0;
 let inflight: Promise<void> | null = null;
 const listeners = new Set<(c: ReportCounts | null) => void>();
+// ТЗ 29.10 §2: one timer for all subscribers (was one per subscriber), and screens re-render only when a number changed
+let timer: ReturnType<typeof setInterval> | null = null;
+const onVisible = () => {
+  if (document.visibilityState === "visible") void refreshPending();
+};
+
+const same = (a: ReportCounts | null, b: ReportCounts) =>
+  !!a && Object.keys({ ...a, ...b }).every((k) => a[k as keyof ReportCounts] === b[k as keyof ReportCounts]);
 
 export function refreshPending(): Promise<void> {
   if (active === 0) return Promise.resolve();
   inflight ??= api.admin.reportCounts()
     .then((c) => {
+      if (same(counts, c)) return;
       counts = c;
       listeners.forEach((fn) => fn(c));
     })
@@ -30,17 +39,20 @@ export function usePending(enabled: boolean): ReportCounts | null {
     if (!enabled) return;
     active += 1;
     listeners.add(setValue);
+    setValue(counts);
     void refreshPending();
-    const timer = setInterval(() => void refreshPending(), 30_000);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refreshPending();
-    };
-    document.addEventListener("visibilitychange", onVisible);
+    if (!timer) {
+      timer = setInterval(() => void refreshPending(), 30_000);
+      document.addEventListener("visibilitychange", onVisible);
+    }
     return () => {
       active -= 1;
       listeners.delete(setValue);
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
+      if (active === 0 && timer) {
+        clearInterval(timer);
+        timer = null;
+        document.removeEventListener("visibilitychange", onVisible);
+      }
     };
   }, [enabled]);
   return enabled ? value : null;
@@ -71,7 +83,7 @@ export const PENDING_LABELS: [keyof ReportCounts, string][] = [
   ["onboarding_new", "🧑‍🎓 Новые анкеты"], ["internship_review", "🎯 Стажировки на проверку"],
   ["training_requests", "⏳ Обучение: ожидает согласования"], ["profile_changes", "🪪 Изменения профилей"],
   ["payment_changes", "💳 Изменения реквизитов"], ["urgent", "⚡ Срочные заявки на сегодня"],
-  ["unmarked", "🗓 Не отметили завтрашний день"], ["events_pending", "🏁 Заявки в событиях"],
+  ["unmarked", "🗓 Не отметили день (сегодня, завтра)"], ["events_pending", "🏁 Заявки в событиях"],
   ["alice_moderation", "📸 «Алиса»: на модерации"], ["alice_failed", "📸 «Алиса»: не отправлено"],
 ];
 

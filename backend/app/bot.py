@@ -68,15 +68,19 @@ class DecisionInput(StatesGroup):
 REASON_KIND = {"return": None, "fine": "report_fine", "ns_fine": "no_show_fine", "ns_excuse": "no_show_excuse"}
 
 
+# ТЗ 29.10 §8: the chat menu button that opens the Mini App. Set per chat by set_menu(); setup_menu_button() pushes it
+# to every chat with access on each start, so a rename reaches existing users after a restart.
+MENU_BUTTON = "Приложение"
+
 WELCOME = ("Добро пожаловать в систему!\n\nСовет: в приложении → «Профиль» → «Быстрый доступ» можно добавить "
-           "иконку на главный экран телефона и открывать график, не заходя в чат.")
+           "иконку на главный экран телефона и открывать приложение, не заходя в чат.")
 
 
 def open_app_keyboard() -> InlineKeyboardMarkup | None:
     if not settings.webapp_url.startswith("https://"):
         return None
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📅 Открыть график", web_app=WebAppInfo(url=settings.webapp_url))
+        InlineKeyboardButton(text="📱 Открыть приложение", web_app=WebAppInfo(url=settings.webapp_url))
     ]])
 
 
@@ -1062,7 +1066,7 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
 
 
 async def set_menu(bot: Bot, telegram_id: int, user: dict | None) -> None:
-    """The «График» button only in the chats of people who have access (ТЗ 27.10 §5: strangers get no menu)."""
+    """ТЗ 29.10 §8: the «Приложение» menu button (was «График» — the app is more than the schedule) only in the chats of people who have access (ТЗ 27.10 §5: strangers get no menu)."""
     from aiogram.types import MenuButtonDefault, MenuButtonWebApp
 
     if not settings.webapp_url.startswith("https://"):
@@ -1071,7 +1075,7 @@ async def set_menu(bot: Bot, telegram_id: int, user: dict | None) -> None:
     try:
         await bot.set_chat_menu_button(
             chat_id=telegram_id,
-            menu_button=MenuButtonWebApp(text="График", web_app=WebAppInfo(url=settings.webapp_url))
+            menu_button=MenuButtonWebApp(text=MENU_BUTTON, web_app=WebAppInfo(url=settings.webapp_url))
             if has_access else MenuButtonDefault())
     except Exception:
         log.warning("could not set the menu button for %s", telegram_id)

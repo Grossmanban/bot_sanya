@@ -4,10 +4,12 @@ import { useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Pencil, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type MessageText, type ReasonKind } from "@/lib/api";
+import { api, type HeaderTitleState, type MessageText, type ReasonKind } from "@/lib/api";
+import { rememberHeader } from "@/lib/header";
 import { useAction, useLoad } from "@/lib/hooks";
 import { setReasons } from "@/lib/reasons";
 import { cn } from "@/lib/utils";
+import { Wordmark } from "../wordmark";
 
 const input = "w-full rounded-xl border-0 bg-muted px-3 py-2.5 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 
@@ -208,6 +210,70 @@ export function GlobalLinkCard() {
           </Button>
         )}
       </div>
+    </section>
+  );
+}
+
+/** ТЗ 29.10 §7: the label above the role in the header (the «выход» wordmark): any text, hidden or back to «выход».
+ * The preview is the header's own look — the same font, size and colour — with the viewer's role under it. */
+export function HeaderTitleCard() {
+  const { data, setData } = useLoad(() => api.admin.headerTitle(), []);
+  const [text, setText] = useState<string | null>(null);
+  const { busy, run } = useAction();
+  if (!data) return <Skeleton className="h-32 rounded-3xl" />;
+  const h = data.header;
+  const t = text ?? h.text;
+  const apply = (res: HeaderTitleState | undefined | false) => {
+    if (res) {
+      setData(res);
+      setText(null);
+      rememberHeader(res.header.visible ? res.header.text : null);
+    }
+  };
+  const save = async (visible: boolean, ok: string) => {
+    try {
+      apply(await run("header", () => api.admin.saveHeaderTitle({ text: t.trim(), visible }), ok));
+    } catch {
+      /* toast shown */
+    }
+  };
+  const shownInPreview = (text !== null ? text.trim() : h.visible ? h.text : "") || null;
+  return (
+    <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      <div>
+        <h2 className="font-semibold">Надпись над ролью</h2>
+        <p className="text-sm text-muted-foreground">
+          Слово в шапке приложения над ролью — у всех пользователей. Можно написать название работы, организации или проекта.
+          {h.visible ? (h.default ? " Сейчас — исходная «выход»." : " Сейчас показывается.") : " Сейчас скрыта."}
+        </p>
+      </div>
+      <div className="rounded-2xl bg-muted/50 px-5 py-3" aria-label="Предпросмотр шапки">
+        <p className="mb-1 text-[11px] font-medium text-muted-foreground">Предпросмотр</p>
+        <Wordmark className="block text-xl leading-tight" text={shownInPreview} />
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+          <span className="size-1.5 shrink-0 rounded-full bg-primary" /> Администратор
+        </span>
+      </div>
+      <input className={input} placeholder={data.fallback} value={t} maxLength={32}
+             onChange={(e) => setText(e.target.value.slice(0, 32))} />
+      <div className="flex flex-wrap gap-2">
+        <Button className="press h-11 rounded-xl" disabled={!!busy || !t.trim() || (t.trim() === h.text && h.visible)}
+                onClick={() => save(true, "Надпись сохранена")}>
+          {busy === "header" && <LoaderCircle className="animate-spin" />} {h.visible ? "Сохранить" : "Сохранить и показать"}
+        </Button>
+        {h.visible && (
+          <Button variant="secondary" className="press h-11 rounded-xl" disabled={!!busy} onClick={() => save(false, "Надпись скрыта")}>
+            Скрыть
+          </Button>
+        )}
+        {(!h.default || !h.visible) && (
+          <Button variant="ghost" className="press h-11 rounded-xl" disabled={!!busy}
+                  onClick={async () => { try { apply(await run("reset", () => api.admin.resetHeaderTitle(), "Вернули «выход»")); } catch { /* */ } }}>
+            <RotateCcw /> Вернуть «{data.fallback}»
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">У остальных изменится при следующем открытии приложения.</p>
     </section>
   );
 }

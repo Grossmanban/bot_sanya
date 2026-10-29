@@ -940,7 +940,14 @@ def admin_mark_day(conn, admin: dict, user_id: int, day: date, kind: str, payloa
             raise ServiceError("Нет прав на этого сотрудника", 403, "forbidden")
         if day < today:
             raise ServiceError("Прошедший день отметить нельзя", 409, "past_date")
-        if get_user_shift_on(conn, user_id, day) is not None:
+        existing = get_user_shift_on(conn, user_id, day)
+        if existing is not None and existing["status"] == "rejected_by_admin":
+            # ТЗ 29.10 §5: a declined / expired urgent request isn't a mark — the person is listed as unmarked, so the
+            # manager's mark replaces that row (it stays in the history as withdrawn) instead of a dead-end 409
+            conn.execute("UPDATE shifts SET status = 'withdrawn', updated_at = ? WHERE id = ?", (now_iso(), existing["id"]))
+            log_event(conn, user_id=user_id, actor_id=admin["telegram_id"], event_type="SHIFT_WITHDRAWN", key=new_key(),
+                      shift_id=existing["id"], old={"status": "rejected_by_admin"}, new={"status": "withdrawn"})
+        elif existing is not None:
             raise ServiceError("У сотрудника уже есть запись на этот день — обновите список", 409, "already_exists")
         stamp = now_iso()
         if kind == "off":

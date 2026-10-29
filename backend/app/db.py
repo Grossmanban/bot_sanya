@@ -1358,6 +1358,14 @@ def _alice_money(conn: sqlite3.Connection) -> None:
 
 MIGRATIONS.append(_alice_money)
 
+# ТЗ 29.10 §3: a manual keeps the look of its page — its cleaned style sheet and the body's class (versions keep the
+# sheet too)
+MIGRATIONS.append("""
+ALTER TABLE manuals ADD COLUMN css TEXT;
+ALTER TABLE manuals ADD COLUMN body_class TEXT;
+ALTER TABLE manual_versions ADD COLUMN css TEXT
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
