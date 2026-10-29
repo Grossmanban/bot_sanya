@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronLeft, LoaderCircle, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, type AliceReconcile } from "@/lib/api";
+import { api, type AliceReconcile, type Product } from "@/lib/api";
 import { dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -15,12 +15,14 @@ const field = "h-11 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus
  * period; that many of the period's accepted tasks are paid (picked at random, the same on every reopening), the rest
  * of the period become «Отклонено Яндексом». The person's open fines and deductions are taken too (one debt).
  * edit — the same wizard changes an existing payout (a new version, no duplicate). */
-export function AlicePayout({ onClose, edit }: { onClose: (id?: number) => void;
+export function AlicePayout({ onClose, edit, product = "alice" }: { onClose: (id?: number) => void; product?: Product;
   edit?: { id: number; title: string; from: string; to: string; confirmed: Record<string, number> } }) {
+  // ТЗ «Яндекс Плюс» §9: the same wizard and rules for «Яндекс Плюс», over its own QR codes and tasks
+  const name = product === "plus" ? "Яндекс Плюс" : "Алиса";
   const today = moscowToday();
   const [from, setFrom] = useState(edit?.from ?? `${today.slice(0, 8)}01`);
   const [to, setTo] = useState(edit?.to ?? today);
-  const [title, setTitle] = useState(edit?.title ?? "Алиса");
+  const [title, setTitle] = useState(edit?.title ?? name);
   const [confirmed, setConfirmed] = useState<Record<number, string>>(
     () => Object.fromEntries(Object.entries(edit?.confirmed ?? {}).map(([k, v]) => [Number(k), String(v)])));
   const [plan, setPlan] = useState<AliceReconcile | null>(null);
@@ -31,7 +33,7 @@ export function AlicePayout({ onClose, edit }: { onClose: (id?: number) => void;
 
   async function preview() {
     try {
-      const body = { date_from: from, date_to: to, confirmed: numbers() };
+      const body = { date_from: from, date_to: to, confirmed: numbers(), product };
       const res = await run("calc", () => api.admin.alicePayoutPreview(body));
       if (res) setPlan(res);
     } catch {
@@ -44,7 +46,7 @@ export function AlicePayout({ onClose, edit }: { onClose: (id?: number) => void;
       const res = edit
         ? await run("commit", (k) => api.admin.editPayout(edit.id, { confirmed: numbers() }, k), "Выплата пересчитана — новая версия")
         : await run("commit", (k) => api.admin.alicePayoutCommit({ title, date_from: from, date_to: to, confirmed: numbers(),
-          proof_media: proof }, k), "Выплата зафиксирована");
+          proof_media: proof, product }, k), "Выплата зафиксирована");
       if (res) onClose(res.batch.id);
     } catch {
       /* toast shown */
@@ -55,9 +57,9 @@ export function AlicePayout({ onClose, edit }: { onClose: (id?: number) => void;
     <div className="space-y-4">
       <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={() => onClose()}><ChevronLeft /> Отмена</Button>
       <section className="space-y-4 rounded-3xl bg-card p-5 shadow-lift md:p-6">
-        <h2 className="font-display text-xl font-semibold">{edit ? `Изменить выплату №${edit.id}` : "Выплата по «Алисе»"}</h2>
+        <h2 className="font-display text-xl font-semibold">{edit ? `Изменить выплату №${edit.id}` : product === "plus" ? "Выплата по «Яндекс Плюсу»" : "Выплата по «Алисе»"}</h2>
         <p className="text-sm text-muted-foreground">
-          Учитываются принятые задания «Алисы», выполненные в выбранный период. Введите, сколько подтвердил отчёт Яндекса по
+          Учитываются принятые задания «{name}», выполненные в выбранный период. Введите, сколько подтвердил отчёт Яндекса по
           каждому QR-коду: столько заданий будут оплачены (выбираются случайно, при повторном открытии — те же), остальные задания
           периода получат «Отклонено Яндексом». QR без числа не трогается. Штрафы и вычеты человека удерживаются — один общий долг,
           без налога на лень. Пока не нажата «Зафиксировать», ничего не меняется.

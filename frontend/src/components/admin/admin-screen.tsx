@@ -5,7 +5,7 @@ import { Check, ChevronRight, Copy, LoaderCircle, RefreshCw, Search } from "luci
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type AdminDay, type AdminShift, type Capability, type ReportCounts, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
+import { api, type AdminDay, type AdminShift, type Capability, type Product, type ReportCounts, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
 import { TONE_CHIP } from "@/lib/tone";
 import {
   STATUS_META,
@@ -20,7 +20,7 @@ import {
 } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { haptic, openProfile, tapHaptic } from "@/lib/telegram";
-import { CapsContext } from "@/lib/caps";
+import { CapsContext, ProductsContext } from "@/lib/caps";
 import { PENDING_LABELS, refreshPending, sectionCount, sectionOf, usePending } from "@/lib/pending";
 import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { cn } from "@/lib/utils";
@@ -44,7 +44,7 @@ import { GroupsSection } from "./groups-section";
 import { AliceAdmin } from "./alice-admin";
 import { ManualsAdmin } from "../training/manuals";
 
-type Section = "decisions" | "manuals" | "alice" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "decisions" | "manuals" | "alice" | "plus" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "decisions", label: "Решения", need: "review" },
@@ -63,6 +63,7 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "networks", label: "Сети", need: "registrations" },
   { id: "points", label: "Точки", need: "points" },
   { id: "alice", label: "Алиса", need: "alice" },
+  { id: "plus", label: "Яндекс Плюс", need: "alice" },
   { id: "manuals", label: "Методички", need: "manuals" },
   { id: "groups", label: "Группы", need: "groups" },
   { id: "access", label: "Доступ", need: "access_log" },
@@ -77,7 +78,7 @@ const GROUPS: { id: Group; label: string; sections: Section[] }[] = [
   { id: "people", label: "Люди", sections: ["team", "onboarding", "groups", "access"] },
   { id: "shifts", label: "Смены", sections: ["raspred", "day", "reports", "discipline", "actual", "stats"] },
   { id: "money", label: "Деньги", sections: ["penalties", "payouts"] },
-  { id: "products", label: "Продукты", sections: ["alice", "manuals", "goals", "events"] },
+  { id: "products", label: "Продукты", sections: ["alice", "plus", "manuals", "goals", "events"] },
   { id: "comms", label: "Связь и настройки", sections: ["broadcast", "points", "networks", "settings"] },
 ];
 // «Решения» is shown to whoever decides anything at all (the same capabilities pending.counts looks at)
@@ -88,7 +89,8 @@ const groupOf = (s: Section): Group => GROUPS.find((g) => g.sections.includes(s)
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
-export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
+export function AdminScreen({ me, caps, network, manageable = [] }: { me: User; caps: Capability[]; network?: string | null;
+  manageable?: Product[] }) {
   const sections = SECTIONS.filter((s) => (s.id === "decisions" ? DECIDES.some((c) => caps.includes(c)) : caps.includes(s.need)));
   const visible = new Set(sections.map((s) => s.id));
   const groups = GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => visible.has(s)) })).filter((g) => g.sections.length > 0);
@@ -126,6 +128,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
 
   return (
     <CapsContext.Provider value={caps}>
+    <ProductsContext.Provider value={manageable}>
     <div className="mx-auto max-w-3xl space-y-5">
       <nav className="space-y-2">
         <div ref={groupStrip} className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
@@ -199,7 +202,8 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
         {section === "points" && <PointsSection />}
         {section === "access" && <AccessSection />}
         {section === "groups" && <GroupsSection />}
-        {section === "alice" && <AliceAdmin />}
+        {section === "alice" && <AliceAdmin key="alice" product="alice" />}
+        {section === "plus" && <AliceAdmin key="plus" product="plus" />}
         {section === "manuals" && <ManualsAdmin />}
         {section === "broadcast" && <BroadcastSection me={me} />}
         {section === "settings" && <SettingsSection />}
@@ -214,6 +218,7 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
         }}
       />
     </div>
+    </ProductsContext.Provider>
     </CapsContext.Provider>
   );
 }
@@ -430,6 +435,13 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
     void reload();
   };
   const serverToday = near.data?.[0].date ?? today;
+  // ТЗ «Яндекс Плюс» §12.5: past midnight «today» and «tomorrow» move on — the lists and the countdown follow
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (near.data && moscowToday() !== near.data[0].date) setTick((n) => n + 1);
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [near.data]);
   const chips = [
     { label: "Сегодня", value: serverToday },
     { label: "Завтра", value: addDays(serverToday, 1) },
@@ -515,9 +527,10 @@ function UnmarkedPanel({ days, onDone }: { days: readonly [AdminDay, AdminDay] |
   const [t, m] = days;
   if (t.unmarked.length === 0 && m.unmarked.length === 0) {
     return (
-      <p className="rounded-3xl bg-card px-5 py-4 text-sm text-muted-foreground shadow-lift">
-        ✅ Сегодня и завтра все, кто работает, отметили день — смену или выходной.
-      </p>
+      <div className="space-y-1 rounded-3xl bg-card px-5 py-4 text-sm text-muted-foreground shadow-lift">
+        <p>✅ Сегодня и завтра все, кто работает, отметили день — смену или выходной.</p>
+        {m.deadline && <Countdown deadline={m.deadline} day={m.date} />}
+      </div>
     );
   }
   const d = days[which];
@@ -540,8 +553,55 @@ function UnmarkedPanel({ days, onDone }: { days: readonly [AdminDay, AdminDay] |
   );
 }
 
+function left(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h} ч ${m} мин`;
+  return m > 0 ? `${m} мин` : "меньше минуты";
+}
+
+/** ТЗ «Яндекс Плюс» §12.5: time left to mark the day — counted from the server's figure (not the phone's clock), ticking
+ * without a reload; at zero it says the deadline has come (a marked person is never shown as late because of it). */
+function Countdown({ deadline, day, onPassed }: { deadline: NonNullable<AdminDay["deadline"]>; day: string; onPassed?: () => void }) {
+  const [end] = useState(() => Date.now() + deadline.seconds_left * 1000);
+  const [now, setNow] = useState(() => Date.now());
+  const passedRef = useRef(deadline.passed);
+  useEffect(() => {
+    if (deadline.passed) return;
+    const id = window.setInterval(() => setNow(Date.now()), 10_000);
+    return () => window.clearInterval(id);
+  }, [deadline.passed]);
+  const rest = Math.max(0, Math.round((end - now) / 1000));
+  const passed = deadline.passed || rest <= 0;
+  useEffect(() => {
+    if (passed && !passedRef.current) {
+      passedRef.current = true;
+      onPassed?.();
+    }
+  }, [passed, onPassed]);
+  return (
+    <p className={cn("text-sm font-semibold tabular", passed ? "text-cancel" : rest < 3600 ? "text-wait" : "text-foreground")}>
+      ⏳ {passed ? `Дедлайн наступил (отметить ${dayMonth(day)} нужно было до ${deadline.time} накануне)`
+        : `До дедлайна: ${left(rest)} — отметить ${dayMonth(day)} до ${deadline.time}`}
+    </p>
+  );
+}
+
+function remindToast(res: { sent: number; failed: { name: string; error: string | null }[]; skipped: { name: string; why: string }[];
+  repeat: boolean }) {
+  const parts = [res.repeat ? `Уже отправлено: ${res.sent}` : `Напоминание отправлено: ${res.sent}`];
+  if (res.skipped.length) parts.push(`пропущено ${res.skipped.length} (${res.skipped.map((x) => `${x.name} — ${x.why}`).join("; ")})`);
+  if (res.failed.length) {
+    toast.warning([...parts, `не доставлено ${res.failed.length}: ${res.failed.map((x) => `${x.name} — ${x.error ?? "ошибка"}`).join("; ")}`]
+      .join(", "));
+  } else {
+    toast.success(parts.join(", "));
+  }
+}
+
 /** Customer 28.10, ТЗ 29.10 §5–6: who hasn't marked the day (no shift, no day off) — a manager marks it for them right
- * here, or fines them through the same violation and fine as «Дисциплина». */
+ * here, or fines them through the same violation and fine as «Дисциплина»; ТЗ «Яндекс Плюс» §12 — or reminds them
+ * (one person or everyone still unmarked, only within the manager's network). */
 function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => void; bare?: boolean }) {
   const day = data.date;
   const people = data.unmarked;
@@ -549,6 +609,15 @@ function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => vo
   const [form, setForm] = useState<{ user: UnmarkedPerson; start: string; end: string; volume: string; location: string } | null>(null);
   const [fining, setFining] = useState<UnmarkedPerson | null>(null);
   const { busy, run } = useAction();
+  const remind = async (ids: number[] | "all") => {
+    try {
+      const res = await run(ids === "all" ? "remind-all" : `remind-${ids[0]}`,
+        (k) => api.admin.dayRemind(day, ids === "all" ? { all: true } : { user_ids: ids }, k));
+      if (res) remindToast(res);
+    } catch {
+      /* toast shown */
+    }
+  };
   const mark = async (person: UnmarkedPerson, kind: "off" | "shift") => {
     try {
       await run(`${kind}-${person.user_id}`, (k) => api.admin.markDay(day, kind === "off" ? { user_id: person.user_id, kind } : {
@@ -565,7 +634,15 @@ function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => vo
   }
   return (
     <div className={cn(!bare && "rounded-2xl bg-wait-soft p-4")}>
-      <p className="font-semibold text-wait">Не отметили {dayMonth(day)}: {people.length}</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-semibold text-wait">Не отметили {dayMonth(day)}: {people.length}</p>
+        {data.can_remind && (
+          <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy} onClick={() => remind("all")}>
+            {busy === "remind-all" && <LoaderCircle className="animate-spin" />} 📣 Напомнить всем
+          </Button>
+        )}
+      </div>
+      {data.deadline && canMark && <Countdown key={data.deadline.at} deadline={data.deadline} day={day} onPassed={onDone} />}
       <p className="mt-0.5 text-sm text-muted-foreground">
         Ни смены, ни выходного. {canMark ? "Можно отметить за человека — он получит сообщение." : "День прошёл."}
         {data.can_fine === false && data.fine_note && people.some((p) => !p.violation || p.violation.status === "pending") ? ` ${data.fine_note}.` : ""}
@@ -606,6 +683,12 @@ function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => vo
                               disabled={!!busy} onClick={() => setFining(p)}>Оштрафовать</Button>
                     )}
                   </span>
+                )}
+                {data.can_remind && (
+                  <Button size="sm" variant="ghost" className="press h-9 shrink-0 rounded-lg" disabled={!!busy}
+                          onClick={() => remind([p.user_id])}>
+                    {busy === `remind-${p.user_id}` && <LoaderCircle className="animate-spin" />} Напомнить
+                  </Button>
                 )}
               </div>
               {form?.user.user_id === p.user_id && (

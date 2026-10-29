@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, PRODUCT_TITLES, type EventChanges, type LiveEvent, type PendingEntry, type Product, type User } from "@/lib/api";
-import { useCan } from "@/lib/caps";
+import { useCan, useManageableProducts } from "@/lib/caps";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import {
@@ -243,6 +243,7 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
   const [ends, setEnds] = useState(initial ? local(initial.ends_at) : `${today}T20:00`);
   const [network, setNetwork] = useState<number | null>(everyone ? null : myNetwork);
   const [product, setProduct] = useState<Product | "">("");  // ТЗ 27.10 §29: only those with access take part
+  const allowed = useManageableProducts();  // ТЗ «Яндекс Плюс» §11: never a product the author can't manage
   const [asking, setAsking] = useState<string[] | null>(null);
   const { busy, run } = useAction();
   const started = !!initial && initial.phase !== "upcoming";
@@ -345,10 +346,10 @@ function EventForm({ initial, types, everyone, myNetwork, onDone, onCancel }: {
           {nets.data!.items.map((n) => <option key={n.id} value={n.id}>Сеть «{n.name}»</option>)}
         </select>
       )}
-      {!editing && (
+      {!editing && allowed.length > 0 && (
         <select aria-label="Продукт" className={field} value={product} onChange={(e) => setProduct(e.target.value as Product | "")}>
           <option value="">Для всех продуктов</option>
-          {(Object.keys(PRODUCT_TITLES) as Product[]).map((p) => (
+          {(Object.keys(PRODUCT_TITLES) as Product[]).filter((p) => allowed.includes(p)).map((p) => (
             <option key={p} value={p}>Только с доступом к «{PRODUCT_TITLES[p]}»</option>
           ))}
         </select>

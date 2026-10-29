@@ -431,7 +431,7 @@ def _live(conn, batch_id: int) -> dict:
 def _later(conn, b: dict) -> list[str]:
     """В53: only the latest payout of these people (for «Алиса» — of these QR codes) may change: a later one was
     counted on top of it (the lazy pool, debts, paid tasks)."""
-    if b["product"] == "alice":
+    if b["product"] in ("alice", "plus"):  # by QR codes: «Алиса» and «Яндекс Плюс»
         rows = conn.execute(
             """SELECT DISTINCT b2.id, b2.title FROM alice_tasks t JOIN alice_tasks t2 ON t2.qr_id = t.qr_id
                JOIN payout_batches b2 ON b2.id = t2.payout_id WHERE t.payout_id = ? AND b2.id > ? AND b2.status != 'annulled'""",
@@ -480,7 +480,7 @@ def edit(conn: sqlite3.Connection, actor: dict, batch_id: int, choices: list[dic
             raise ServiceError("Выплаты меняет только владелец", 403, "owner_only")
         b = _live(conn, batch_id)
         if b["product"]:
-            raise ServiceError("Выплату «Алисы» меняют в её мастере", 409, "wrong_kind")
+            raise ServiceError("Выплату «Алисы» или «Яндекс Плюса» меняют в её мастере", 409, "wrong_kind")
         later = _later(conn, b)
         if later:
             raise ServiceError("Сначала измените более позднюю выплату: " + ", ".join(later), 409, "not_latest")
@@ -558,7 +558,7 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> dict | None:
     b["annulled_by_name"] = names.get(b.get("annulled_by")) if b.get("annulled_by") else None
     b["versions"] = [{"version": r["version"], "created_at": r["created_at"], "by": names.get(r["created_by"]), "note": r["note"]}
                      for r in conn.execute("SELECT * FROM payout_versions WHERE batch_id = ? ORDER BY version DESC", (batch_id,))]
-    if b.get("product") == "alice":
+    if b.get("product") in ("alice", "plus"):
         b["tasks"] = [{"id": r["id"], "status": r["status"], "user_id": r["user_id"]} for r in conn.execute(
             "SELECT id, status, user_id FROM alice_tasks WHERE payout_id = ? ORDER BY id", (batch_id,))]
     return b

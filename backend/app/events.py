@@ -299,6 +299,8 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, mode: str, star
            prize_photo: str | None = None, prize_media_kind: str | None = None, product: str | None = None) -> dict:
     title = _clean_title(title)
     products.check_product(product)
+    if product is not None:  # ТЗ «Яндекс Плюс» §11, on the server
+        products.require_manageable(conn, _fresh_actor(conn, actor), product)
     description_html, description = clean_description(description)
     prize_media_kind = clean_media_kind(prize_media_kind)
     if mode not in ("first_to_reach", "accumulative"):

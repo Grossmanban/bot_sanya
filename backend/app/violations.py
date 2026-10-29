@@ -372,6 +372,17 @@ def fine_window(day: date, today: date | None = None, now=None) -> tuple[bool, s
     return False, "Здесь — только сегодня и завтра; остальные нарушения — в «Дисциплине»"
 
 
+def mark_deadline_info(day: date, now=None) -> dict:
+    """ТЗ «Яндекс Плюс» §12.5: the deadline to mark `day` (daily_mark_deadline the evening before, the project's time
+    zone) and how much of it is left by the server's clock — the app counts down from it without reloading."""
+    deadline = svc.mark_deadline(day)
+    moment = svc.clock(None, now)
+    left = int((deadline - moment).total_seconds())
+    return {"at": deadline.isoformat(timespec="seconds"), "time": deadline.strftime("%H:%M"),
+            "day": (day - timedelta(days=1)).isoformat(), "seconds_left": max(0, left), "passed": left <= 0,
+            "server_now": moment.isoformat(timespec="seconds")}
+
+
 def fine_unmarked(conn: sqlite3.Connection, actor: dict, user_id: int, day: date, units: int, comment: str,
                   files: list[str] | None, key: str, today: date | None = None, now=None) -> Resolution:
     """«Оштрафовать» from «День» (ТЗ 29.10 §6): the violation «не отмечен день» of this person for this day — the very

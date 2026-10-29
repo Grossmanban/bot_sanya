@@ -227,7 +227,7 @@ export function MiniApp() {
             {tab === "training" && <TrainingScreen trainer={!!me.training} manuals={me.manuals ?? 0} />}
             {tab === "work" && <WorkScreen products={me.products ?? []} working={working} onOpenProfile={() => go("profile")} />}
             {tab === "profile" && <ProfileScreen user={user} pricing={me.pricing!} onUserChange={updateUser} botUsername={me.bot_username} />}
-            {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} />}
+            {tab === "admin" && staff && <AdminScreen me={user} caps={me.capabilities ?? []} network={me.network} manageable={me.manageable_products ?? []} />}
           </main>
         </div>
 

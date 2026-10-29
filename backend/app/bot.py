@@ -994,21 +994,35 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             f"👥 Группа подключена как «{groups.KINDS[kind]}». Приглашения сюда — личные: по ссылке войдёт только тот, "
             "кому её отправил бот." + (f"\n\n⚠️ Сделайте бота администратором с правами: {', '.join(missing)}." if missing else ""))
 
-    @router.message(Command("alice_here"))
-    async def alice_here(message: Message):
-        """ТЗ 27.10 §36: the forum group for «Яндекс Алиса» photo reports — a topic per employee."""
+    async def connect_photo_group(message: Message, product: str) -> None:
+        """ТЗ 27.10 §36 / ТЗ «Яндекс Плюс» §7.1: the forum group for the product's photo reports — a topic per employee.
+        Each product keeps its own group: connecting one never overwrites the other, and one chat serves one product."""
         if message.from_user.id not in settings.admin_ids:
             return
+        command = alice.KINDS[product]["command"]
         if message.chat.type != "supergroup" or not message.chat.is_forum:
             await message.answer("Нужна группа с включёнными темами (форум). Включите темы в настройках группы и "
-                                 "отправьте /alice_here ещё раз.")
+                                 f"отправьте {command} ещё раз.")
             return
-        alice.connect_forum(conn, message.chat.id, message.chat.title)
+        try:
+            alice.connect_forum(conn, message.chat.id, message.chat.title, product)
+        except svc.ServiceError as exc:
+            await message.answer(f"⚠️ {exc.message}.")
+            return
         rights = await groups.bot_rights(message.bot, message.chat.id)
         me = await message.bot.get_chat_member(message.chat.id, message.bot.id)
         topics = rights["admin"] and (me.status == "creator" or bool(getattr(me, "can_manage_topics", False)))
-        await message.answer("📸 Группа подключена для фотоотчётов «Яндекс Алисы»: у каждого сотрудника будет своя тема."
+        await message.answer(f"📸 Группа подключена для фотоотчётов {alice.KINDS[product]['of']}: у каждого сотрудника будет "
+                             "своя тема."
                              + ("" if topics else "\n\n⚠️ Сделайте бота администратором с правом «Управление темами»."))
+
+    @router.message(Command("alice_here"))
+    async def alice_here(message: Message):
+        await connect_photo_group(message, alice.PRODUCT)
+
+    @router.message(Command("plus_here"))
+    async def plus_here(message: Message):
+        await connect_photo_group(message, alice.PLUS)
 
     @router.message(Command("group_off"))
     async def group_off(message: Message):

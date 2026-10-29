@@ -1367,6 +1367,39 @@ ALTER TABLE manual_versions ADD COLUMN css TEXT
 """)
 
 
+def _yandex_plus(conn: sqlite3.Connection) -> None:
+    """Migration 39 — ТЗ «Яндекс Плюс»: the second product of «Работа» lives in the «Алиса» tables with its own
+    `product`: its own QR codes, executions (one photo), topics in its own photo-report group. Old rows are «Алиса».
+    One execution going per person and product; a topic per person and product (the groups are separate)."""
+    conn.execute("ALTER TABLE alice_qr ADD COLUMN product TEXT NOT NULL DEFAULT 'alice'")
+    conn.execute("ALTER TABLE alice_tasks ADD COLUMN product TEXT NOT NULL DEFAULT 'alice'")
+    conn.execute("DROP INDEX IF EXISTS ux_alice_tasks_active")
+    conn.execute("CREATE UNIQUE INDEX ux_alice_tasks_active ON alice_tasks (user_id, product) WHERE status = 'in_progress'")
+    conn.execute("CREATE INDEX ix_alice_tasks_product ON alice_tasks (product, status, completed_at)")
+    conn.execute("CREATE INDEX ix_alice_qr_product ON alice_qr (product, archived_at)")
+    conn.execute("""CREATE TABLE alice_topics__new (
+        user_id     INTEGER NOT NULL REFERENCES users(id),
+        product     TEXT NOT NULL DEFAULT 'alice',
+        chat_id     INTEGER NOT NULL,
+        thread_id   INTEGER NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (user_id, product))""")
+    conn.execute("""INSERT INTO alice_topics__new (user_id, product, chat_id, thread_id, created_at)
+                    SELECT user_id, 'alice', chat_id, thread_id, created_at FROM alice_topics""")
+    conn.execute("DROP TABLE alice_topics")
+    conn.execute("ALTER TABLE alice_topics__new RENAME TO alice_topics")
+    from .templates import REASON_KINDS
+
+    if conn.execute("SELECT 1 FROM reason_templates WHERE kind = 'plus_reject'").fetchone():
+        return  # a fresh database got them from migration 31 (it seeds every kind of today's code)
+    for i, text in enumerate(REASON_KINDS["plus_reject"][1]):
+        conn.execute("INSERT INTO reason_templates (kind, text, position, created_at) VALUES ('plus_reject', ?, ?, datetime('now'))",
+                     (text, i + 1))
+
+
+MIGRATIONS.append(_yandex_plus)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

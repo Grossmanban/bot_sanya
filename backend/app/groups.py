@@ -118,9 +118,11 @@ async def kick_blocked(conn: sqlite3.Connection, bot, notifier, user: dict, acto
     from . import alice
 
     out = await kick(conn, bot, notifier, user, tuple(KINDS), actor)
-    forum = alice.forum(conn)
-    if forum and bot is not None:
-        out["alice"] = await _kick_chat(conn, bot, notifier, user, forum["chat_id"], "фотоотчёты «Алисы»", actor)
+    for product in alice.KINDS:  # «Алиса» and «Яндекс Плюс» — each its own photo-report group
+        forum = alice.forum(conn, product)
+        if forum and bot is not None:
+            out[product] = await _kick_chat(conn, bot, notifier, user, forum["chat_id"],
+                                            f"фотоотчёты {alice.KINDS[product]['of']}", actor)
     with transaction(conn):
         log_event(conn, user_id=user["id"], actor_id=actor["telegram_id"] if actor else 0, event_type="BLOCK_GROUPS",
                   key=svc.new_key(), new=out)

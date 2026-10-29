@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from urllib.parse import parse_qs
@@ -396,6 +397,7 @@ class AlicePayout(BaseModel):
     title: str | None = None
     proof_media: list[str] = []
     idempotency_key: str | None = None
+    product: str = "alice"      # ТЗ «Яндекс Плюс»: «plus» — the same payout by Yandex's report for its QR codes
 
 
 class ProductAccess(BaseModel):
@@ -484,6 +486,16 @@ class AnnulBody(BaseModel):
 class NormBody(BaseModel):
     norm: int | None = None  # None = the common norm
     idempotency_key: str
+
+
+class DayRemind(BaseModel):
+    """ТЗ «Яндекс Плюс» §12: «Напомнить» (user_ids) or «Напомнить всем» (all) about marking the day."""
+    user_ids: list[int] = []
+    all: bool = False
+    idempotency_key: str
+
+
+REMIND_GAP_MIN = 5  # a person reminded about the same day minutes ago is not messaged again
 
 
 class UnmarkedFine(BaseModel):
@@ -812,6 +824,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "capabilities": perms.capabilities(user),
             # ТЗ 27.10 §28: «Работа» shows only the products the person has access to
             "products": products.of_user(conn, user["id"]),
+            # ТЗ «Яндекс Плюс» §11: the products this person may tie goals and events to (the server checks it again)
+            "manageable_products": products.manageable(conn, user),
             # ТЗ 28.10 §3, §8: «Обучение» — the trainer of a candidate or a grant by an admin
             "training": training.has_access(conn, user),
             # ТЗ 28.10 §12: «Методички» in «Обучение» while at least one is given (the tab shows for them too, В33)
@@ -961,74 +975,79 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         await groups.remove(conn, notifier.bot, user, body.kind, admin)
         return await groups_view()
 
-    # ------------------------------------------------------------ «Работа» and «Яндекс Алиса» (ТЗ 27.10 §28–44)
+    # ------------------------------------------------------------ «Работа»: «Яндекс Алиса» (ТЗ 27.10 §28–44) and
+    # «Яндекс Плюс» — one set of routes, the product in the path (/work/alice/…, /work/plus/…) or in ?product=
 
-    def alice_me(user: dict) -> dict:
-        task = alice.active(conn, user["id"])
-        return {"task": alice.view(conn, task) if task else None, "has_qr": alice.assigned_qr(conn, user["id"]) is not None,
-                "stats": alice.my_stats(conn, user["id"], today_local()), "history": alice.history(conn, user["id"])}
+    def alice_me(user: dict, product: str = alice.PRODUCT) -> dict:
+        task = alice.active(conn, user["id"], product)
+        return {"product": product, "title": products.PRODUCTS[product],
+                "task": alice.view(conn, task) if task else None,
+                "has_qr": alice.assigned_qr(conn, user["id"], product) is not None,
+                "stats": alice.my_stats(conn, user["id"], today_local(), product=product),
+                "history": alice.history(conn, user["id"], product=product)}
 
     def alice_task(user: dict, task: dict) -> dict:
-        return {"task": alice.view(conn, task), "stats": alice.my_stats(conn, user["id"], today_local())}
+        return {"task": alice.view(conn, task), "stats": alice.my_stats(conn, user["id"], today_local(), product=task["product"])}
 
     @api.get("/work")
     async def work(user: dict = Depends(current_user)):
         mine = products.of_user(conn, user["id"])
         return {"items": [{"product": p, "title": products.PRODUCTS[p]} for p in mine]}
 
-    @api.get("/work/alice")
-    async def work_alice(date_from: str | None = Query(None, alias="from"), date_to: str | None = Query(None, alias="to"),
-                         user: dict = Depends(current_user)):
-        products.require(conn, user, alice.PRODUCT)
-        out = alice_me(user)
+    @api.get("/work/{product}")
+    async def work_alice(product: str, date_from: str | None = Query(None, alias="from"),
+                         date_to: str | None = Query(None, alias="to"), user: dict = Depends(current_user)):
+        alice.check(product)
+        products.require(conn, user, product)
+        out = alice_me(user, product)
         if date_from and date_to:
-            out["stats"] = alice.my_stats(conn, user["id"], today_local(), svc.parse_date(date_from), svc.parse_date(date_to))
+            out["stats"] = alice.my_stats(conn, user["id"], today_local(), svc.parse_date(date_from), svc.parse_date(date_to),
+                                          product=product)
         return out
 
-    @api.post("/work/alice/start")
-    async def work_alice_start(body: KeyOnly, user: dict = Depends(current_user)):
-        return alice_task(user, alice.start(conn, user, body.idempotency_key))
+    @api.post("/work/{product}/start")
+    async def work_alice_start(product: str, body: KeyOnly, user: dict = Depends(current_user)):
+        return alice_task(user, alice.start(conn, user, body.idempotency_key, alice.check(product)))
 
-    @api.post("/work/alice/{task_id}/scanned")
-    async def work_alice_scanned(task_id: int, user: dict = Depends(current_user)):
-        return alice_task(user, alice.scanned(conn, user, task_id))
+    @api.post("/work/{product}/{task_id}/scanned")
+    async def work_alice_scanned(product: str, task_id: int, user: dict = Depends(current_user)):
+        return alice_task(user, alice.scanned(conn, user, task_id, alice.check(product)))
 
-    @api.put("/work/alice/{task_id}/photo/{stage}")
-    async def work_alice_photo(task_id: int, stage: int, request: Request, user: dict = Depends(current_user)):
+    @api.put("/work/{product}/{task_id}/photo/{stage}")
+    async def work_alice_photo(product: str, task_id: int, stage: int, request: Request, user: dict = Depends(current_user)):
+        alice.check(product)
         data, ext = await read_photo(request, required=True)
-        return alice_task(user, alice.put_photo(conn, user, task_id, stage, data, ext))
+        return alice_task(user, alice.put_photo(conn, user, task_id, stage, data, ext, product))
 
-    @api.delete("/work/alice/{task_id}/photo/{stage}")
-    async def work_alice_photo_delete(task_id: int, stage: int, user: dict = Depends(current_user)):
-        return alice_task(user, alice.delete_photo(conn, user, task_id, stage))
+    @api.delete("/work/{product}/{task_id}/photo/{stage}")
+    async def work_alice_photo_delete(product: str, task_id: int, stage: int, user: dict = Depends(current_user)):
+        return alice_task(user, alice.delete_photo(conn, user, task_id, stage, alice.check(product)))
 
-    @api.post("/work/alice/{task_id}/goto/{stage}")
-    async def work_alice_goto(task_id: int, stage: int, user: dict = Depends(current_user)):
+    @api.post("/work/{product}/{task_id}/goto/{stage}")
+    async def work_alice_goto(product: str, task_id: int, stage: int, user: dict = Depends(current_user)):
         """§19: back to an earlier stage (0 — the QR code); the photos stay."""
-        return alice_task(user, alice.goto(conn, user, task_id, stage))
+        return alice_task(user, alice.goto(conn, user, task_id, stage, alice.check(product)))
 
-    @api.post("/work/alice/{task_id}/next")
-    async def work_alice_next(task_id: int, user: dict = Depends(current_user)):
-        return alice_task(user, alice.fix_stage(conn, user, task_id))
+    @api.post("/work/{product}/{task_id}/next")
+    async def work_alice_next(product: str, task_id: int, user: dict = Depends(current_user)):
+        return alice_task(user, alice.fix_stage(conn, user, task_id, alice.check(product)))
 
-    @api.post("/work/alice/{task_id}/finish")
-    async def work_alice_finish(task_id: int, body: KeyOnly, user: dict = Depends(current_user)):
-        task = alice.finish(conn, user, task_id, body.idempotency_key)
+    @api.post("/work/{product}/{task_id}/finish")
+    async def work_alice_finish(product: str, task_id: int, body: KeyOnly, user: dict = Depends(current_user)):
+        task = alice.finish(conn, user, task_id, body.idempotency_key, alice.check(product))
         if task["status"] in ("sending", "send_failed"):
             task = await alice.deliver(conn, notifier.bot, task_id, notifier)
         return alice_task(user, task)
 
-    @api.post("/work/alice/{task_id}/retry")
-    async def work_alice_retry(task_id: int, user: dict = Depends(current_user)):
-        task = alice.get(conn, task_id)
-        if task is None or task["user_id"] != user["id"]:
-            raise svc.ServiceError("Выполнение не найдено", 404, "not_found")
+    @api.post("/work/{product}/{task_id}/retry")
+    async def work_alice_retry(product: str, task_id: int, user: dict = Depends(current_user)):
+        alice.owned(conn, user, task_id, alice.check(product))
         return alice_task(user, await alice.deliver(conn, notifier.bot, task_id, notifier))
 
-    @api.post("/work/alice/{task_id}/abandon")
-    async def work_alice_abandon(task_id: int, user: dict = Depends(current_user)):
-        alice.abandon(conn, user, task_id)
-        return alice_me(user)
+    @api.post("/work/{product}/{task_id}/abandon")
+    async def work_alice_abandon(product: str, task_id: int, user: dict = Depends(current_user)):
+        alice.abandon(conn, user, task_id, alice.check(product))
+        return alice_me(user, product)
 
     @api.get("/media/alice/{photo_id}")
     async def alice_photo(photo_id: int, exp: int, sig: str):
@@ -1062,22 +1081,31 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             notifier.spawn(notifier.product_access(user, body.product, body.allow, admin))
         return products.view(conn, user_id)
 
+    def staff_task(task_id: int) -> dict:
+        task = alice.get(conn, task_id)
+        if task is None:
+            raise svc.ServiceError("Задание не найдено", 404, "not_found")
+        return task
+
     @api.get("/admin/alice")
-    async def admin_alice(_: dict = Depends(staff("alice"))):
-        forum = alice.forum(conn)
-        counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM alice_tasks GROUP BY status")}
-        people = [{"id": u["id"], "name": svc.full_name(u)} for u in svc.list_users(conn) if products.has(conn, u, alice.PRODUCT)]
-        return {"forum": forum, "counts": counts, "people": people, "rate": app_settings.get_all(conn)["alice_rate"]}
+    async def admin_alice(product: str = alice.PRODUCT, _: dict = Depends(staff("alice"))):
+        alice.check(product)
+        forum = alice.forum(conn, product)
+        counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM alice_tasks WHERE product = ? GROUP BY status",
+                                                   (product,))}
+        people = [{"id": u["id"], "name": svc.full_name(u)} for u in svc.list_users(conn) if products.has(conn, u, product)]
+        return {"product": product, "title": products.PRODUCTS[product], "command": alice.KINDS[product]["command"],
+                "forum": forum, "counts": counts, "people": people, "rate": app_settings.get_all(conn)["alice_rate"]}
 
     @api.get("/admin/alice/queue")
     async def admin_alice_queue(status: str | None = "moderation", user_id: int | None = None, qr_id: int | None = None,
                                 date_from: str | None = Query(None, alias="from"), date_to: str | None = Query(None, alias="to"),
-                                _: dict = Depends(staff("alice"))):
+                                product: str = alice.PRODUCT, _: dict = Depends(staff("alice"))):
         if status and status not in alice.STATUS:
             raise svc.ServiceError("Неизвестный статус", 422, "bad_status")
         return {"items": alice.queue(conn, status or None, user_id, qr_id,
                                      svc.parse_date(date_from) if date_from else None,
-                                     svc.parse_date(date_to) if date_to else None)}
+                                     svc.parse_date(date_to) if date_to else None, product=alice.check(product))}
 
     @api.post("/admin/alice/{task_id}/decide")
     async def admin_alice_decide(task_id: int, body: AliceDecide, admin: dict = Depends(staff("alice"))):
@@ -1090,8 +1118,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/alice/{task_id}/retry")
     async def admin_alice_retry(task_id: int, body: KeyOnly, admin: dict = Depends(staff("alice"))):
         """В56: «Не отправлено» after all automatic attempts — an admin sends it again."""
-        task = alice.get(conn, task_id)
-        if task is None or task["status"] not in ("sending", "send_failed"):
+        task = staff_task(task_id)
+        if task["status"] not in ("sending", "send_failed"):
             raise svc.ServiceError("Это выполнение не ждёт отправки", 409, "bad_status")
         with transaction(conn):
             conn.execute("UPDATE alice_tasks SET send_attempts = 0 WHERE id = ?", (task_id,))
@@ -1099,35 +1127,46 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"task": alice.view(conn, task, staff=True)}
 
     @api.get("/admin/alice/qr")
-    async def admin_alice_qrs(archived: bool = False, _: dict = Depends(staff("alice"))):
-        return {"items": alice.qr_list(conn, archived)}
+    async def admin_alice_qrs(archived: bool = False, product: str = alice.PRODUCT, _: dict = Depends(staff("alice"))):
+        return {"items": alice.qr_list(conn, archived, alice.check(product))}
 
     @api.post("/admin/alice/qr")
     async def admin_alice_qr_create(request: Request, idempotency_key: str, number: str | None = None,
-                                    admin: dict = Depends(staff("alice"))):
+                                    product: str = alice.PRODUCT, admin: dict = Depends(staff("alice"))):
+        alice.check(product)
         data, ext = await read_photo(request, required=True)
         # kept in Telegram like every other photo here: survives a rebuild and the loss of the server
-        image = await notifier.store_photo(admin["telegram_id"], data, ext, f"🔳 QR-код «Яндекс Алисы» {number or ''}".strip())
-        alice.create_qr(conn, admin, image, number, idempotency_key)
-        return {"items": alice.qr_list(conn)}
+        image = await notifier.store_photo(admin["telegram_id"], data, ext,
+                                           f"🔳 QR-код {alice.KINDS[product]['of']} {number or ''}".strip())
+        alice.create_qr(conn, admin, image, number, idempotency_key, product)
+        return {"items": alice.qr_list(conn, product=product)}
+
+    def qr_product(qr_id: int) -> str:
+        qr = alice.get_qr(conn, qr_id)
+        if qr is None:
+            raise svc.ServiceError("QR-код не найден", 404, "not_found")
+        return qr["product"]
 
     @api.put("/admin/alice/qr/{qr_id}/image")
     async def admin_alice_qr_image(qr_id: int, request: Request, idempotency_key: str, admin: dict = Depends(staff("alice"))):
+        product = qr_product(qr_id)
         data, ext = await read_photo(request, required=True)
-        image = await notifier.store_photo(admin["telegram_id"], data, ext, "🔳 Новая картинка QR-кода «Яндекс Алисы»")
+        image = await notifier.store_photo(admin["telegram_id"], data, ext, f"🔳 Новая картинка QR-кода {alice.KINDS[product]['of']}")
         alice.update_qr(conn, admin, qr_id, idempotency_key, image=image)
-        return {"items": alice.qr_list(conn)}
+        return {"items": alice.qr_list(conn, product=product)}
 
     @api.patch("/admin/alice/qr/{qr_id}")
     async def admin_alice_qr_patch(qr_id: int, body: AliceQrPatch, admin: dict = Depends(staff("alice"))):
+        product = qr_product(qr_id)
         alice.update_qr(conn, admin, qr_id, body.idempotency_key, number_=body.number, archive=body.archive)
-        return {"items": alice.qr_list(conn)}
+        return {"items": alice.qr_list(conn, product=product)}
 
     @api.post("/admin/alice/qr/{qr_id}/assign")
     async def admin_alice_qr_assign(qr_id: int, body: AliceAssign, admin: dict = Depends(staff("alice"))):
+        product = qr_product(qr_id)
         if alice.assign(conn, admin, qr_id, body.user_id, body.on, body.idempotency_key):
-            notifier.spawn(notifier.alice_qr_changed(svc.get_user(conn, body.user_id), body.on))
-        return {"items": alice.qr_list(conn)}
+            notifier.spawn(notifier.alice_qr_changed(svc.get_user(conn, body.user_id), body.on, product))
+        return {"items": alice.qr_list(conn, product=product)}
 
     @api.get("/admin/alice/qr/{qr_id}/history")
     async def admin_alice_qr_history(qr_id: int, _: dict = Depends(staff("alice"))):
@@ -1143,12 +1182,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/alice/stats")
     async def admin_alice_stats(date_from: str = Query(alias="from"), date_to: str = Query(alias="to"),
-                                _: dict = Depends(staff("alice"))):
-        return alice.admin_stats(conn, svc.parse_date(date_from), svc.parse_date(date_to))
+                                product: str = alice.PRODUCT, _: dict = Depends(staff("alice"))):
+        return alice.admin_stats(conn, svc.parse_date(date_from), svc.parse_date(date_to), alice.check(product))
 
     @api.post("/admin/alice/payout/preview")
     async def admin_alice_payout_preview(body: AlicePayout, _: dict = Depends(staff("money"))):
-        return alice.reconcile(conn, svc.parse_date(body.date_from), svc.parse_date(body.date_to), body.confirmed)
+        return alice.reconcile(conn, svc.parse_date(body.date_from), svc.parse_date(body.date_to), body.confirmed,
+                               product=alice.check(body.product))
 
     @api.post("/admin/alice/payout/commit")
     async def admin_alice_payout_commit(body: AlicePayout, owner: dict = Depends(staff("money"))):
@@ -1156,7 +1196,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Нет ключа операции", 422, "key_required")
         batch_id, created = alice.commit_payout(conn, owner, body.title or "", svc.parse_date(body.date_from),
                                                 svc.parse_date(body.date_to), body.confirmed, body.proof_media,
-                                                body.idempotency_key)
+                                                body.idempotency_key, alice.check(body.product))
         batch = payouts.batch(conn, batch_id)
         if created:  # a repeated tap sends nothing again (§25)
             notifier.spawn(notifier.alice_paid(batch))
@@ -1607,7 +1647,63 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                 "today": today.isoformat(), "tomorrow": (today + timedelta(days=1)).isoformat(),
                 "can_fine": can_fine and perms.can(admin, "review"), "fine_note": fine_note,
                 "suggested_units": violations._units(conn),
-                "default_comment": f"Не отмечен график на {d.strftime('%d.%m')}: ни смены, ни выходного."}
+                "default_comment": f"Не отмечен график на {d.strftime('%d.%m')}: ни смены, ни выходного.",
+                # ТЗ «Яндекс Плюс» §12: the deadline to mark this day by the server's clock, and whether the viewer may
+                # remind the unmarked from here
+                "deadline": violations.mark_deadline_info(d),
+                "can_remind": perms.can(admin, "schedule") and today <= d <= today + timedelta(days=1)}
+
+    @api.post("/admin/day/{day}/remind")
+    async def admin_day_remind(day: str, body: DayRemind, admin: dict = Depends(staff("schedule"))):
+        """ТЗ «Яндекс Плюс» §12.3–12.4: «Напомнить» one person or «Напомнить всем» who haven't marked the day — only
+        within the viewer's network (checked here for every id), only those still unmarked right now. A repeated
+        request with the same key sends nothing again; a person reminded minutes ago is skipped. Not a fine."""
+        d, today = svc.parse_date(day), today_local()
+        if not today <= d <= today + timedelta(days=1):
+            raise svc.ServiceError("Напоминать можно только про сегодня и завтра", 422, "bad_day")
+        svc._check_key(body.idempotency_key)
+        with transaction(conn):
+            row = conn.execute("SELECT new_value FROM event_logs WHERE idempotency_key = ?", (body.idempotency_key,)).fetchone()
+            if row is None:
+                svc.log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="MARK_REMIND",
+                              key=body.idempotency_key, new={"day": d.isoformat(), "state": "sending"})
+        if row is not None:  # the same tap again (or a network retry): what was done, nothing sent twice
+            done = json.loads(row[0] or "{}")
+            return {"sent": done.get("sent", 0), "failed": done.get("failed", []), "skipped": done.get("skipped", []),
+                    "repeat": True}
+        unmarked = {u["id"]: u for u in pending.unmarked(conn, admin, d, with_violations=True)}
+        if body.all:
+            people = list(unmarked.values())
+        else:
+            people, ids = [], list(dict.fromkeys(body.user_ids))[:200]
+            if not ids:
+                raise svc.ServiceError("Выберите, кому напомнить", 422, "nobody")
+            for uid in ids:
+                target = svc.get_user(conn, uid)
+                if target is None or not (perms.sees_everyone(admin) or perms.manages(admin, target)):
+                    raise svc.ServiceError("Напоминать можно только людям своей сети", 403, "forbidden")
+            people = [unmarked[uid] for uid in ids if uid in unmarked]
+        skipped = [{"user_id": uid, "name": svc.full_name(svc.get_user(conn, uid)), "why": "уже отметил(а) день"}
+                   for uid in ([] if body.all else body.user_ids) if uid not in unmarked]
+        since = (svc.clock() - timedelta(minutes=REMIND_GAP_MIN)).isoformat(timespec="seconds")
+        fresh = []
+        for u in people:  # a technical repeat (another key) minutes later doesn't send the same text again
+            recent = conn.execute(
+                """SELECT 1 FROM event_logs WHERE user_id = ? AND event_type = 'MARK_REMINDED' AND created_at >= ?
+                   AND new_value LIKE ?""", (u["id"], since, f'%"day": "{d.isoformat()}"%')).fetchone()
+            if recent:
+                skipped.append({"user_id": u["id"], "name": svc.full_name(u), "why": f"уже напомнили за последние {REMIND_GAP_MIN} мин"})
+            else:
+                fresh.append(u)
+        reached, failed = await notifier.remind_unmarked(fresh, d, violations.mark_deadline_info(d))
+        result = {"day": d.isoformat(), "sent": len(reached), "failed": failed, "skipped": skipped}
+        with transaction(conn):
+            for uid in reached:
+                svc.log_event(conn, user_id=uid, actor_id=admin["telegram_id"], event_type="MARK_REMINDED",
+                              key=svc.new_key(), new={"day": d.isoformat()})
+            conn.execute("UPDATE event_logs SET new_value = ? WHERE idempotency_key = ?",
+                         (json.dumps(result, ensure_ascii=False), body.idempotency_key))
+        return {**result, "repeat": False}
 
     @api.post("/admin/day/{day}/mark")
     async def admin_day_mark(day: str, body: DayMark, admin: dict = Depends(staff("schedule"))):
@@ -2553,7 +2649,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         before = payouts.batch(conn, batch_id)
         if before is None:
             raise svc.ServiceError("Выплата не найдена", 404, "not_found")
-        if before.get("product") == "alice":
+        if before.get("product") in alice.KINDS:
             alice.edit_payout(conn, owner, batch_id, body.confirmed, body.idempotency_key, body.note)
         else:
             payouts.edit(conn, owner, batch_id, [c.model_dump() for c in body.choices], body.idempotency_key, body.note)
@@ -2569,7 +2665,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                 svc.log_event(conn, user_id=owner["id"], actor_id=owner["telegram_id"], event_type="PAYOUT_ANNUL_NOTIFIED",
                               key=body.idempotency_key + "#n", new={"batch": batch_id})
             notifier.spawn(notifier.payout_annulled(batch, owner, made))
-            if batch.get("product") == "alice":
+            if batch.get("product") in alice.KINDS:
                 for t in batch.get("tasks", []) or []:
                     notifier.spawn(alice.post_status(conn, notifier.bot, t["id"]))
         return {"batch": batch, "items": payouts.history(conn)}

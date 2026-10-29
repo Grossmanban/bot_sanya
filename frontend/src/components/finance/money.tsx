@@ -5,7 +5,7 @@ import { Gift, HeartHandshake, LoaderCircle, MinusCircle, Receipt, Undo2 } from 
 import { toast } from "sonner";
 import { useReasons } from "@/lib/reasons";
 import { Button } from "@/components/ui/button";
-import { api, type Balance, type MoneySummary, type Tx, type TxType } from "@/lib/api";
+import { api, type Balance, type MoneySummary, type Product, type Tx, type TxType } from "@/lib/api";
 import { useCan } from "@/lib/caps";
 import { dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction } from "@/lib/hooks";
@@ -294,7 +294,8 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
   const [uploaded, setUploaded] = useState<{ blob: Blob; id: string } | null>(null);
   // ТЗ 28.10 §24: a fine for «Алиса» (owners and admins), optionally for one task «Алиса #N»
   const canAlice = useCan("alice");
-  const [alice, setAlice] = useState(false);
+  // ТЗ «Яндекс Плюс» §9: the same fine for «Яндекс Плюс»; null — for the shifts
+  const [alice, setAlice] = useState<Product | null>(null);
   const [taskNo, setTaskNo] = useState("");
   const { busy, run } = useAction();
   const n = Number(amount);
@@ -313,7 +314,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
           const out = await api.admin.pieceDeduction({ user_id: userId, day, pieces: n, reason: reason.trim(), media_file_id: media }, k);
           return { tx: out.items[0], trainer: out.items[1] };
         }
-        const product = type === "fine" && alice ? { product: "alice" as const, alice_task_id: taskNo ? Number(taskNo) : null } : {};
+        const product = type === "fine" && alice ? { product: alice, alice_task_id: taskNo ? Number(taskNo) : null } : {};
         return { ...(await api.admin.createTx(userId, type, type === "fine" ? { units: n, ...product } : { amount: n }, reason.trim(), k, media)),
           trainer: undefined };
       });
@@ -373,7 +374,7 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
       )}
       {type === "fine" && canAlice && (
         <div className="flex flex-wrap items-center gap-2">
-          {([[false, "За смены"], [true, "За «Алису»"]] as const).map(([v, label]) => (
+          {([[null, "За смены"], ["alice", "За «Алису»"], ["plus", "За «Яндекс Плюс»"]] as const).map(([v, label]) => (
             <button key={label} type="button" onClick={() => setAlice(v)}
                     className={cn("press rounded-full px-3.5 py-1.5 text-sm font-semibold", alice === v ? "bg-primary text-primary-foreground" : "bg-muted")}>
               {label}

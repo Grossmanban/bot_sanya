@@ -345,7 +345,7 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
     """Manual fine in units (trainer: needs an approval), bonus (any staff for their people), deduction (owner).
     ТЗ 28.10 §24: a fine may be for the product «Алиса», optionally for one task — owners and admins only (В49);
     it is one debt with the other fines and is taken by whichever payout comes first (В48)."""
-    if product is not None and product != "alice":
+    if product is not None and product not in ("alice", "plus"):  # «Яндекс Плюс» — the same fine as for «Алиса»
         raise ServiceError("Неизвестный продукт", 422, "bad_product")
     if alice_task_id is not None and product is None:
         product = "alice"
@@ -381,12 +381,14 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
         if product:
             if type != "fine":
                 raise ServiceError("За продукт назначается штраф", 422, "bad_type")
+            name = "«Алису»" if product == "alice" else "«Яндекс Плюс»"
             if not perms.can(actor, "alice"):
-                raise ServiceError("Штраф за «Алису» назначают владелец и администраторы", 403, "forbidden")
+                raise ServiceError(f"Штраф за {name} назначают владелец и администраторы", 403, "forbidden")
             if alice_task_id is not None:
-                task = conn.execute("SELECT user_id FROM alice_tasks WHERE id = ?", (alice_task_id,)).fetchone()
-                if task is None or task[0] != user_id:
-                    raise ServiceError(f"Задание «Алиса #{alice_task_id}» не найдено у этого сотрудника", 422, "bad_task")
+                task = conn.execute("SELECT user_id, product FROM alice_tasks WHERE id = ?", (alice_task_id,)).fetchone()
+                if task is None or task[0] != user_id or task[1] != product:
+                    raise ServiceError(f"Задание {'«Алисы»' if product == 'alice' else '«Яндекс Плюса»'} #{alice_task_id} "
+                                       "не найдено у этого сотрудника", 422, "bad_task")
         day = (event_date or today_local()).isoformat()
         if type == "fine":
             tx = record_fine(conn, user_id=user_id, units=units, reason=reason, actor_tg=actor["telegram_id"],

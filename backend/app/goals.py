@@ -50,12 +50,17 @@ def participants(conn: sqlite3.Connection, goal_id: int, annulled: bool = False)
             WHERE p.goal_id = ? {'' if annulled else 'AND p.annulled_at IS NULL'} ORDER BY p.joined_at""", (goal_id,))]
 
 
-def _alice(conn, user_ids: list[int], date_from: str, date_to: str, statuses: tuple[str, ...]) -> dict[int, int]:
-    """ТЗ 27.10 §29: a «Яндекс Алиса» goal counts executions (accepted ones — agreed with the owner), not pieces."""
+BY_EXECUTIONS = ("alice", "plus")  # products counted by their executions (alice_tasks), each by its own
+
+
+def _alice(conn, user_ids: list[int], date_from: str, date_to: str, statuses: tuple[str, ...],
+           product: str = "alice") -> dict[int, int]:
+    """ТЗ 27.10 §29: a «Яндекс Алиса» goal counts executions (accepted ones — agreed with the owner), not pieces;
+    a «Яндекс Плюс» goal — the executions of «Яндекс Плюс» only (the products never count each other)."""
     rows = conn.execute(
-        f"""SELECT user_id, COUNT(*) AS v FROM alice_tasks WHERE status IN ({','.join('?' * len(statuses))})
+        f"""SELECT user_id, COUNT(*) AS v FROM alice_tasks WHERE product = ? AND status IN ({','.join('?' * len(statuses))})
             AND substr(completed_at, 1, 10) BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
-            GROUP BY user_id""", (*statuses, date_from, date_to, *user_ids))
+            GROUP BY user_id""", (product, *statuses, date_from, date_to, *user_ids))
     return {r["user_id"]: r["v"] for r in rows}
 
 
@@ -63,8 +68,8 @@ def volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: str, date_
             product: str | None = None) -> dict[int, int]:
     if not user_ids:
         return {}
-    if product == "alice":
-        return _alice(conn, user_ids, date_from, date_to, ("accepted", "paid"))
+    if product in BY_EXECUTIONS:
+        return _alice(conn, user_ids, date_from, date_to, ("accepted", "paid"), product)
     rows = conn.execute(
         f"""SELECT user_id, SUM(fact_volume) AS v FROM shifts WHERE status IN {ACTIVE} AND report_state = 'approved'
             AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
@@ -77,8 +82,8 @@ def pending_volumes(conn: sqlite3.Connection, user_ids: list[int], date_from: st
     """Facts sent but not reviewed yet — shown next to the progress, not in it."""
     if not user_ids:
         return {}
-    if product == "alice":
-        return _alice(conn, user_ids, date_from, date_to, ("sending", "send_failed", "moderation"))
+    if product in BY_EXECUTIONS:
+        return _alice(conn, user_ids, date_from, date_to, ("sending", "send_failed", "moderation"), product)
     rows = conn.execute(
         f"""SELECT user_id, SUM(fact_volume) AS v FROM shifts WHERE status IN {ACTIVE} AND report_state = 'pending_review'
             AND fact_volume IS NOT NULL AND shift_date BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))})
@@ -100,8 +105,8 @@ def counted_so_far(conn: sqlite3.Connection, goal: dict, user_ids: list[int]) ->
     starts with (ТЗ №18)."""
     if not user_ids:
         return 0, 0
-    if goal.get("product") == "alice":
-        got = _alice(conn, user_ids, goal["date_from"], goal["date_to"], ("accepted", "paid"))
+    if goal.get("product") in BY_EXECUTIONS:
+        got = _alice(conn, user_ids, goal["date_from"], goal["date_to"], ("accepted", "paid"), goal["product"])
         return sum(got.values()), sum(got.values())
     row = conn.execute(
         f"""SELECT COUNT(*), COALESCE(SUM(fact_volume), 0) FROM shifts WHERE status IN {ACTIVE}
@@ -315,6 +320,8 @@ def create(conn: sqlite3.Connection, actor: dict, *, title: str, kind: str, targ
     prize_photo = lifecycle.clean_file_id(prize_photo)
     _check_key(key)
     products.check_product(product)
+    if product is not None:  # §11: never a product the actor can't manage
+        products.require_manageable(conn, _fresh_actor(conn, actor), product)
     if product and kind == "point":
         raise ServiceError("Цель точки считает штуки смен — продукт для неё не выбирается", 422, "bad_product")
     if product and kind in ("personal", "group"):

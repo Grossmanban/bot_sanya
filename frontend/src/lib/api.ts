@@ -65,22 +65,28 @@ export type Capability =
   | "products" | "alice" | "profiles" | "remind_profiles" | "manuals";
 
 /** ТЗ 27.10 §28: «Работа» — products a person has access to */
-export type Product = "alice";
-export const PRODUCT_TITLES: Record<Product, string> = { alice: "Яндекс Алиса" };
+export type Product = "alice" | "plus";
+export const PRODUCT_TITLES: Record<Product, string> = { alice: "Яндекс Алиса", plus: "Яндекс Плюс" };
+/** The screen's own header: «Алиса» as it always was, «Яндекс Плюс» in full */
+export const PRODUCT_SHORT: Record<Product, string> = { alice: "Алиса", plus: "Яндекс Плюс" };
 
 export type AliceStatus = "in_progress" | "sending" | "send_failed" | "moderation" | "rejected" | "accepted" | "paid" | "abandoned" | "yandex_rejected" | "deleted";
 
 export interface AliceStage {
-  stage: 1 | 2 | 3;
+  stage: number;
   title: string;
   hint: string;
   fixed_at: string | null;
   photo_url: string | null;
 }
 
-/** ТЗ 27.10 §31: one execution; step 0 — the QR on screen, 1..3 — the photo stage, 4 — ready to finish */
+/** ТЗ 27.10 §31: one execution; step 0 — the QR on screen, 1..N — the photo stage, last_step — ready to finish
+ * («Алиса»: three photos, last_step 4; «Яндекс Плюс»: one photo, last_step 2) */
 export interface AliceTask {
   id: number;
+  product?: Product;
+  product_title?: string;
+  last_step?: number;
   /** ТЗ 28.10 §18, §21: «Алиса #152» and the QR as «QR 5» when it has no own number */
   title?: string;
   qr_label?: string;
@@ -88,7 +94,7 @@ export interface AliceTask {
   status: AliceStatus;
   status_title: string;
   step: number;
-  query: string;
+  query: string | null;
   qr_number: string | null;
   qr_url: string | null;
   started_at: string;
@@ -129,6 +135,7 @@ export interface AliceStats {
 
 export interface AliceQr {
   id: number;
+  product?: Product;
   number: string | null;
   created_at: string;
   archived_at: string | null;
@@ -249,6 +256,8 @@ export interface Me {
   internship?: StageProgress | null;
   /** ТЗ 27.10 §28: products in «Работа» */
   products?: Product[];
+  /** ТЗ «Яндекс Плюс» §11: products this person may tie goals and events to (owner, admins — all; others — their own) */
+  manageable_products?: Product[];
   /** ТЗ 28.10 §3: «Обучение» — the trainer of a candidate or a grant */
   training?: boolean;
   /** ТЗ 28.10 §12: how many manuals are given to this person */
@@ -691,6 +700,8 @@ export type ReportCounts = {
   events_pending?: number;
   alice_moderation?: number;
   alice_failed?: number;
+  plus_moderation?: number;
+  plus_failed?: number;
   total?: number;
 };
 
@@ -749,6 +760,18 @@ export interface AdminDay {
   today?: string; tomorrow?: string;
   /** ТЗ 29.10 §6: «Оштрафовать» allowed for this day (today — at once, tomorrow — after the deadline) */
   can_fine?: boolean; fine_note?: string | null; suggested_units?: number; default_comment?: string;
+  /** ТЗ «Яндекс Плюс» §12.5: the deadline to mark this day by the server's clock (seconds_left — at server_now) */
+  deadline?: { at: string; time: string; day: string; seconds_left: number; passed: boolean; server_now: string };
+  /** §12.3–12.4: «Напомнить» / «Напомнить всем» are open for this day and viewer */
+  can_remind?: boolean;
+}
+
+/** §12: what a reminder did — reached, not delivered (with the reason), skipped (already marked / reminded just now) */
+export interface RemindResult {
+  sent: number;
+  failed: { user_id: number; name: string; error: string | null }[];
+  skipped: { user_id: number; name: string; why: string }[];
+  repeat: boolean;
 }
 
 /** ТЗ 12.4: a week below the norm of work days, waiting for «штраф» or «оправдание». */
@@ -1332,20 +1355,24 @@ export const api = {
   /** ТЗ 27.10 §11: a person without a username — the bot sends a card with a link to the profile */
   profileLink: (telegram_id: number) => post<{ sent: boolean; opens: boolean | null; bot_username: string | null }>("/api/profile-link", { telegram_id }),
   work: () => request<{ items: { product: Product; title: string }[] }>("/api/work"),
-  alice: () => request<{ task: AliceTask | null; has_qr: boolean; stats: AliceStats; history: AliceTask[] }>("/api/work/alice"),
-  aliceStart: (key: string) => post<{ task: AliceTask; stats: AliceStats }>("/api/work/alice/start", { idempotency_key: key }),
-  aliceScanned: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/scanned`, {}),
-  alicePhoto: (id: number, stage: number, photo: Blob) =>
-    request<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/photo/${stage}`,
+  /** «Работа» → «Яндекс Алиса» / «Яндекс Плюс»: one set of calls, the product in the path */
+  alice: (p: Product = "alice") =>
+    request<{ task: AliceTask | null; has_qr: boolean; stats: AliceStats; history: AliceTask[] }>(`/api/work/${p}`),
+  aliceStart: (key: string, p: Product = "alice") =>
+    post<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/start`, { idempotency_key: key }),
+  aliceScanned: (id: number, p: Product = "alice") => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/scanned`, {}),
+  alicePhoto: (id: number, stage: number, photo: Blob, p: Product = "alice") =>
+    request<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/photo/${stage}`,
       { method: "PUT", body: photo, headers: { "Content-Type": photo.type || "image/jpeg" } }),
-  aliceDropPhoto: (id: number, stage: number) =>
-    request<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/photo/${stage}`, { method: "DELETE" }),
-  aliceNext: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/next`, {}),
-  aliceGoto: (id: number, stage: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/goto/${stage}`, {}),
-  aliceFinish: (id: number, key: string) =>
-    post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/finish`, { idempotency_key: key }),
-  aliceRetry: (id: number) => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/alice/${id}/retry`, {}),
-  aliceAbandon: (id: number) => post<{ task: AliceTask | null }>(`/api/work/alice/${id}/abandon`, {}),
+  aliceDropPhoto: (id: number, stage: number, p: Product = "alice") =>
+    request<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/photo/${stage}`, { method: "DELETE" }),
+  aliceNext: (id: number, p: Product = "alice") => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/next`, {}),
+  aliceGoto: (id: number, stage: number, p: Product = "alice") =>
+    post<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/goto/${stage}`, {}),
+  aliceFinish: (id: number, key: string, p: Product = "alice") =>
+    post<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/finish`, { idempotency_key: key }),
+  aliceRetry: (id: number, p: Product = "alice") => post<{ task: AliceTask; stats: AliceStats }>(`/api/work/${p}/${id}/retry`, {}),
+  aliceAbandon: (id: number, p: Product = "alice") => post<{ task: AliceTask | null }>(`/api/work/${p}/${id}/abandon`, {}),
   myFinances: () => request<{ summary: MoneySummary; items: Tx[] }>("/api/me/finances"),
   week: (offset: number) => request<Week>(`/api/schedule/week?offset=${offset}`),
   history: (weeksBack = 12) =>
@@ -1368,16 +1395,18 @@ export const api = {
     post<{ ok: boolean }>(`/api/shifts/${id}/contact-admin`, { text, idempotency_key: key }),
 
   admin: {
-    alice: () => request<{ forum: { chat_id: number; title: string | null } | null; counts: Partial<Record<AliceStatus, number>>;
-      people: { id: number; name: string }[]; rate: number }>("/api/admin/alice"),
-    aliceQueue: (q: { status?: string; user_id?: number; qr_id?: number; from?: string; to?: string }) =>
+    alice: (p: Product = "alice") => request<{ forum: { chat_id: number; title: string | null } | null;
+      counts: Partial<Record<AliceStatus, number>>; people: { id: number; name: string }[]; rate: number; title: string;
+      command: string }>(`/api/admin/alice?product=${p}`),
+    aliceQueue: (q: { status?: string; user_id?: number; qr_id?: number; from?: string; to?: string; product?: Product }) =>
       request<{ items: AliceTask[] }>(`/api/admin/alice/queue?${new URLSearchParams(
         Object.entries(q).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]))}`),
     aliceDecide: (id: number, approve: boolean, reason: string | null, key: string) =>
       post<{ task: AliceTask }>(`/api/admin/alice/${id}/decide`, { approve, reason, idempotency_key: key }),
-    aliceQrs: (archived = false) => request<{ items: AliceQr[] }>(`/api/admin/alice/qr?archived=${archived}`),
-    aliceQrCreate: (image: Blob, number: string, key: string) =>
-      upload<{ items: AliceQr[] }>(`/api/admin/alice/qr?idempotency_key=${encodeURIComponent(key)}&number=${encodeURIComponent(number)}`, image),
+    aliceQrs: (archived = false, p: Product = "alice") =>
+      request<{ items: AliceQr[] }>(`/api/admin/alice/qr?archived=${archived}&product=${p}`),
+    aliceQrCreate: (image: Blob, number: string, key: string, p: Product = "alice") =>
+      upload<{ items: AliceQr[] }>(`/api/admin/alice/qr?idempotency_key=${encodeURIComponent(key)}&number=${encodeURIComponent(number)}&product=${p}`, image),
     aliceQrImage: (id: number, image: Blob, key: string) =>
       request<{ items: AliceQr[] }>(`/api/admin/alice/qr/${id}/image?idempotency_key=${encodeURIComponent(key)}`,
         { method: "PUT", body: image, headers: { "Content-Type": image.type || "image/jpeg" } }),
@@ -1389,13 +1418,13 @@ export const api = {
     aliceQueries: () => request<{ items: string[] }>("/api/admin/alice/queries"),
     aliceSetQueries: (text: string, key: string) =>
       request<{ items: string[] }>("/api/admin/alice/queries", { method: "PUT", body: JSON.stringify({ text, idempotency_key: key }) }),
-    aliceStats: (from: string, to: string) => request<{ total: AliceCounts; people: ({ user_id: number; name: string } & AliceCounts)[];
+    aliceStats: (from: string, to: string, p: Product = "alice") => request<{ total: AliceCounts; people: ({ user_id: number; name: string } & AliceCounts)[];
       qrs: ({ qr_id: number; number: string | null } & AliceCounts)[]; days: ({ date: string } & AliceCounts)[] }>(
-      `/api/admin/alice/stats?from=${from}&to=${to}`),
-    alicePayoutPreview: (body: { date_from: string; date_to: string; confirmed: Record<number, number> }) =>
+      `/api/admin/alice/stats?from=${from}&to=${to}&product=${p}`),
+    alicePayoutPreview: (body: { date_from: string; date_to: string; confirmed: Record<number, number>; product?: Product }) =>
       post<AliceReconcile>("/api/admin/alice/payout/preview", body),
     alicePayoutCommit: (body: { title: string; date_from: string; date_to: string; confirmed: Record<number, number>;
-      proof_media: string[] }, key: string) =>
+      proof_media: string[]; product?: Product }, key: string) =>
       post<{ batch: PayoutBatch; bank_text: string }>("/api/admin/alice/payout/commit", { ...body, idempotency_key: key }),
     userProducts: (userId: number) => request<{ items: { product: Product; title: string; active: boolean }[];
       history: { product: Product; title: string; granted_at: string; granted_by: string | null; revoked_at: string | null;
@@ -1506,7 +1535,7 @@ export const api = {
     },
     financeSummary: () => request<{ people: MoneyPerson[]; pending: Tx[]; drafts: Tx[] }>("/api/admin/finances/summary"),
     /** fines in units (ТЗ 27.10 §19), bonuses and deductions in rubles */
-    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, value: { amount?: number; units?: number; product?: "alice";
+    createTx: (user_id: number, type: Exclude<TxType, "payout_offset">, value: { amount?: number; units?: number; product?: Product;
       alice_task_id?: number | null }, reason: string,
                key: string, media_file_id: string | null = null) =>
       post<{ tx: Tx; changed: boolean }>("/api/admin/finances", { user_id, type, ...value, reason, media_file_id, idempotency_key: key }),
@@ -1653,6 +1682,8 @@ export const api = {
     scanViolations: () => post<{ created: number }>("/api/admin/violations/scan", {}),
     fineUnmarked: (day: string, body: { user_id: number; units: number; comment: string; media_files: string[] }, key: string) =>
       post<{ violation: Violation; changed: boolean }>(`/api/admin/day/${day}/fine`, { ...body, idempotency_key: key }),
+    dayRemind: (day: string, body: { user_ids?: number[]; all?: boolean }, key: string) =>
+      post<RemindResult>(`/api/admin/day/${day}/remind`, { ...body, idempotency_key: key }),
     fineViolation: (id: number, body: { units: number; comment: string; media_files: string[] }, key: string) =>
       post<{ violation: Violation; changed: boolean }>(`/api/admin/violations/${id}/fine`, { ...body, idempotency_key: key }),
     waiveViolation: (id: number, body: { comment: string; media_files: string[] }, key: string) =>

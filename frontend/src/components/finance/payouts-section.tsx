@@ -25,13 +25,15 @@ const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline
 /** Payout registry (ТЗ модуль 10): history and the three-step wizard. Owners only. */
 export function PayoutsSection() {
   const list = useLoad(() => api.admin.payouts(), []);
-  const [mode, setMode] = useState<"list" | "new" | "alice" | number>("list");
+  const [mode, setMode] = useState<"list" | "new" | "alice" | "plus" | number>("list");
   const [archive, setArchive] = useState(false);
 
   if (mode === "new" && list.data) {
     return <Wizard defaults={list.data.rates} onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
   }
-  if (mode === "alice") return <AlicePayout onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
+  if (mode === "alice" || mode === "plus") {
+    return <AlicePayout key={mode} product={mode} onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
+  }
   if (typeof mode === "number") return <BatchView id={mode} onBack={async () => { await list.reload(); setMode("list"); }} />;
   const shown = (list.data?.items ?? []).filter((b) => (b.status === "annulled") === archive);
 
@@ -50,6 +52,10 @@ export function PayoutsSection() {
         <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
                 disabled={!list.data} onClick={() => { tapHaptic(); setMode("alice"); }}>
           По «Алисе»
+        </Button>
+        <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
+                disabled={!list.data} onClick={() => { tapHaptic(); setMode("plus"); }}>
+          По «Яндекс Плюсу»
         </Button>
       </section>
       <div className="flex gap-1 rounded-2xl bg-card p-1 shadow-lift">
@@ -73,7 +79,7 @@ export function PayoutsSection() {
                   <span className="min-w-0 flex-1">
                     <span className="flex min-w-0 items-center gap-2">
                       <span className="truncate font-medium">
-                        №{b.id} {b.title}{b.product === "alice" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· Алиса</span>}
+                        №{b.id} {b.title}{b.product && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· {b.product === "plus" ? "Яндекс Плюс" : "Алиса"}</span>}
                       </span>
                       {/* §27: the shared scale — a fixed payout is done (green), an annulled one is archive (grey) */}
                       <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold",
@@ -516,8 +522,8 @@ function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
   if (!data) return <Skeleton className="h-80 rounded-3xl" />;
   const b = data.batch;
   const annulled = b.status === "annulled";
-  if (editing && b.product === "alice") {
-    return <AlicePayout edit={{ id: b.id, title: b.title, from: b.period_from, to: b.period_to,
+  if (editing && (b.product === "alice" || b.product === "plus")) {
+    return <AlicePayout product={b.product} edit={{ id: b.id, title: b.title, from: b.period_from, to: b.period_to,
       confirmed: (b.rates as unknown as { confirmed?: Record<string, number> }).confirmed ?? {} }}
                         onClose={async () => { setEditing(false); await reload(); }} />;
   }
@@ -560,7 +566,7 @@ function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
           </p>
         )}
       </section>
-      {editing && b.product !== "alice" && (
+      {editing && !b.product && (
         <EditPeople b={b} onDone={async (res) => { setEditing(false); if (res) setData(res); }} />
       )}
       <AnnulDialog open={annulling} batch={b} onClose={() => setAnnulling(false)}
@@ -663,7 +669,7 @@ function AnnulDialog({ open, batch, onClose, onDone }: { open: boolean; batch: P
           <AlertDialogTitle className="font-display">Аннулировать выплату №{batch.id}?</AlertDialogTitle>
           <AlertDialogDescription>
             Выплата получит статус «Аннулирована» и уйдёт в «Архив» со всей историей. Удержанные штрафы и вычеты снова станут
-            долгом, копилка налога на лень вернётся{batch.product === "alice" ? ", задания «Алисы» снова будут ждать оплаты" : ""}.
+            долгом, копилка налога на лень вернётся{batch.product === "alice" ? ", задания «Алисы» снова будут ждать оплаты" : batch.product === "plus" ? ", задания «Яндекс Плюса» снова будут ждать оплаты" : ""}.
             Аннулировать можно только последнюю выплату этих людей.
           </AlertDialogDescription>
         </AlertDialogHeader>

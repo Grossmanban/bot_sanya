@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from html import escape
 
 from aiogram import Bot
@@ -1208,36 +1208,45 @@ class Notifier:
         await self.archive(["доступ"], f"🧰 {who(user)}: «{title}» — {'доступ выдан' if allow else 'доступ закрыт'}"
                                        f"\nИзменил: {who(actor)}", user)
 
-    async def alice_qr_changed(self, user: dict, on: bool) -> None:
-        await self.send(user["telegram_id"], "🔳 Вам назначен QR-код для «Алисы» — можно начинать выполнения."
-                        if on else "🔳 QR-код для «Алисы» с вас снят. Новый назначит администратор.")
+    async def alice_qr_changed(self, user: dict, on: bool, product: str = "alice") -> None:
+        from . import alice
+
+        of = alice.KINDS[product]["of"]
+        await self.send(user["telegram_id"], f"🔳 Вам назначен QR-код для {of} — можно начинать выполнения."
+                        if on else f"🔳 QR-код для {of} с вас снят. Новый назначит администратор.")
 
     async def alice_decided(self, task: dict) -> None:
-        """§21: «Алиса #152 — Принято» — the product, the number and the status, and where to look."""
+        """§21: «Алиса #152 — Принято» — the product, the number and the status, and where to look («Яндекс Плюс» —
+        its own name)."""
         from . import alice
 
         user = svc.get_user(self.conn, task["user_id"])
-        where = "\nСтатус — в приложении: «Работа» → «Алиса»."
+        subject, end = alice.your(task)
+        place = "Алиса" if (task.get("product") or "alice") == "alice" else "Яндекс Плюс"
+        where = f"\nСтатус — в приложении: «Работа» → «{place}»."
         if task["status"] == "accepted":
-            text = (f"✅ Ваша {alice.title(task['id'])} — принята, ожидает оплаты. "
+            text = (f"✅ {subject} — принят{end}, ожидает оплаты. "
                     "Оплата — после подтверждения Яндекса." + where)
         else:
             reason = f"\nПричина: {escape(task['reject_reason'])}" if task["reject_reason"] else ""
-            text = f"❌ Ваша {alice.title(task['id'])} — отклонена администратором и не оплачивается.{reason}" + where
+            text = f"❌ {subject} — отклонен{end} администратором и не оплачивается.{reason}" + where
         await self.send(user["telegram_id"], text, _open_app())
 
     async def alice_paid(self, batch: dict) -> None:
         from . import alice
 
+        product = batch.get("product") or "alice"
+        name, place = ("«Алиса»", "«Алиса»") if product == "alice" else ("«Яндекс Плюс»", "«Яндекс Плюс»")
         for it in batch["items"]:
             user = svc.get_user(self.conn, it["user_id"])
             ids = [r[0] for r in self.conn.execute("SELECT id FROM alice_tasks WHERE payout_id = ? AND user_id = ? ORDER BY id",
                                                    (batch["id"], it["user_id"]))]
             numbers = ", ".join(alice.number(i) for i in ids[:30]) + ("…" if len(ids) > 30 else "")
-            await self.send(user["telegram_id"], f"💰 «Алиса» — оплачено: {numbers} ({it['personal_volume']} шт.), {it['total']} ₽."
-                                                 "\nСтатус — в приложении: «Работа» → «Алиса».")
-        await self.archive(["выплата", "алиса"], f"💰 Выплата «{escape(batch['title'])}» по «Алисе»: "
-                                                 f"{len(batch['items'])} чел., {batch['total']} ₽")
+            await self.send(user["telegram_id"], f"💰 {name} — оплачено: {numbers} ({it['personal_volume']} шт.), {it['total']} ₽."
+                                                 f"\nСтатус — в приложении: «Работа» → {place}.")
+        await self.archive(["выплата", "алиса" if product == "alice" else "плюс"],
+                           f"💰 Выплата «{escape(batch['title'])}» по {'«Алисе»' if product == 'alice' else '«Яндекс Плюсу»'}: "
+                           f"{len(batch['items'])} чел., {batch['total']} ₽")
 
     async def alice_deleted(self, task: dict, actor: dict) -> None:
         """§23: the executor is told; a part that didn't work (archive, the group) is reported to the admins."""
@@ -1245,14 +1254,15 @@ class Notifier:
 
         user = svc.get_user(self.conn, task["user_id"])
         why = f"\nПричина: {escape(task['delete_reason'])}" if task["delete_reason"] else ""
-        await self.send(user["telegram_id"], f"🗑 Ваша {alice.title(task['id'])} удалена администратором.{why}")
+        subject, end = alice.your(task)
+        await self.send(user["telegram_id"], f"🗑 {subject} удален{end} администратором.{why}")
         problems = []
         if task["archive_state"] != "done":
             problems.append("фото не попали в «Архив» (подключён ли архивный чат?)")
         if task["unpublish_state"] == "failed":
             problems.append("публикация не удалена из темы (нужно право бота «Удаление сообщений»)")
         if problems:
-            await self.send(actor["telegram_id"], f"⚠️ {alice.title(task['id'])} удалена, но: " + "; ".join(problems)
+            await self.send(actor["telegram_id"], f"⚠️ {alice.title_of(task)} — удалено, но: " + "; ".join(problems)
                             + ". Нажмите «Удалить» ещё раз — бот повторит только то, что не получилось.")
 
     async def payout_changed(self, before: dict, batch: dict, actor: dict) -> None:
@@ -1556,10 +1566,12 @@ class Notifier:
             await self.fine_requested(tx, actor)
             return
         if tx["type"] == "fine":
+            name = "«Яндекс Плюс»" if tx.get("product") == "plus" else "«Алису»"
             what = ("" if not tx.get("product") else
-                    f" за «Алису»{' #' + str(tx['alice_task_id']) if tx.get('alice_task_id') else ''}")
+                    f" за {name}{' #' + str(tx['alice_task_id']) if tx.get('alice_task_id') else ''}")
             await self.send(user["telegram_id"], f"💸 Вам назначен штраф{what}: {finance.units_text(tx)}.\nПричина: {reason}")
-            tags, line = (["штраф", "алиса"] if tx.get("product") else ["штраф"]), f"💸 ШТРАФ{what.upper()} {finance.staff_text(tx)}"
+            tags = (["штраф", "плюс" if tx.get("product") == "plus" else "алиса"] if tx.get("product") else ["штраф"])
+            line = f"💸 ШТРАФ{what.upper()} {finance.staff_text(tx)}"
         elif tx["type"] == "bonus":
             await self.send(user["telegram_id"], f"🎁 Вам начислен бонус {amount} ₽.\nЗа что: {reason}")
             tags, line = ["бонус"], f"🎁 БОНУС {amount} ₽"
@@ -1652,6 +1664,36 @@ class Notifier:
             sent += await self.send(u["telegram_id"], text, _open_schedule())
             await asyncio.sleep(0.05)
         return sent
+
+    async def remind_unmarked(self, people: list[dict], day: date, deadline: dict) -> tuple[list[int], list[dict]]:
+        """ТЗ «Яндекс Плюс» §12.3–12.4: a personal reminder from «Смены» → «День» to someone who has neither a shift nor
+        a day off on `day`: the date and the deadline by the real rules. One failed delivery never stops the others.
+        Returns (ids reached, [{user_id, name, error}])."""
+        today = now_local().date()
+        which = "на завтра" if day == today + timedelta(days=1) else "на сегодня" if day == today else "на этот день"
+        if deadline["passed"]:
+            when = ("Срок отметки уже прошёл — отметьтесь как можно скорее. Если не отметиться, может быть начислен "
+                    "штраф согласно действующим правилам.")
+        else:
+            on = "сегодняшнего дня" if deadline["day"] == today.isoformat() else ddmm(date.fromisoformat(deadline["day"]))
+            when = (f"Пожалуйста, сделайте это до {deadline['time']} {on}. Если вы не отметитесь в установленный срок, "
+                    "может быть начислен штраф согласно действующим правилам.")
+        text = (f"🗓 <b>Напоминаем:</b> необходимо указать рабочую смену или отметить выходной {which} ({ddmm_wd(day)}).\n\n"
+                f"{when}\n\nОткройте раздел «График» и выберите рабочую смену или выходной.")
+        reached, failed = [], []
+        for u in people:
+            try:
+                ok = await self.send(u["telegram_id"], text, _open_schedule())
+            except Exception as exc:  # noqa: BLE001 — one person's failure is reported, the rest still get it
+                ok, error = False, str(exc)[:120]
+            else:
+                error = None if ok else "Telegram не доставил: человек не запускал бота или заблокировал его"
+            if ok:
+                reached.append(u["id"])
+            else:
+                failed.append({"user_id": u["id"], "name": svc.full_name(u), "error": error})
+            await asyncio.sleep(0.03)
+        return reached, failed
 
     async def violations_found(self, created: list[dict]) -> None:
         """Monday check: managers learn who fell below the norm; each decides in «Дисциплина»."""

@@ -69,6 +69,7 @@ export const SECTION_COUNTS: Record<string, (keyof ReportCounts)[]> = {
   day: ["urgent", "unmarked"],
   events: ["events_pending"],
   alice: ["alice_moderation", "alice_failed"],
+  plus: ["plus_moderation", "plus_failed"],
 };
 
 export function sectionCount(c: ReportCounts | null, section: string): number {
@@ -85,6 +86,7 @@ export const PENDING_LABELS: [keyof ReportCounts, string][] = [
   ["payment_changes", "💳 Изменения реквизитов"], ["urgent", "⚡ Срочные заявки на сегодня"],
   ["unmarked", "🗓 Не отметили день (сегодня, завтра)"], ["events_pending", "🏁 Заявки в событиях"],
   ["alice_moderation", "📸 «Алиса»: на модерации"], ["alice_failed", "📸 «Алиса»: не отправлено"],
+  ["plus_moderation", "📸 «Яндекс Плюс»: на модерации"], ["plus_failed", "📸 «Яндекс Плюс»: не отправлено"],
 ];
 
 /** Which admin section decides a given count. */

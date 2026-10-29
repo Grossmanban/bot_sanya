@@ -18,7 +18,7 @@ from .timeutil import today_local
 KEYS = ("review", "no_show", "actual_missing", "actual_overdue", "fines_pending", "fines_draft", "violations",
         "registrations", "onboarding_new", "internship_review", "training_requests", "profile_changes", "payment_changes",
         "urgent", "unmarked", "events_pending",
-        "alice_moderation", "alice_failed")
+        "alice_moderation", "alice_failed", "plus_moderation", "plus_failed")
 ALICE_GIVE_UP = 20  # alice.deliver stops retrying after this many attempts
 
 
@@ -95,9 +95,12 @@ def counts(conn: sqlite3.Connection, viewer: dict, today: date | None = None) ->
         # ТЗ 29.10 §5: today and tomorrow (each person-day once; with a violation it is «Дисциплина»'s)
         out["unmarked"] = len(unmarked(conn, viewer, today)) + len(unmarked(conn, viewer, today + timedelta(days=1)))
     if perms.can(viewer, "alice"):
-        out["alice_moderation"] = conn.execute("SELECT COUNT(*) FROM alice_tasks WHERE status = 'moderation'").fetchone()[0]
-        out["alice_failed"] = conn.execute(
-            "SELECT COUNT(*) FROM alice_tasks WHERE status = 'send_failed' AND send_attempts >= ?", (ALICE_GIVE_UP,)).fetchone()[0]
+        for product in ("alice", "plus"):  # ТЗ «Яндекс Плюс»: each product's queue is counted on its own
+            out[f"{product}_moderation"] = conn.execute(
+                "SELECT COUNT(*) FROM alice_tasks WHERE product = ? AND status = 'moderation'", (product,)).fetchone()[0]
+            out[f"{product}_failed"] = conn.execute(
+                "SELECT COUNT(*) FROM alice_tasks WHERE product = ? AND status = 'send_failed' AND send_attempts >= ?",
+                (product, ALICE_GIVE_UP)).fetchone()[0]
     out["total"] = sum(out[k] for k in KEYS)
     return out
 
@@ -128,7 +131,8 @@ LABELS = {
     "internship_review": "🎯 Стажировки на проверку", "training_requests": "⏳ Обучение: ожидает согласования",
     "profile_changes": "🪪 Изменения профилей", "payment_changes": "💳 Изменения реквизитов", "actual_missing": "📊 Дни без общего факта",
     "actual_overdue": "📊 Просрочено без общего факта", "alice_moderation": "📸 «Алиса»: на модерации",
-    "alice_failed": "📸 «Алиса»: не отправлено",
+    "alice_failed": "📸 «Алиса»: не отправлено", "plus_moderation": "📸 «Яндекс Плюс»: на модерации",
+    "plus_failed": "📸 «Яндекс Плюс»: не отправлено",
 }
 
 

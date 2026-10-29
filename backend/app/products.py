@@ -13,7 +13,9 @@ from .db import transaction
 from .services import ServiceError, _check_key, _fresh_actor, _seen, log_event
 from .timeutil import now_iso
 
-PRODUCTS = {"alice": "Яндекс Алиса"}
+# ТЗ «Яндекс Плюс»: a separate product with its own access, QR codes and photo-report group; the mechanics are
+# those of «Алиса» (alice.py serves both)
+PRODUCTS = {"alice": "Яндекс Алиса", "plus": "Яндекс Плюс"}
 
 
 def check_product(product: str | None) -> str | None:
@@ -34,6 +36,24 @@ def has(conn: sqlite3.Connection, user: dict | None, product: str | None) -> boo
         return False
     return conn.execute("SELECT 1 FROM product_access WHERE user_id = ? AND product = ? AND revoked_at IS NULL",
                         (user["id"], product)).fetchone() is not None
+
+
+def manageable(conn: sqlite3.Connection, actor: dict | None) -> list[str]:
+    """ТЗ «Яндекс Плюс» §11: products the actor may tie goals, events and the like to. Those who hand out access to
+    products (owner, admins) — every product; anyone else (trainers, instructors) — only the products they have access
+    to themselves."""
+    if actor is None or not perms.is_staff(actor):
+        return []
+    if perms.can(actor, "products"):
+        return list(PRODUCTS)
+    mine = set(of_user(conn, actor["id"]))  # is_staff: approved and not blocked
+    return [p for p in PRODUCTS if p in mine]
+
+
+def require_manageable(conn: sqlite3.Connection, actor: dict, product: str | None) -> None:
+    """The server's side of §11: a product the actor can't manage is refused even in a hand-made request."""
+    if product is not None and product not in manageable(conn, actor):
+        raise ServiceError(f"Нет доступа к продукту «{PRODUCTS[product]}» — выбрать его нельзя", 403, "no_product_access")
 
 
 def require(conn: sqlite3.Connection, user: dict, product: str) -> None:

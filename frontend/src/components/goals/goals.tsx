@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, ApiError, PRODUCT_TITLES, type Goal, type GoalChanges, type Product, type User } from "@/lib/api";
-import { useCan } from "@/lib/caps";
+import { useCan, useManageableProducts } from "@/lib/caps";
 import { addDays, dayMonth, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -291,6 +291,8 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
   // ТЗ 27.10 §29: a product's goal; people without access → the server asks, the admin may grant it here
   const [product, setProduct] = useState<Product | "">(initial?.product ?? "");
   const [grantAsk, setGrantAsk] = useState<string | null>(null);
+  // ТЗ «Яндекс Плюс» §11: only the products this person may manage are offered (the server checks again)
+  const allowed = useManageableProducts();
   const { busy, run } = useAction();
   const kinds: Goal["kind"][] = everyone ? ["team", "network", "group", "point", "personal"] : ["network", "group", "personal"];
   const people = (users.data?.items ?? []).filter((u) => u.id !== me.id);
@@ -357,10 +359,10 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
           ))}
         </div>
       )}
-      {!editing && kind !== "point" && (
+      {!editing && kind !== "point" && allowed.length > 0 && (
         <select aria-label="Что считаем" className={field} value={product} onChange={(e) => setProduct(e.target.value as Product | "")}>
           <option value="">Считаем штуки смен</option>
-          {(Object.keys(PRODUCT_TITLES) as Product[]).map((p) => (
+          {(Object.keys(PRODUCT_TITLES) as Product[]).filter((p) => allowed.includes(p)).map((p) => (
             <option key={p} value={p}>Считаем принятые выполнения «{PRODUCT_TITLES[p]}»</option>
           ))}
         </select>

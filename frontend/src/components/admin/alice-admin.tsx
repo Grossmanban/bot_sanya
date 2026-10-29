@@ -9,7 +9,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type AliceCounts, type AliceQr, type AliceTask } from "@/lib/api";
+import { api, PRODUCT_TITLES, type AliceCounts, type AliceQr, type AliceTask, type Product } from "@/lib/api";
 import { compressImage } from "@/lib/image";
 import { addDays } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
@@ -25,45 +25,48 @@ const STATUSES: [string, string][] = [
   ["send_failed", "Не отправлено"], ["yandex_rejected", "Отклонено Яндексом"], ["deleted", "Удалённые"], ["", "Все"],
 ];
 
-/** ТЗ 27.10 §32–40: moderation, QR codes, search queries, statistics of «Яндекс Алиса». */
-export function AliceAdmin() {
-  const info = useLoad(() => api.admin.alice(), []);
+/** ТЗ 27.10 §32–40: moderation, QR codes, search queries, statistics of «Яндекс Алиса»; ТЗ «Яндекс Плюс»: the same
+ * section for «Яндекс Плюс» — its own QR codes, queue, statistics and group, one photo per task, no search queries. */
+export function AliceAdmin({ product = "alice" }: { product?: Product }) {
+  const info = useLoad(() => api.admin.alice(product), [product]);
   const [tab, setTab] = useState<Tab>("queue");
+  const command = info.data?.command ?? (product === "alice" ? "/alice_here" : "/plus_here");
+  const tabs: [Tab, string][] = [["queue", `Модерация${info.data?.counts.moderation ? ` · ${info.data.counts.moderation}` : ""}`],
+    ["qr", "QR-коды"], ...(product === "alice" ? [["queries", "Запросы"] as [Tab, string]] : []), ["stats", "Статистика"]];
   return (
     <div className="space-y-4">
       <section className="rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
-        <h2 className="font-display text-xl font-semibold">Яндекс Алиса</h2>
+        <h2 className="font-display text-xl font-semibold">{PRODUCT_TITLES[product]}</h2>
         <p className="mt-1.5 text-[15px] text-hero-muted">
           {info.data?.forum
             ? `Фотоотчёты уходят в группу «${info.data.forum.title ?? "форум"}», у каждого сотрудника своя тема.`
-            : "Группа для фотоотчётов не подключена: создайте группу с темами, сделайте бота администратором (право «Управление темами») и отправьте там /alice_here от владельца."}
+            : `Группа для фотоотчётов не подключена: создайте отдельную группу с темами, сделайте бота администратором (право «Управление темами») и отправьте там ${command} от владельца.`}
           {" "}Доступ к продукту выдаётся в карточке сотрудника («Команда»).
         </p>
       </section>
-      <div className="grid grid-cols-4 rounded-2xl bg-muted p-1">
-        {([["queue", `Модерация${info.data?.counts.moderation ? ` · ${info.data.counts.moderation}` : ""}`], ["qr", "QR-коды"],
-          ["queries", "Запросы"], ["stats", "Статистика"]] as [Tab, string][]).map(([t, label]) => (
+      <div className={cn("grid rounded-2xl bg-muted p-1", tabs.length === 4 ? "grid-cols-4" : "grid-cols-3")}>
+        {tabs.map(([t, label]) => (
           <button key={t} onClick={() => setTab(t)}
                   className={cn("press h-10 rounded-xl text-xs font-semibold sm:text-sm", tab === t ? "bg-card shadow-lift" : "text-muted-foreground")}>
             {label}
           </button>
         ))}
       </div>
-      {tab === "queue" && <Queue people={info.data?.people ?? []} onChanged={info.reload} />}
-      {tab === "qr" && <Qrs people={info.data?.people ?? []} />}
-      {tab === "queries" && <Queries />}
-      {tab === "stats" && <Stats />}
+      {tab === "queue" && <Queue key={product} product={product} people={info.data?.people ?? []} onChanged={info.reload} />}
+      {tab === "qr" && <Qrs key={product} product={product} people={info.data?.people ?? []} />}
+      {tab === "queries" && product === "alice" && <Queries />}
+      {tab === "stats" && <Stats key={product} product={product} />}
     </div>
   );
 }
 
-function Queue({ people, onChanged }: { people: { id: number; name: string }[]; onChanged: () => void }) {
+function Queue({ product, people, onChanged }: { product: Product; people: { id: number; name: string }[]; onChanged: () => void }) {
   const [status, setStatus] = useState("moderation");
   const [userId, setUserId] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const { data, setData } = useLoad(() => api.admin.aliceQueue({ status, user_id: userId ? Number(userId) : undefined,
-    from: from || undefined, to: to || undefined }), [status, userId, from, to]);
+    from: from || undefined, to: to || undefined, product }), [status, userId, from, to, product]);
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap gap-2">
@@ -114,12 +117,13 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
             </button>
           </p>
           <p className="text-xs text-muted-foreground">
-            {when.slice(8, 10)}.{when.slice(5, 7)} {when.slice(11, 16)} · {task.qr_label ?? `QR ${task.qr_number ?? task.qr_id}`} · запрос «{task.query}»
+            {when.slice(8, 10)}.{when.slice(5, 7)} {when.slice(11, 16)} · {task.qr_label ?? `QR ${task.qr_number ?? task.qr_id}`}
+            {task.query ? ` · запрос «${task.query}»` : ""}
           </p>
         </div>
         <StatusChip task={task} />
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      <div className={cn("grid gap-2", task.stages.length > 1 ? "grid-cols-3" : "max-w-[60%] grid-cols-1")}>
         {task.stages.map((s) => (
           <figure key={s.stage} className="space-y-1">
             {s.photo_url ? (
@@ -128,7 +132,7 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
                 <img src={s.photo_url} alt={s.title} className="aspect-[3/4] w-full rounded-xl bg-muted object-cover" />
               </button>
             ) : <div className="aspect-[3/4] rounded-xl bg-muted" />}
-            <figcaption className="text-[11px] leading-tight text-muted-foreground">{s.stage}. {s.title}</figcaption>
+            <figcaption className="text-[11px] leading-tight text-muted-foreground">{task.stages.length > 1 ? `${s.stage}. ` : ""}{s.title}</figcaption>
           </figure>
         ))}
       </div>
@@ -136,7 +140,7 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
       {big && <img src={big} alt="Фото крупно" className="w-full rounded-2xl bg-muted object-contain" onClick={() => setBig(null)} />}
       {!!task.duplicates?.length && (
         <p className="flex items-center gap-1.5 text-sm text-wait">
-          <AlertTriangle className="size-4 shrink-0" /> Такое же фото уже было в {task.duplicates.map((d) => `Алиса #${d}`).join(", ")}
+          <AlertTriangle className="size-4 shrink-0" /> Такое же фото уже было в {task.duplicates.map((d) => `#${d}`).join(", ")}
         </p>
       )}
       {task.reject_reason && <p className="text-sm text-cancel">Причина отказа: {task.reject_reason}</p>}
@@ -156,9 +160,9 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
       )}
       {task.status === "moderation" && (rejecting ? (
         <div className="space-y-2">
-          <ReasonChips kind="alice_reject" value={reason} onPick={setReason} />
+          <ReasonChips kind={task.product === "plus" ? "plus_reject" : "alice_reject"} value={reason} onPick={setReason} />
           <textarea rows={2} autoFocus value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)}
-                    placeholder="Причина (по желанию): например, не видно запроса"
+                    placeholder={task.product === "plus" ? "Причина (по желанию): например, не видно подписки" : "Причина (по желанию): например, не видно запроса"}
                     className="w-full resize-none rounded-xl border-0 bg-muted px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-ring/25" />
           <div className="grid grid-cols-2 gap-2">
             <Button variant="secondary" className="press h-10 rounded-xl" onClick={() => setRejecting(false)}>Отмена</Button>
@@ -181,9 +185,9 @@ function TaskCard({ task, onDone }: { task: AliceTask; onDone: (t: AliceTask) =>
   );
 }
 
-function Qrs({ people }: { people: { id: number; name: string }[] }) {
+function Qrs({ product, people }: { product: Product; people: { id: number; name: string }[] }) {
   const [archived, setArchived] = useState(false);
-  const { data, setData } = useLoad(() => api.admin.aliceQrs(archived), [archived]);
+  const { data, setData } = useLoad(() => api.admin.aliceQrs(archived, product), [archived, product]);
   const { busy, run } = useAction();
   const [number, setNumber] = useState("");
   const file = useRef<HTMLInputElement>(null);
@@ -191,7 +195,7 @@ function Qrs({ people }: { people: { id: number; name: string }[] }) {
   async function create(f: File) {
     try {
       const blob = await compressImage(f, 1200, 0.92);
-      const res = await run("create", (k) => api.admin.aliceQrCreate(blob, number.trim(), k), "QR-код добавлен");
+      const res = await run("create", (k) => api.admin.aliceQrCreate(blob, number.trim(), k, product), "QR-код добавлен");
       if (res) {
         setData(res);
         setNumber("");
@@ -204,13 +208,13 @@ function Qrs({ people }: { people: { id: number; name: string }[] }) {
   return (
     <div className="space-y-3">
       <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift">
-        <h3 className="font-semibold">Новый QR-код</h3>
+        <h3 className="font-semibold">Новый QR-код «{PRODUCT_TITLES[product]}»</h3>
         <p className="text-sm text-muted-foreground">
           Один QR можно назначить нескольким сотрудникам; у сотрудника — один QR. В каждом выполнении сохраняется QR, с которым
           его начали, — смена назначения историю не переписывает.
         </p>
         <div className="flex flex-wrap gap-2">
-          <input className={cn(field, "min-w-0 flex-1 basis-40")} placeholder="Номер (по желанию)" value={number} maxLength={30}
+          <input className={cn(field, "min-w-0 flex-1 basis-40")} placeholder="Название или номер (по желанию)" value={number} maxLength={60}
                  onChange={(e) => setNumber(e.target.value)} />
           <Button className="press h-10 rounded-xl" disabled={!!busy} onClick={() => file.current?.click()}>
             {busy === "create" ? <LoaderCircle className="animate-spin" /> : <ImageUp />} Загрузить картинку
@@ -360,11 +364,11 @@ function Queries() {
 const LABELS: [keyof AliceCounts, string][] = [["completed", "Завершено"], ["moderation", "Модерация"], ["rejected", "Отклонено"],
   ["accepted", "Ждёт оплаты"], ["paid", "Оплачено"]];
 
-function Stats() {
+function Stats({ product }: { product: Product }) {
   const today = moscowToday();
   const [from, setFrom] = useState(addDays(today, -6));
   const [to, setTo] = useState(today);
-  const { data } = useLoad(() => api.admin.aliceStats(from, to), [from, to]);
+  const { data } = useLoad(() => api.admin.aliceStats(from, to, product), [from, to, product]);
   const table = (rows: ({ key: string; name: string } & AliceCounts)[]) => (
     <div className="overflow-x-auto">
       <table className="w-full text-sm tabular">
