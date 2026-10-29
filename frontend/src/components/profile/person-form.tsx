@@ -5,6 +5,7 @@ import { Check, ChevronLeft, LoaderCircle, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { PersonData, ProfileStatus } from "@/lib/api";
 import { plural } from "@/lib/format";
+import { TONE_CHIP } from "@/lib/tone";
 import { cn } from "@/lib/utils";
 
 const WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
@@ -12,10 +13,11 @@ const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 text-[15px] outlin
 const STEPS = ["ФИО", "О себе", "Дни работы", "Проверка"];
 
 export const STATUS_TEXT: Record<ProfileStatus, { label: string; tone: string }> = {
-  complete: { label: "Заполнен, одобрен", tone: "bg-go-soft text-go" },
-  incomplete: { label: "Не заполнен", tone: "bg-muted text-muted-foreground" },
-  pending: { label: "Ожидает рассмотрения", tone: "bg-wait-soft text-wait" },
-  rejected: { label: "Отклонён — нужно исправить", tone: "bg-cancel-soft text-cancel" },
+  // §27: the shared scale — «не заполнен» waits for the person, so it is yellow like the «не заполнены» in «Команде»
+  complete: { label: "Заполнен, одобрен", tone: TONE_CHIP.ok },
+  incomplete: { label: "Не заполнен", tone: TONE_CHIP.wait },
+  pending: { label: "Ожидает рассмотрения", tone: TONE_CHIP.wait },
+  rejected: { label: "Отклонён — нужно исправить", tone: TONE_CHIP.bad },
 };
 
 export function StatusPill({ status, prefix }: { status: ProfileStatus; prefix?: string }) {

@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { Check, Copy, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { Check, ChevronRight, Copy, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type AdminShift, type Capability, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
+import { api, type AdminShift, type Capability, type ReportCounts, type StatsItem, type UnmarkedPerson, type User } from "@/lib/api";
 import {
   STATUS_META,
   WEEKDAYS_SHORT,
@@ -20,7 +20,7 @@ import {
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { haptic, openProfile, tapHaptic } from "@/lib/telegram";
 import { CapsContext } from "@/lib/caps";
-import { refreshPending, sectionCount, usePending } from "@/lib/pending";
+import { PENDING_LABELS, refreshPending, sectionCount, sectionOf, usePending } from "@/lib/pending";
 import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { cn } from "@/lib/utils";
 import { DayLanes, DayTrack, type Lane } from "../day-line";
@@ -43,9 +43,10 @@ import { GroupsSection } from "./groups-section";
 import { AliceAdmin } from "./alice-admin";
 import { ManualsAdmin } from "../training/manuals";
 
-type Section = "manuals" | "alice" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "decisions" | "manuals" | "alice" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
+  { id: "decisions", label: "Решения", need: "review" },
   { id: "raspred", label: "Распред", need: "raspred" },
   { id: "onboarding", label: "Онбординг", need: "registrations" },
   { id: "reports", label: "Отчёты", need: "review" },
@@ -68,10 +69,28 @@ const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "settings", label: "Настройки", need: "settings" },
 ];
 
+// ТЗ 28.10 §27 (согласовано 29.10): the 20+ sections are grouped; «Решения» stands first, on its own
+type Group = "decisions" | "people" | "shifts" | "money" | "products" | "comms";
+const GROUPS: { id: Group; label: string; sections: Section[] }[] = [
+  { id: "decisions", label: "Решения", sections: ["decisions"] },
+  { id: "people", label: "Люди", sections: ["team", "onboarding", "groups", "access"] },
+  { id: "shifts", label: "Смены", sections: ["raspred", "day", "reports", "discipline", "actual", "stats"] },
+  { id: "money", label: "Деньги", sections: ["penalties", "payouts"] },
+  { id: "products", label: "Продукты", sections: ["alice", "manuals", "goals", "events"] },
+  { id: "comms", label: "Связь и настройки", sections: ["broadcast", "points", "networks", "settings"] },
+];
+// «Решения» is shown to whoever decides anything at all (the same capabilities pending.counts looks at)
+const DECIDES: Capability[] = ["review", "schedule", "registrations", "global_actual", "approve_fines", "fine_direct",
+  "profiles", "money", "alice"];
+const RED: Section[] = ["reports", "discipline"];
+const groupOf = (s: Section): Group => GROUPS.find((g) => g.sections.includes(s))!.id;
+
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
 export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[]; network?: string | null }) {
-  const sections = SECTIONS.filter((s) => caps.includes(s.need));
+  const sections = SECTIONS.filter((s) => (s.id === "decisions" ? DECIDES.some((c) => caps.includes(c)) : caps.includes(s.need)));
+  const visible = new Set(sections.map((s) => s.id));
+  const groups = GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => visible.has(s)) })).filter((g) => g.sections.length > 0);
   // the open section and its scroll survive a reload and switching tabs
   const [picked, setPicked] = useState<Section | null>(() => readSession("admin-section") as Section | null);
   const section: Section = sections.some((s) => s.id === picked) ? picked! : sections[0]?.id ?? "day";
@@ -79,7 +98,14 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
     rememberScroll();
     setPicked(s);
     writeSession("admin-section", s);
+    writeSession(`admin-group:${groupOf(s)}`, s);
   };
+  // a group opens on the section last used in it
+  const openGroup = (g: (typeof groups)[number]) => {
+    const last = readSession(`admin-group:${g.id}`) as Section | null;
+    setSection(last && g.sections.includes(last) ? last : g.sections[0]);
+  };
+  const group = groups.find((g) => g.sections.includes(section));
   useScrollMemory(`admin:${section}`);
   const [editing, setEditing] = useState<EditableShift | null>(null);
   const [version, setVersion] = useState(0);
@@ -92,36 +118,64 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
   return (
     <CapsContext.Provider value={caps}>
     <div className="mx-auto max-w-3xl space-y-5">
-      <nav className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
-        <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift lg:w-full lg:flex-wrap">
-          {sections.map((s) => (
-            <button
-              key={s.id}
-              ref={(el) => {
-                if (el && section === s.id) el.scrollIntoView({ block: "nearest", inline: "nearest" });
-              }}
-              onClick={() => {
-                tapHaptic();
-                setSection(s.id);
-              }}
-              className={cn(
-                "press inline-flex h-10 shrink-0 items-center justify-center rounded-xl px-4 text-sm font-semibold whitespace-nowrap transition-colors duration-200",
-                section === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {s.label}
-              {sectionCount(counts, s.id) > 0 && (
-                <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
-                  section === s.id ? "bg-white/20" : ["reports", "discipline"].includes(s.id) ? "bg-cancel text-white" : "bg-wait text-white")}>
-                  {sectionCount(counts, s.id)}
-                </span>
-              )}
-            </button>
-          ))}
+      <nav className="space-y-2">
+        <div className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+          <div className="flex w-max gap-1 rounded-2xl bg-card p-1 shadow-lift lg:w-full lg:flex-wrap">
+            {groups.map((g) => {
+              const active = group?.id === g.id;
+              const n = g.id === "decisions" ? counts?.total ?? 0 : g.sections.reduce((sum, s) => sum + sectionCount(counts, s), 0);
+              const red = (g.id === "decisions" ? RED : g.sections).some((s) => RED.includes(s) && sectionCount(counts, s) > 0);
+              return (
+                <button
+                  key={g.id}
+                  ref={(el) => {
+                    if (el && active) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+                  }}
+                  onClick={() => {
+                    tapHaptic();
+                    openGroup(g);
+                  }}
+                  className={cn(
+                    "press inline-flex h-10 shrink-0 items-center justify-center rounded-xl px-4 text-sm font-semibold whitespace-nowrap transition-colors duration-200",
+                    active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {g.label}
+                  <Count n={n} active={active} red={red} />
+                </button>
+              );
+            })}
+          </div>
         </div>
+        {group && group.sections.length > 1 && (
+          <div className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+            <div className="flex w-max gap-1.5">
+              {group.sections.map((id) => (
+                <button
+                  key={id}
+                  ref={(el) => {
+                    if (el && section === id) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+                  }}
+                  onClick={() => {
+                    tapHaptic();
+                    setSection(id);
+                  }}
+                  className={cn(
+                    "press inline-flex h-9 shrink-0 items-center rounded-full px-3.5 text-sm font-semibold whitespace-nowrap transition-colors duration-200",
+                    section === id ? "bg-foreground text-background" : "bg-muted text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {SECTIONS.find((s) => s.id === id)!.label}
+                  <Count n={sectionCount(counts, id)} active={section === id} red={RED.includes(id)} />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </nav>
 
       <div key={section} className="screen-in">
+        {section === "decisions" && <DecisionsSection counts={counts} visible={visible} onOpen={setSection} />}
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
         {section === "onboarding" && <OnboardingSection me={me} />}
         {section === "reports" && <ReportsSection onChanged={() => setVersion((v) => v + 1)} />}
@@ -158,6 +212,61 @@ export function AdminScreen({ me, caps, network }: { me: User; caps: Capability[
     </CapsContext.Provider>
   );
 }
+
+function Count({ n, active, red }: { n: number; active: boolean; red: boolean }) {
+  if (n <= 0) return null;
+  return (
+    <span className={cn("ml-1.5 inline-grid min-w-5 place-items-center rounded-full px-1.5 text-[11px] leading-5 tabular",
+      active ? "bg-white/20" : red ? "bg-cancel text-white" : "bg-wait text-white")}>
+      {n > 99 ? "99+" : n}
+    </span>
+  );
+}
+
+/** §27 «Решения»: everything that waits for this person's decision, in one list (the same counts and words as the
+ * bot's /pending). A row opens the section where it is decided; the «Ожидает согласования» blocks stay there too. */
+function DecisionsSection({ counts, visible, onOpen }: {
+  counts: ReportCounts | null; visible: Set<Section>; onOpen: (s: Section) => void;
+}) {
+  if (!counts) return <Skeleton className="h-48 rounded-3xl" />;
+  const rows = PENDING_LABELS.filter(([k]) => (Number(counts[k]) || 0) > 0);
+  return (
+    <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
+      <div className="p-5 md:p-6">
+        <h2 className="font-display text-xl font-semibold">Ждут решения</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {rows.length ? "Нажмите на строку — откроется раздел, где это решается. Счётчики обновляются сами." : "✅ Ничего не ждёт вашего решения."}
+        </p>
+      </div>
+      {rows.length > 0 && (
+        <ul className="divide-y border-t">
+          {rows.map(([k, label], i) => {
+            const target = sectionOf(k) as Section | null;
+            const can = !!target && visible.has(target);
+            const where = can ? SECTIONS.find((s) => s.id === target)!.label : null;
+            return (
+              <li key={k}>
+                <button disabled={!can} style={{ "--i": i } as CSSProperties}
+                        onClick={() => { if (target) { tapHaptic(); onOpen(target); } }}
+                        className="press row-in flex w-full items-center gap-3 px-5 py-3.5 text-left hover:bg-muted/60 disabled:opacity-100 md:px-6">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{label}</span>
+                    {where && <span className="text-xs text-muted-foreground">{groupLabel(target!)} → {where}</span>}
+                  </span>
+                  <span className={cn("inline-grid min-w-7 place-items-center rounded-full px-2 text-sm leading-7 font-semibold text-white tabular",
+                    target && RED.includes(target) ? "bg-cancel" : "bg-wait")}>{counts[k]}</span>
+                  {can && <ChevronRight className="size-4 text-muted-foreground" />}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+const groupLabel = (s: Section) => GROUPS.find((g) => g.id === groupOf(s))!.label;
 
 type EditFn = (s: EditableShift) => void;
 

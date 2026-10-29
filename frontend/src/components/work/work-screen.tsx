@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError, PRODUCT_TITLES, type AliceCounts, type AliceStats, type AliceTask, type Product } from "@/lib/api";
 import { useAction, useLoad } from "@/lib/hooks";
 import { haptic } from "@/lib/telegram";
+import { TONE_CHIP, type Tone } from "@/lib/tone";
 import { cn } from "@/lib/utils";
 import { Camera } from "./camera";
 
@@ -166,10 +167,16 @@ function AliceScreen({ onBack, working, onOpenProfile }: { onBack?: () => void; 
   );
 }
 
+// §27: the shared colour scale; an abandoned or deleted task is archive (grey), not «waiting»
+const ALICE_TONE: Record<AliceTask["status"], Tone> = {
+  in_progress: "wait", sending: "wait", moderation: "wait",
+  accepted: "ok", paid: "ok",
+  rejected: "bad", send_failed: "bad", yandex_rejected: "bad",
+  abandoned: "archive", deleted: "archive",
+};
+
 export function StatusChip({ task }: { task: AliceTask }) {
-  const tone = task.status === "rejected" || task.status === "send_failed" || task.status === "yandex_rejected" ? "bg-cancel-soft text-cancel"
-    : task.status === "accepted" || task.status === "paid" ? "bg-go-soft text-go" : "bg-wait-soft text-wait";
-  return <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", tone)}>{task.status_title}</span>;
+  return <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", TONE_CHIP[ALICE_TONE[task.status] ?? "wait"])}>{task.status_title}</span>;
 }
 
 /** The QR must be read by a phone camera from this screen: a wide white quiet zone (the dark theme around it hides

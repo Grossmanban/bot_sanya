@@ -5,16 +5,17 @@ import { AlertTriangle, Clock3, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Application, TrainingStage } from "@/lib/api";
 import { dayMonth } from "@/lib/format";
+import { TONE_CHIP, type Tone } from "@/lib/tone";
 import { cn } from "@/lib/utils";
 import { ReasonChips } from "../reason-chips";
 
 export const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 
-const TONE: Partial<Record<TrainingStage, string>> = {
-  new: "bg-muted text-muted-foreground", trainer: "bg-wait-soft text-wait", new_date: "bg-wait-soft text-wait",
-  confirm: "bg-wait-soft text-wait", agreed: "bg-go-soft text-go", started: "bg-go-soft text-go",
-  internship: "bg-primary/10 text-primary", finish_review: "bg-wait-soft text-wait", done: "bg-go-soft text-go",
-  rejected: "bg-cancel-soft text-cancel", returned: "bg-muted text-muted-foreground",
+// §27: the shared scale — waits for someone → yellow, on track / done → green, refusal → red, returned → grey
+const TONE: Partial<Record<TrainingStage, Tone>> = {
+  new: "wait", trainer: "wait", new_date: "wait", confirm: "wait", finish_review: "wait",
+  agreed: "ok", started: "ok", internship: "ok", done: "ok",
+  rejected: "bad", returned: "archive",
 };
 
 /** ТЗ 28.10 §3: the candidate's stage, the same words in «Онбординг» and «Обучение». */
@@ -22,7 +23,7 @@ export function StageBadge({ a }: { a: Application }) {
   if (!a.stage_title) return null;
   return (
     <span className={cn("inline-flex max-w-full items-center rounded-full px-2.5 py-1 text-xs font-semibold break-words",
-      TONE[a.stage ?? "new"])}>{a.stage_title}</span>
+      TONE_CHIP[TONE[a.stage ?? "new"] ?? "wait"])}>{a.stage_title}</span>
   );
 }
 

@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, Play, RotateCcw, Send, Timer, UserCog, UserX, Users } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
+import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type TrainingRequest, type User } from "@/lib/api";
@@ -149,6 +149,75 @@ function Candidate({ a, me, trainers, points, onDone }: {
   const toggle = (x: Panel) => setPanel(panel === x ? null : x);
   const open = a.status === "new" || a.status === "scheduled";
   const scheduled = a.status === "scheduled";
+  const [more, setMore] = useState(false);
+
+  // §27 (согласовано 29.10): all the card's actions, in order; 2–3 main ones for the stage stay in sight, the rest — «Ещё…»
+  const all: { id: string; el: React.ReactNode }[] = [];
+  const add = (show: unknown, id: string, el: React.ReactNode) => { if (show) all.push({ id, el }); };
+  add(open, "trainer",
+    <Button size="sm" className="h-9 rounded-xl" onClick={() => toggle("trainer")}>
+      <UserCog /> {a.trainer ? "Сменить тренера" : "Назначить тренера"}
+    </Button>);
+  add(scheduled, "training",
+    <Button size="sm" variant="secondary" className="h-9 rounded-xl" onClick={() => toggle("training")}>
+      <CalendarPlus /> {a.training_date ? "Изменить обучение" : "Назначить дату"}
+    </Button>);
+  add(scheduled && a.trainer && !a.training_started_at, "start",
+    <Button size="sm" variant="secondary" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("start", (k) => api.admin.startTraining(a.id, k), "Обучение начато")}>
+      <Play /> Начать обучение
+    </Button>);
+  add(scheduled && a.trainer, "intern",
+    <Button size="sm" className="h-9 rounded-xl bg-go text-white hover:bg-go/90" disabled={!!busy}
+            onClick={() => act("intern", (k) => api.admin.startInternship(a.id, k), "Стажировка началась: доступ к приложению открыт")}>
+      {busy === "intern" ? <LoaderCircle className="animate-spin" /> : <GraduationCap />} Начать стажировку
+    </Button>);
+  add(a.status === "internship" || (a.status === "done" && !a.stage2_at), "stage",
+    <Button size="sm" className={cn("h-9 rounded-xl", (p?.review || a.finish_requested_at) && "bg-go text-white hover:bg-go/90")}
+            onClick={() => toggle("stage")}>
+      <Check /> {a.status === "internship" ? "Принять в команду" : "Проверить второй этап"}
+    </Button>);
+  add(a.status === "rejected", "return",
+    <Button variant="secondary" size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("return", (k) => api.admin.returnApplication(a.id, k), "Возвращён в резерв: блокировка снята, бот попросит заполнить анкету заново")}>
+      {busy === "return" ? <LoaderCircle className="animate-spin" /> : <RotateCcw />} Вернуть в резерв
+    </Button>);
+  add(scheduled && a.trainer, "resend",
+    <Button variant="secondary" size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("resend", (k) => api.admin.trainerMessage(a.id, k), "Сообщение отправлено ещё раз, отсчёт заново")}>
+      <Send /> Написать о тренере ещё раз
+    </Button>);
+  add(scheduled && a.trainer && a.contact_timer_at, "reset",
+    <Button variant="ghost" size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("reset", (k) => api.admin.timerReset(a.id, k), "Таймер сброшен")}>
+      <Timer /> Сбросить таймер
+    </Button>);
+  add(scheduled && a.trainer && a.referrer, "ref",
+    <Button variant="ghost" size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("ref", (k) => api.admin.remindReferrer(a.id, k), "Пригласивший получил просьбу помочь")}>
+      <Users /> Напомнить пригласившему
+    </Button>);
+  add(open, "contact",
+    <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={() => toggle("contact")}>
+      <MessageCircle /> Контакт вручную
+    </Button>);
+  add(scheduled, "cancel",
+    <Button variant="secondary" size="sm" className="h-9 rounded-xl" onClick={() => toggle("cancel")}>
+      <CalendarX /> Отменить обучение
+    </Button>);
+  add(open || a.status === "internship", "reject",
+    <Button variant="ghost" size="sm" className="h-9 rounded-xl text-cancel hover:bg-cancel-soft hover:text-cancel" onClick={() => toggle("reject")}>
+      <UserX /> {scheduled ? "Отказать в обучении" : "Отказать"}
+    </Button>);
+  // the next step of the candidate's path is what stays in sight
+  const primary: string[] = a.status === "new" ? ["trainer", "reject"]
+    : scheduled ? (!a.trainer ? ["trainer"] : !a.training_date ? ["training"]
+      : !a.training_started_at ? ["start", "training"] : ["intern"])
+    : a.status === "internship" || a.status === "done" ? ["stage"]
+    : a.status === "rejected" ? ["return"] : [];
+  let main = all.filter((x) => primary.includes(x.id));
+  let rest = all.filter((x) => !primary.includes(x.id));
+  if (main.length === 0) [main, rest] = [rest, []];
 
   return (
     <li className="row-in space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
@@ -238,76 +307,18 @@ function Candidate({ a, me, trainers, points, onDone }: {
       )}
 
       <div className="-mx-1 flex flex-wrap gap-1.5">
-        {open && (
-          <Button size="sm" className="h-9 rounded-xl" onClick={() => toggle("trainer")}>
-            <UserCog /> {a.trainer ? "Сменить тренера" : "Назначить тренера"}
-          </Button>
-        )}
-        {scheduled && (
-          <Button size="sm" variant="secondary" className="h-9 rounded-xl" onClick={() => toggle("training")}>
-            <CalendarPlus /> {a.training_date ? "Изменить обучение" : "Назначить дату"}
-          </Button>
-        )}
-        {scheduled && a.trainer && (
-          <>
-            <Button variant="secondary" size="sm" className="h-9 rounded-xl" disabled={!!busy}
-                    onClick={() => act("resend", (k) => api.admin.trainerMessage(a.id, k), "Сообщение отправлено ещё раз, отсчёт заново")}>
-              <Send /> Написать о тренере ещё раз
-            </Button>
-            {a.contact_timer_at && (
-              <Button variant="ghost" size="sm" className="h-9 rounded-xl" disabled={!!busy}
-                      onClick={() => act("reset", (k) => api.admin.timerReset(a.id, k), "Таймер сброшен")}>
-                <Timer /> Сбросить таймер
-              </Button>
-            )}
-            {a.referrer && (
-              <Button variant="ghost" size="sm" className="h-9 rounded-xl" disabled={!!busy}
-                      onClick={() => act("ref", (k) => api.admin.remindReferrer(a.id, k), "Пригласивший получил просьбу помочь")}>
-                <Users /> Напомнить пригласившему
-              </Button>
-            )}
-          </>
-        )}
-        {open && (
-          <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={() => toggle("contact")}>
-            <MessageCircle /> Контакт вручную
-          </Button>
-        )}
-        {scheduled && a.trainer && !a.training_started_at && (
-          <Button size="sm" variant="secondary" className="h-9 rounded-xl" disabled={!!busy}
-                  onClick={() => act("start", (k) => api.admin.startTraining(a.id, k), "Обучение начато")}>
-            <Play /> Начать обучение
-          </Button>
-        )}
-        {scheduled && a.trainer && (
-          <Button size="sm" className="h-9 rounded-xl bg-go text-white hover:bg-go/90" disabled={!!busy}
-                  onClick={() => act("intern", (k) => api.admin.startInternship(a.id, k), "Стажировка началась: доступ к приложению открыт")}>
-            {busy === "intern" ? <LoaderCircle className="animate-spin" /> : <GraduationCap />} Начать стажировку
-          </Button>
-        )}
-        {(a.status === "internship" || (a.status === "done" && !a.stage2_at)) && (
-          <Button size="sm" className={cn("h-9 rounded-xl", (p?.review || a.finish_requested_at) && "bg-go text-white hover:bg-go/90")}
-                  onClick={() => toggle("stage")}>
-            <Check /> {a.status === "internship" ? "Принять в команду" : "Проверить второй этап"}
-          </Button>
-        )}
-        {scheduled && (
-          <Button variant="secondary" size="sm" className="h-9 rounded-xl" onClick={() => toggle("cancel")}>
-            <CalendarX /> Отменить обучение
-          </Button>
-        )}
-        {(open || a.status === "internship") && (
-          <Button variant="ghost" size="sm" className="h-9 rounded-xl text-cancel hover:bg-cancel-soft hover:text-cancel" onClick={() => toggle("reject")}>
-            <UserX /> {scheduled ? "Отказать в обучении" : "Отказать"}
-          </Button>
-        )}
-        {a.status === "rejected" && (
-          <Button variant="secondary" size="sm" className="h-9 rounded-xl" disabled={!!busy}
-                  onClick={() => act("return", (k) => api.admin.returnApplication(a.id, k), "Возвращён в резерв: блокировка снята, бот попросит заполнить анкету заново")}>
-            {busy === "return" ? <LoaderCircle className="animate-spin" /> : <RotateCcw />} Вернуть в резерв
+        {main.map((x) => <Fragment key={x.id}>{x.el}</Fragment>)}
+        {rest.length > 0 && (
+          <Button variant="ghost" size="sm" className="h-9 rounded-xl" aria-expanded={more} onClick={() => setMore(!more)}>
+            <MoreHorizontal /> {more ? "Скрыть" : "Ещё…"}
           </Button>
         )}
       </div>
+      {more && rest.length > 0 && (
+        <div className="row-in -mx-1 flex flex-wrap gap-1.5 border-t pt-3">
+          {rest.map((x) => <Fragment key={x.id}>{x.el}</Fragment>)}
+        </div>
+      )}
 
       {panel === "trainer" && <TrainerForm a={a} trainers={trainers} busy={!!busy}
                                            onSave={(id, send) => act("trainer", (k) => api.admin.assignTrainer(a.id, id, send, k),

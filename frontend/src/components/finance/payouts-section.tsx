@@ -14,6 +14,7 @@ import { compressImage } from "@/lib/image";
 import { addDays, dayMonth, plural, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { haptic, tapHaptic } from "@/lib/telegram";
+import { TONE_CHIP } from "@/lib/tone";
 import { cn } from "@/lib/utils";
 import { TxForm } from "./money";
 import { AlicePayout } from "./alice-payout";
@@ -70,8 +71,15 @@ export function PayoutsSection() {
               <li key={b.id}>
                 <button onClick={() => setMode(b.id)} className="press flex w-full items-center gap-3 px-5 py-3.5 text-left hover:bg-muted/60 md:px-6">
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">
-                      №{b.id} {b.title}{b.product === "alice" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· Алиса</span>}
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-medium">
+                        №{b.id} {b.title}{b.product === "alice" && <span className="ml-1.5 text-xs font-normal text-muted-foreground">· Алиса</span>}
+                      </span>
+                      {/* §27: the shared scale — a fixed payout is done (green), an annulled one is archive (grey) */}
+                      <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                        TONE_CHIP[b.status === "annulled" ? "archive" : "ok"])}>
+                        {b.status === "annulled" ? "Аннулирована" : "Проведена"}
+                      </span>
                     </span>
                     <span className="block text-xs text-muted-foreground">
                       {dayMonth(b.period_from)} – {dayMonth(b.period_to)} · {b.people} {plural(b.people, "человек", "человека", "человек")}

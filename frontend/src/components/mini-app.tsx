@@ -244,8 +244,9 @@ export function MiniApp() {
               <button
                 key={id}
                 onClick={() => go(id)}
+                aria-label={label}
                 className={cn(
-                  "relative z-10 flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] font-semibold transition-colors duration-300",
+                  "relative z-10 flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-semibold transition-colors duration-300",
                   tab === id ? "text-primary-foreground" : "text-muted-foreground",
                 )}
               >
@@ -257,7 +258,8 @@ export function MiniApp() {
                     </span>
                   )}
                 </span>
-                {label}
+                {/* §27: narrower than 360 px (iPhone SE with 6 tabs) — icons only, the label stays on the active tab */}
+                <span className={cn("max-w-full truncate px-0.5", tab !== id && "max-[359.98px]:sr-only")}>{label}</span>
               </button>
             ))}
           </div>

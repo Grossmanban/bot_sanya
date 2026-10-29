@@ -62,3 +62,20 @@ export const SECTION_COUNTS: Record<string, (keyof ReportCounts)[]> = {
 export function sectionCount(c: ReportCounts | null, section: string): number {
   return (SECTION_COUNTS[section] ?? []).reduce((n, k) => n + (Number(c?.[k]) || 0), 0);
 }
+
+/** §27 «Решения»: the same words as the bot's /pending (backend pending.LABELS), in the same order. */
+export const PENDING_LABELS: [keyof ReportCounts, string][] = [
+  ["review", "📝 Отчёты на проверке"], ["no_show", "🚫 Неявки без решения"], ["actual_missing", "📊 Дни без общего факта"],
+  ["actual_overdue", "📊 Просрочено без общего факта"], ["fines_pending", "🧾 Штрафы тренеров на согласовании"],
+  ["fines_draft", "💸 Штрафы без суммы"], ["violations", "⚖️ Дисциплина"], ["registrations", "👤 Заявки на доступ"],
+  ["onboarding_new", "🧑‍🎓 Новые анкеты"], ["internship_review", "🎯 Стажировки на проверку"],
+  ["training_requests", "⏳ Обучение: ожидает согласования"], ["profile_changes", "🪪 Изменения профилей"],
+  ["payment_changes", "💳 Изменения реквизитов"], ["urgent", "⚡ Срочные заявки на сегодня"],
+  ["unmarked", "🗓 Не отметили завтрашний день"], ["events_pending", "🏁 Заявки в событиях"],
+  ["alice_moderation", "📸 «Алиса»: на модерации"], ["alice_failed", "📸 «Алиса»: не отправлено"],
+];
+
+/** Which admin section decides a given count. */
+export function sectionOf(key: keyof ReportCounts): string | null {
+  return Object.entries(SECTION_COUNTS).find(([, keys]) => keys.includes(key))?.[0] ?? null;
+}
