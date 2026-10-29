@@ -56,7 +56,9 @@ class DateKey(BaseModel):
     idempotency_key: str
 
 
-class ReasonBody(BaseModel):
+class TemplateReasonBody(BaseModel):
+    """A reason template (ТЗ 28.10 §2). Its own name: «ReasonBody» below (annulling an event entry) used to shadow it,
+    so every add / edit / delete of a template was refused with 422."""
     kind: str | None = None
     text: str | None = None
     delete: bool = False
@@ -1788,12 +1790,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"kinds": templates.reason_catalog(conn)}
 
     @api.post("/admin/reasons")
-    async def reason_add(body: ReasonBody, admin: dict = Depends(staff("settings"))):
+    async def reason_add(body: TemplateReasonBody, admin: dict = Depends(staff("settings"))):
         templates.add_reason(conn, admin, body.kind or "", body.text or "", body.idempotency_key)
         return {"kinds": templates.reason_catalog(conn)}
 
     @api.patch("/admin/reasons/{reason_id}")
-    async def reason_edit(reason_id: int, body: ReasonBody, admin: dict = Depends(staff("settings"))):
+    async def reason_edit(reason_id: int, body: TemplateReasonBody, admin: dict = Depends(staff("settings"))):
         templates.edit_reason(conn, admin, reason_id, body.text, body.delete, body.idempotency_key)
         return {"kinds": templates.reason_catalog(conn)}
 
