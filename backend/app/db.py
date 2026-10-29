@@ -1399,6 +1399,12 @@ def _yandex_plus(conn: sqlite3.Connection) -> None:
 
 MIGRATIONS.append(_yandex_plus)
 
+# 40 — «Яндекс Плюс» gets its own rate (plus_rate). It starts equal to the «Алиса» rate already set, so nothing
+# changes until the owner sets it apart
+MIGRATIONS.append("""
+INSERT OR IGNORE INTO app_settings (key, value) SELECT 'plus_rate', value FROM app_settings WHERE key = 'alice_rate'
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

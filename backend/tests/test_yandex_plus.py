@@ -450,3 +450,53 @@ def test_deadline_for_the_countdown(conn):
     assert info["passed"] is False and info["seconds_left"] == 10 * 3600  # 22:00 by default
     assert violations.mark_deadline_info(today + timedelta(days=1), late)["passed"] is True
     assert violations.mark_deadline_info(today, noon)["passed"] is True  # today's was yesterday evening
+
+
+def test_each_product_has_its_own_rate(conn, setup, make_user):
+    """«Яндекс Плюс» is paid by plus_rate, «Алиса» by alice_rate; a payout keeps the rate it was made with."""
+    owner, u = setup
+    qr = plus_ready(conn, owner, u)
+    products.set_access(conn, owner, u["id"], "alice", True, svc.new_key())
+    a_qr = alice.create_qr(conn, owner, "local:a.png", "A", svc.new_key())
+    alice.assign(conn, owner, a_qr["id"], u["id"], True, svc.new_key())
+    bot = PlusBot()
+    p = run(alice.deliver(conn, bot, plus_run(conn, u)["id"]))
+    a = run(alice.deliver(conn, bot, full_run(conn, u)["id"]))
+    for t in (p, a):
+        alice.moderate(conn, owner, t["id"], True, None, svc.new_key())
+    app_settings.update(conn, {"alice_rate": 100, "plus_rate": 250})
+    today = now_local().date()
+    assert alice.reconcile(conn, today, today, {qr["id"]: 1}, product=alice.PLUS)["total"] == 250
+    assert alice.reconcile(conn, today, today, {a_qr["id"]: 1})["total"] == 100
+    requisites(conn, u)
+    batch_id, _ = alice.commit_payout(conn, owner, "Плюс", today, today, {qr["id"]: 1}, [], svc.new_key(), alice.PLUS)
+    assert payouts.batch(conn, batch_id)["total"] == 250 and payouts.batch(conn, batch_id)["rates"]["plus_rate"] == 250
+    app_settings.update(conn, {"plus_rate": 300})  # a later change doesn't touch the payout, nor its edit
+    alice.edit_payout(conn, owner, batch_id, {qr["id"]: 1}, svc.new_key())
+    assert payouts.batch(conn, batch_id)["total"] == 250
+    # the API: owners see and change both; the product's section shows its own rate
+    client = TestClient(create_app(conn, Notifier(None, conn)))
+    oh = headers(999, "Саня", "Владелец", "boss")
+    assert client.get("/api/admin/alice?product=plus", headers=oh).json()["rate"] == 300
+    assert client.get("/api/admin/alice", headers=oh).json()["rate"] == 100
+
+
+def test_plus_rate_starts_equal_to_the_alice_rate(tmp_path):
+    """Migration 40: after the update «Яндекс Плюс» costs what «Алиса» cost — until the owner sets it apart."""
+    from app import db
+
+    path = str(tmp_path / "old.db")
+    c = db.sqlite3.connect(path, isolation_level=None)
+    c.row_factory = db.sqlite3.Row
+    c.executescript(db.SCHEMA)
+    real = db.MIGRATIONS
+    try:
+        db.MIGRATIONS = real[:39]
+        db.migrate(c)
+        c.execute("INSERT INTO app_settings (key, value) VALUES ('alice_rate', '175')")
+        db.MIGRATIONS = real
+        db.migrate(c)
+    finally:
+        db.MIGRATIONS = real
+    assert app_settings.get_all(c)["plus_rate"] == 175 and c.execute("PRAGMA user_version").fetchone()[0] == len(real)
+    c.close()

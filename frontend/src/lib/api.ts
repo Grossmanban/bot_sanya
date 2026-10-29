@@ -1033,6 +1033,8 @@ export interface ScheduleSettings {
   piece_cap: number;
   /** ТЗ 27.10 §42: rubles per paid «Яндекс Алиса» execution (owners only) */
   alice_rate?: number;
+  /** ТЗ «Яндекс Плюс»: rubles per paid «Яндекс Плюс» execution, its own (owners only) */
+  plus_rate?: number;
   /** owners only: what the business gets per piece (the owner's earnings in payouts) */
   revenue_per_piece?: number;
 }

@@ -1095,7 +1095,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                                    (product,))}
         people = [{"id": u["id"], "name": svc.full_name(u)} for u in svc.list_users(conn) if products.has(conn, u, product)]
         return {"product": product, "title": products.PRODUCTS[product], "command": alice.KINDS[product]["command"],
-                "forum": forum, "counts": counts, "people": people, "rate": app_settings.get_all(conn)["alice_rate"]}
+                "forum": forum, "counts": counts, "people": people, "rate": alice.rate_of(conn, product)}
 
     @api.get("/admin/alice/queue")
     async def admin_alice_queue(status: str | None = "moderation", user_id: int | None = None, qr_id: int | None = None,
@@ -1459,7 +1459,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"point": svc.update_point(conn, admin, point_id, changes)}
 
     # money settings: only owners see and change them (customer round B)
-    OWNER_SETTINGS = set(pricing.DEFAULTS) | {"revenue_per_piece", "alice_rate"}
+    OWNER_SETTINGS = set(pricing.DEFAULTS) | {"revenue_per_piece", "alice_rate", "plus_rate"}
 
     def settings_view(viewer: dict) -> dict:
         archive = app_settings.get_raw(conn, "archive_chat_id")

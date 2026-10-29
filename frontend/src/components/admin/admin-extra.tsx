@@ -453,7 +453,7 @@ function ArchiveCard({ archive }: { archive: SettingsResponse["archive"] }) {
 }
 
 type RateKey = "rate_base" | "rate_lazy" | "lazy_threshold" | "trainer_commission" | "instructor_commission" | "piece_cap"
-  | "revenue_per_piece" | "alice_rate";
+  | "revenue_per_piece" | "alice_rate" | "plus_rate";
 const RATES: { key: RateKey; label: string; unit: string }[] = [
   { key: "rate_base", label: "Ставка", unit: "₽ за шт." },
   { key: "rate_lazy", label: "Налог на лень: ставка", unit: "₽ за шт." },
@@ -462,7 +462,8 @@ const RATES: { key: RateKey; label: string; unit: string }[] = [
   { key: "instructor_commission", label: "Инструктору с его людей", unit: "₽ за шт." },
   { key: "piece_cap", label: "Предел за штуку", unit: "₽ — ставка + тренер + инструктор" },
   { key: "revenue_per_piece", label: "Доход бизнеса за штуку", unit: "₽ — для заработка владельца" },
-  { key: "alice_rate", label: "«Яндекс Алиса» и «Яндекс Плюс» за выполнение", unit: "₽ — одна ставка для обоих продуктов; проведённые выплаты не меняются" },
+  { key: "alice_rate", label: "«Яндекс Алиса» за выполнение", unit: "₽ — проведённые выплаты не меняются" },
+  { key: "plus_rate", label: "«Яндекс Плюс» за выполнение", unit: "₽ — проведённые выплаты не меняются" },
 ];
 
 /** Piece rates (ТЗ 11.1): used by cards, stats, Excel and as defaults in the payout wizard. */

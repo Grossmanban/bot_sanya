@@ -69,9 +69,9 @@ PLUS_STAGES = {
 # product -> how it is named and what an execution needs
 KINDS = {
     PRODUCT: {"name": "Яндекс Алиса", "short": "Алиса", "of": "«Алисы»", "stages": STAGES, "query": True,
-              "chat": "alice_chat", "command": "/alice_here", "tag": "#алиса"},
+              "chat": "alice_chat", "command": "/alice_here", "tag": "#алиса", "rate": "alice_rate"},
     PLUS: {"name": "Яндекс Плюс", "short": "Яндекс Плюс", "of": "«Яндекс Плюса»", "stages": PLUS_STAGES, "query": False,
-           "chat": "plus_chat", "command": "/plus_here", "tag": "#плюс"},
+           "chat": "plus_chat", "command": "/plus_here", "tag": "#плюс", "rate": "plus_rate"},
 }
 
 
@@ -919,7 +919,7 @@ def reconcile(conn: sqlite3.Connection, date_from: date, date_to: date, confirme
     «Отклонено Яндексом»; a QR with nothing entered is left as it is. Nothing is saved."""
     if date_to < date_from:
         raise ServiceError("Период задан неверно", 422, "bad_range")
-    rate = app_settings.get_all(conn)["alice_rate"] if rate is None else rate
+    rate = app_settings.get_all(conn)[KINDS[check(product)]["rate"]] if rate is None else rate
     confirmed = confirmed or {}
     rows, people, rejected = [], {}, []
     qr_ids = [r[0] for r in conn.execute(
@@ -1021,7 +1021,7 @@ def commit_payout(conn: sqlite3.Connection, actor: dict, title: str, date_from: 
         cur = conn.execute(
             """INSERT INTO payout_batches (title, period_from, period_to, network_id, rates, proof_media, deduction_media,
                                            total, created_by, created_at, product) VALUES (?, ?, ?, NULL, ?, ?, '[]', ?, ?, ?, ?)""",
-            (title, date_from.isoformat(), date_to.isoformat(), json.dumps({"alice_rate": plan["rate"], "confirmed": {
+            (title, date_from.isoformat(), date_to.isoformat(), json.dumps({KINDS[product]["rate"]: plan["rate"], "confirmed": {
                 str(k): v for k, v in confirmed.items()}}), json.dumps(proof[:10]), plan["total"], actor["telegram_id"],
              now_iso(), product))
         batch_id = cur.lastrowid
@@ -1030,6 +1030,17 @@ def commit_payout(conn: sqlite3.Connection, actor: dict, title: str, date_from: 
                   new={"batch": batch_id, "total": plan["total"], "product": product,
                        "confirmed": {str(k): v for k, v in confirmed.items()}})
     return batch_id, True
+
+
+def rate_of(conn: sqlite3.Connection, product: str = PRODUCT) -> int:
+    """Rubles per paid execution of the product: «Алиса» — alice_rate, «Яндекс Плюс» — plus_rate (each its own)."""
+    return app_settings.get_all(conn)[KINDS[check(product)]["rate"]]
+
+
+def batch_rate(b: dict) -> int:
+    """The rate a payout was made with (kept in the payout; a later change of the setting never touches it)."""
+    rates = json.loads(b["rates"]) if isinstance(b["rates"], str) else b["rates"]
+    return rates.get(KINDS[b["product"]]["rate"], rates.get("alice_rate"))
 
 
 def edit_payout(conn: sqlite3.Connection, actor: dict, batch_id: int, confirmed: dict[int, int], key: str,
@@ -1054,7 +1065,7 @@ def edit_payout(conn: sqlite3.Connection, actor: dict, batch_id: int, confirmed:
         payouts.snapshot(conn, b, actor, note)
         payouts.revert(conn, b, 1)
         plan = reconcile(conn, date.fromisoformat(b["period_from"]), date.fromisoformat(b["period_to"]), confirmed,
-                         json.loads(b["rates"])["alice_rate"], product=b["product"])
+                         batch_rate(b), product=b["product"])
         _write_payout(conn, actor, batch_id, plan)
         rates = {**json.loads(b["rates"]), "confirmed": {str(k): v for k, v in confirmed.items()}}
         conn.execute("""UPDATE payout_batches SET total = ?, rates = ?, version = version + 1, updated_at = ?, updated_by = ?
