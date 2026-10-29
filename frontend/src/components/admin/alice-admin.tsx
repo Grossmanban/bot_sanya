@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, PRODUCT_TITLES, type AliceCounts, type AliceQr, type AliceTask, type Product } from "@/lib/api";
 import { compressImage } from "@/lib/image";
 import { addDays } from "@/lib/format";
+import { useCan } from "@/lib/caps";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile, webApp } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
@@ -22,7 +23,7 @@ type Tab = "queue" | "qr" | "queries" | "stats";
 const field = "h-10 max-w-full min-w-0 rounded-xl border-0 bg-muted px-3 text-sm outline-none focus:ring-2 focus:ring-ring/25";
 const STATUSES: [string, string][] = [
   ["moderation", "На модерации"], ["accepted", "Принято, ожидает оплаты"], ["rejected", "Отклонено"], ["paid", "Оплачено"],
-  ["send_failed", "Не отправлено"], ["yandex_rejected", "Отклонено Яндексом"], ["deleted", "Удалённые"], ["", "Все"],
+  ["send_failed", "Не отправлено"], ["yandex_rejected", "Отклонено Яндексом"], ["deleted", "Удалённые"], ["all", "Все"],
 ];
 
 /** ТЗ 27.10 §32–40: moderation, QR codes, search queries, statistics of «Яндекс Алиса»; ТЗ «Яндекс Плюс»: the same
@@ -44,6 +45,7 @@ export function AliceAdmin({ product = "alice" }: { product?: Product }) {
           {" "}Доступ к продукту выдаётся в карточке сотрудника («Команда»).
         </p>
       </section>
+      {info.data && <RateCard key={`${product}-${info.data.rate}`} product={product} rate={info.data.rate} onSaved={info.reload} />}
       <div className={cn("grid rounded-2xl bg-muted p-1", tabs.length === 4 ? "grid-cols-4" : "grid-cols-3")}>
         {tabs.map(([t, label]) => (
           <button key={t} onClick={() => setTab(t)}
@@ -57,6 +59,37 @@ export function AliceAdmin({ product = "alice" }: { product?: Product }) {
       {tab === "queries" && product === "alice" && <Queries />}
       {tab === "stats" && <Stats key={product} product={product} />}
     </div>
+  );
+}
+
+/** The product's own rate per paid task, right in its section (owners only; the same setting as «Настройки → Ставки»):
+ * «Яндекс Алиса» — alice_rate, «Яндекс Плюс» — plus_rate. Payouts already made keep the rate they used. */
+function RateCard({ product, rate, onSaved }: { product: Product; rate: number; onSaved: () => void }) {
+  const canMoney = useCan("money");
+  const [value, setValue] = useState(String(rate));
+  const { busy, run } = useAction();
+  if (!canMoney) return null;
+  const n = Number(value);
+  const save = async () => {
+    try {
+      await run("rate", () => api.admin.saveSettings(product === "plus" ? { plus_rate: n } : { alice_rate: n }),
+        `Ставка «${PRODUCT_TITLES[product]}»: ${n} ₽ за выполнение`);
+      onSaved();
+    } catch { /* toast shown */ }
+  };
+  return (
+    <section className="flex flex-wrap items-center gap-3 rounded-3xl bg-card p-4 shadow-lift md:px-5">
+      <span className="min-w-0 flex-1">
+        <span className="block font-semibold">Ставка «{PRODUCT_TITLES[product]}»</span>
+        <span className="block text-xs text-muted-foreground">₽ за оплаченное выполнение · своя для каждого продукта · проведённые выплаты не меняются</span>
+      </span>
+      <input inputMode="numeric" aria-label="Ставка, ₽" className={cn(field, "w-24 tabular")} value={value}
+             onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 6))} />
+      <span className="text-sm text-muted-foreground">₽</span>
+      <Button size="sm" className="press h-10 rounded-xl" disabled={!!busy || value === "" || n === rate || n > 100000} onClick={() => save()}>
+        {busy === "rate" ? <LoaderCircle className="animate-spin" /> : <Save />} Сохранить
+      </Button>
+    </section>
   );
 }
 
@@ -84,7 +117,8 @@ function Queue({ product, people, onChanged }: { product: Product; people: { id:
         <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift">Здесь пусто.</p>
       ) : data.items.map((t) => (
         <TaskCard key={t.id} task={t} onDone={(nt) => {
-          setData({ items: data.items.map((x) => (x.id === nt.id ? nt : x)).filter((x) => !status || x.status === status) });
+          setData({ items: data.items.map((x) => (x.id === nt.id ? nt : x))
+            .filter((x) => (status === "all" ? x.status !== "deleted" : x.status === status)) });
           onChanged();
         }} />
       ))}

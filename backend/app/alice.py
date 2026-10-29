@@ -826,7 +826,9 @@ def queue(conn: sqlite3.Connection, status: str | None = "moderation", user_id: 
     if date_to:
         where.append("substr(completed_at, 1, 10) <= ?")
         args.append(date_to.isoformat())
-    rows = conn.execute(f"SELECT * FROM alice_tasks WHERE {' AND '.join(where)} ORDER BY completed_at, id LIMIT ?",
+    # the queue — oldest first (in the order they came); «Все» — newest first, so the limit never hides fresh tasks
+    order = "completed_at, id" if status else "completed_at DESC, id DESC"
+    rows = conn.execute(f"SELECT * FROM alice_tasks WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ?",
                         (*args, limit))
     return [view(conn, dict(r), staff=True) for r in rows]
 

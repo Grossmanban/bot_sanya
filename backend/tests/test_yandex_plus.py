@@ -500,3 +500,31 @@ def test_plus_rate_starts_equal_to_the_alice_rate(tmp_path):
         db.MIGRATIONS = real
     assert app_settings.get_all(c)["plus_rate"] == 175 and c.execute("PRAGMA user_version").fetchone()[0] == len(real)
     c.close()
+
+
+def test_moderation_all_shows_every_status_and_rates_are_set_per_product(conn, setup, make_user):
+    """«Модерация → Все» lists tasks of every status (not only «На модерации»); each product's rate is set apart
+    by the owner (admins can't change money settings)."""
+    owner, u = setup
+    plus_ready(conn, owner, u)
+    bot = PlusBot()
+    ids = [run(alice.deliver(conn, bot, plus_run(conn, u, JPG + bytes([i]))["id"]))["id"] for i in range(4)]
+    alice.moderate(conn, owner, ids[0], True, None, svc.new_key())
+    alice.moderate(conn, owner, ids[1], False, "Нет подписки", svc.new_key())
+    app_settings.set_raw(conn, "archive_chat_id", "-1999")
+    alice.delete_task(conn, owner, ids[2], None, svc.new_key())
+    client = TestClient(create_app(conn, Notifier(None, conn)))
+    oh = headers(999, "Саня", "Владелец", "boss")
+    items = client.get("/api/admin/alice/queue?status=all&product=plus", headers=oh).json()["items"]
+    assert [t["id"] for t in items] == [ids[3], ids[1], ids[0]]  # newest first, the deleted one only under «Удалённые»
+    assert {t["status"] for t in items} == {"moderation", "rejected", "accepted"}
+    assert [t["id"] for t in client.get("/api/admin/alice/queue?status=deleted&product=plus", headers=oh).json()["items"]] == [ids[2]]
+    assert client.get("/api/admin/alice/queue?status=all", headers=oh).json()["items"] == []  # Alice's own list
+    # rates: the owner sets each product's own; an admin can't
+    r = client.patch("/api/admin/settings", json={"plus_rate": 250}, headers=oh)
+    assert r.status_code == 200 and r.json()["settings"]["plus_rate"] == 250 and r.json()["settings"]["alice_rate"] == 100
+    assert client.get("/api/admin/alice?product=plus", headers=oh).json()["rate"] == 250
+    admin = make_user(first="Админ", username="adm")
+    svc.set_role(conn, owner, admin["id"], "admin", svc.new_key())
+    r = client.patch("/api/admin/settings", json={"alice_rate": 1}, headers=headers(admin["telegram_id"]))
+    assert r.status_code == 403 and app_settings.get_all(conn)["alice_rate"] == 100

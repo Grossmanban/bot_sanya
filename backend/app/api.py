@@ -1101,6 +1101,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_alice_queue(status: str | None = "moderation", user_id: int | None = None, qr_id: int | None = None,
                                 date_from: str | None = Query(None, alias="from"), date_to: str | None = Query(None, alias="to"),
                                 product: str = alice.PRODUCT, _: dict = Depends(staff("alice"))):
+        if status == "all":  # «Все»: every status (the deleted ones stay under «Удалённые»)
+            status = None
         if status and status not in alice.STATUS:
             raise svc.ServiceError("Неизвестный статус", 422, "bad_status")
         return {"items": alice.queue(conn, status or None, user_id, qr_id,
