@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, PRODUCT_TITLES, type EventChanges, type LiveEvent, type PendingEntry, type Product, type User } from "@/lib/api";
 import { useCan, useManageableProducts } from "@/lib/caps";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
+import { linkedEntry } from "@/lib/link";
 import { cn } from "@/lib/utils";
 import {
   ANNUL_PRESETS, DeleteButton, EditButton, NotifyDialog, PrizeFields, PrizeThumb, ReasonInput, VisibilityButton,
@@ -23,6 +24,8 @@ const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline
 export function EventsAdmin({ me }: { me: User }) {
   const everyone = useCan("all_people");
   const { data, reload } = useLoad(() => api.admin.events(), []);
+  // opened from the bot's «🏁 Проверить в приложении»: that entry is highlighted
+  const [linked] = useState(() => linkedEntry("events"));
   useEffect(() => {
     const t = setInterval(reload, 7000);
     return () => clearInterval(t);
@@ -36,7 +39,7 @@ export function EventsAdmin({ me }: { me: User }) {
           {data.pending.length > 0 && (
             <section className="overflow-hidden rounded-3xl bg-card shadow-lift ring-1 ring-wait/30">
               <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">Заявки на проверку <span className="text-muted-foreground">{data.pending.length}</span></h2>
-              <ul className="divide-y">{data.pending.map((p) => <EntryRow key={p.id} entry={p} onDone={reload} />)}</ul>
+              <ul className="divide-y">{data.pending.map((p) => <EntryRow key={p.id} entry={p} linked={p.id === linked} onDone={reload} />)}</ul>
             </section>
           )}
           {data.items.length === 0 ? (
@@ -48,21 +51,25 @@ export function EventsAdmin({ me }: { me: User }) {
   );
 }
 
-function EntryRow({ entry, onDone }: { entry: PendingEntry; onDone: () => void }) {
+function EntryRow({ entry, linked, onDone }: { entry: PendingEntry; linked: boolean; onDone: () => void }) {
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
   const { busy, run } = useAction();
+  const row = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (linked) row.current?.scrollIntoView({ block: "center" });
+  }, [linked]);
   const decide = async (approve: boolean) => {
     try {
       await run(approve ? "ok" : "no", (k) => api.admin.reviewEntry(entry.id, approve, approve ? null : reason.trim(), k),
         approve ? (entry.mode === "first_to_reach" ? "👑 Победитель подтверждён" : "Засчитано") : "Отклонено");
-      onDone();
     } catch {
-      /* toast shown */
+      /* toast shown — e.g. «Уже решено: ✅ Подтверждено — кто»; the list is refreshed either way */
     }
+    onDone();
   };
   return (
-    <li className="space-y-3 px-5 py-4 md:px-6">
+    <li ref={row} className={cn("space-y-3 px-5 py-4 md:px-6", linked && "bg-wait/10")}>
       <div className="flex items-start gap-3">
         <PhotoThumb src={entry.photo_url} className="size-16" />
         <div className="min-w-0 flex-1">

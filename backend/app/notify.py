@@ -6,6 +6,7 @@ import re
 import sqlite3
 from datetime import date, timedelta
 from html import escape
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
@@ -66,6 +67,13 @@ def person_link(user: dict, name: str | None = None) -> str:
 
 def who(user: dict) -> str:
     return person_link(user)
+
+
+def app_link(**params) -> str:
+    """The Mini App address opening a given place: app_link(open="events", entry=4) → …/?open=events&entry=4."""
+    parts = urlsplit(settings.webapp_url)
+    query = parse_qsl(parts.query) + [(k, str(v)) for k, v in params.items()]
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 BLOCKED_TEXT = "⛔ Доступ к боту заблокирован. Обратитесь к администратору."
@@ -1975,18 +1983,58 @@ class Notifier:
 
         event = events.get(self.conn, entry["event_id"])
         user = svc.get_user(self.conn, entry["user_id"])
-        caption = (f"🏁 <b>Заявка в событии «{escape(event['title'])}»</b>\n{who(user)}: <b>{entry['value']} шт.</b>"
-                   f" (попытка {entry['attempt']})")
-        markup = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ev:ok:{entry['id']}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ev:no:{entry['id']}")]])
+        caption = self._entry_caption(event, user, entry)
+        if settings.webapp_url.startswith("https://"):
+            # 30.10: the decision is taken in the Mini App (Админ → События), not in a dialog with the bot
+            caption += "\nПодтвердить или отклонить — в приложении."
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="🏁 Проверить в приложении", web_app=WebAppInfo(url=app_link(open="events", entry=entry["id"])))]])
+        else:  # no HTTPS Mini App (local run): the old buttons in the chat
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ev:ok:{entry['id']}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ev:no:{entry['id']}")]])
+        photo = entry["photo_file_id"] if entry["photo_file_id"] and not entry["photo_file_id"].startswith("local:") else None
         for chat in reports.reviewers(self.conn, user):
-            await self._photo_or_text(chat, entry["photo_file_id"], caption, markup)
+            message_id = await self._deliver(chat, caption, photo, markup)
+            if message_id is not None:  # remembered, so every reviewer's card shows the decision later
+                self.conn.execute("INSERT INTO event_entry_messages (entry_id, chat_id, message_id, photo) VALUES (?, ?, ?, ?)",
+                                  (entry["id"], chat, message_id, int(photo is not None)))
+
+    @staticmethod
+    def _entry_caption(event: dict, user: dict, entry: dict) -> str:
+        return (f"🏁 <b>Заявка в событии «{escape(event['title'])}»</b>\n{who(user)}: <b>{entry['value']} шт.</b>"
+                f" (попытка {entry['attempt']})")
+
+    async def _mark_entry_cards(self, entry: dict, event: dict, actor: dict) -> None:
+        """Every reviewer's card of this entry becomes «✅ Подтверждено — кто» without the button (no «Уже решено» surprises)."""
+        from . import events
+
+        if self.bot is None:
+            return
+        user = svc.get_user(self.conn, entry["user_id"])
+        text = (self._entry_caption(event, user, entry)
+                + f"\n\n<b>{events.decision(entry)}</b> — {escape(svc.full_name(actor))}")
+        if entry["status"] == "rejected" and entry["reason"]:
+            text += f"\nПричина: {escape(entry['reason'])}"
+        rows = self.conn.execute("SELECT chat_id, message_id, photo FROM event_entry_messages WHERE entry_id = ?",
+                                 (entry["id"],)).fetchall()
+        for chat, message_id, photo in rows:
+            try:
+                if photo:
+                    await self._retry(lambda: self.bot.edit_message_caption(
+                        chat_id=chat, message_id=message_id, caption=text[:1024], parse_mode="HTML", reply_markup=None))
+                else:
+                    await self._retry(lambda: self.bot.edit_message_text(
+                        text, chat_id=chat, message_id=message_id, parse_mode="HTML", reply_markup=None,
+                        disable_web_page_preview=True))
+            except Exception:
+                log.debug("could not mark the event entry card", exc_info=True)
 
     async def event_reviewed(self, result, actor: dict) -> None:
         from . import events
 
         entry, event = result.entry, result.event
+        await self._mark_entry_cards(entry, event, actor)
         user = svc.get_user(self.conn, entry["user_id"])
         if entry["status"] == "confirmed":
             text = (f"👑 Вы среди победителей события «{escape(event['title'])}»!" if event["mode"] == "first_to_reach"

@@ -1466,6 +1466,16 @@ def _tz3010(conn: sqlite3.Connection) -> None:
 
 MIGRATIONS.append(_tz3010)
 
+# 30.10, события: заявка проверяется в приложении, карточки в боте у всех проверяющих помечаются решением
+MIGRATIONS.append("""
+CREATE TABLE event_entry_messages (
+    entry_id    INTEGER NOT NULL REFERENCES event_entries(id),
+    chat_id     INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    photo       INTEGER NOT NULL DEFAULT 0
+)
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

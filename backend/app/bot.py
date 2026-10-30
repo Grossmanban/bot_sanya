@@ -639,9 +639,19 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         _, verdict, entry_id = call.data.split(":")
         if verdict == "ok":
             ok, text = await event_decide(call.from_user.id, int(entry_id), True, None)
-            if ok:
+            tracked = conn.execute("SELECT 1 FROM event_entry_messages WHERE chat_id = ? AND message_id = ?",
+                                   (call.message.chat.id, call.message.message_id)).fetchone()
+            if ok and not tracked:  # a tracked card is already marked by the notifier
                 await mark_done(call, text)
             await call.answer(text, show_alert=not ok)
+            return
+        if settings.webapp_url.startswith("https://"):
+            # 30.10: an old card's «Отклонить» — the reason is written in the app, not in a dialog with the bot
+            await call.message.answer("Отклонить заявку и указать причину — в приложении: «Админ → События».",
+                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                                          text="🏁 Проверить в приложении",
+                                          web_app=WebAppInfo(url=notify.app_link(open="events", entry=entry_id)))]]))
+            await call.answer()
             return
         await state.clear()
         await state.set_state(EventReject.reason)

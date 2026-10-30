@@ -209,10 +209,10 @@ def test_migration_moves_waiting_candidates_back_but_not_refused_ones(tmp_path):
     path = str(tmp_path / "bot.db")
     old = sqlite3.connect(path, isolation_level=None)
     old.row_factory = sqlite3.Row
-    from app.db import SCHEMA
+    from app.db import SCHEMA, _tz3010
 
     old.executescript(SCHEMA)
-    MIGRATIONS_BEFORE = len(MIGRATIONS) - 1
+    MIGRATIONS_BEFORE = MIGRATIONS.index(_tz3010)  # later migrations don't matter here
     old.execute("PRAGMA user_version = 0")
 
     import app.db as db

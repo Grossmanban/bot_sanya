@@ -399,8 +399,11 @@ def review(conn: sqlite3.Connection, actor: dict, entry_id: int, approve: bool, 
         actor = _fresh_actor(conn, actor)
         if not perms.can(actor, "review", svc.get_user(conn, entry["user_id"])):
             raise ServiceError("Недостаточно прав", 403, "forbidden")
-        if entry["status"] != "pending_review" or event["status"] != "active" or event["deleted_at"]:
-            return Review(entry, event, False)
+        if entry["status"] != "pending_review":
+            # someone else (another reviewer, in the bot or the app) was first — say who and how
+            raise ServiceError(decided_text(conn, entry), 409, "already_decided")
+        if event["status"] != "active" or event["deleted_at"]:
+            raise ServiceError("Событие уже завершено — заявку больше нельзя проверить", 409, "event_closed")
         # microseconds: the order of confirmations decides the winners and breaks ties
         conn.execute("UPDATE event_entries SET status = ?, reason = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?",
                      ("confirmed" if approve else "rejected", reason, actor["telegram_id"], now_local().isoformat(), entry_id))
@@ -415,6 +418,28 @@ def review(conn: sqlite3.Connection, actor: dict, entry_id: int, approve: bool, 
                   event_type="EVENT_ENTRY_CONFIRMED" if approve else "EVENT_ENTRY_REJECTED", key=key,
                   new={"entry": entry_id}, description=reason)
     return Review(get_entry(conn, entry_id), get(conn, event["id"]), True, finished)
+
+
+def decision(entry: dict) -> str:
+    if entry["status"] == "confirmed":
+        return "✅ Подтверждено"
+    return "↩️ Результат отменён" if entry["annulled_at"] else "❌ Отклонено"
+
+
+def reviewer_name(conn: sqlite3.Connection, entry: dict) -> str | None:
+    user = svc.get_user_by_tg(conn, entry["reviewed_by"]) if entry["reviewed_by"] else None
+    return svc.full_name(user) if user else None
+
+
+def decided_text(conn: sqlite3.Connection, entry: dict) -> str:
+    """«Уже решено: ✅ Подтверждено — Максим Селезнев в 18:05»."""
+    text = f"Уже решено: {decision(entry)}"
+    name = reviewer_name(conn, entry)
+    if name:
+        text += f" — {name}"
+    if entry["reviewed_at"]:
+        text += f" в {entry['reviewed_at'][11:16]}"
+    return text
 
 
 def cancel(conn: sqlite3.Connection, actor: dict, event_id: int, key: str) -> dict:

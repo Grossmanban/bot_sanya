@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { AccessScreen, LoadingScreen } from "./access-screens";
 import { ApplicationStatus, Registration } from "./register/register";
 import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
+import { takeLink } from "@/lib/link";
 import { ScheduleScreen } from "./schedule/schedule-screen";
 import { ProfileScreen } from "./profile/profile-screen";
 import { AdminScreen } from "./admin/admin-screen";
@@ -63,7 +64,16 @@ export function MiniApp() {
   const [me, setMe] = useState<Me | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   // the open tab survives a reload of the app (Telegram «Обновить страницу»)
-  const [shown, setTabState] = useState<Tab>(() => (readSession("tab") as Tab | null) ?? "schedule");
+  // a button in the bot may open a place: «🏁 Проверить в приложении» → Админ → События (a non-staff falls back below)
+  const [shown, setTabState] = useState<Tab>(() => {
+    if (takeLink()?.open === "events") {
+      writeSession("admin-section", "events");
+      writeSession("admin-group:products", "events");
+      writeSession("tab", "admin");
+      return "admin";
+    }
+    return (readSession("tab") as Tab | null) ?? "schedule";
+  });
   const setTab = useCallback((t: Tab) => {
     rememberScroll();
     setTabState(t);
