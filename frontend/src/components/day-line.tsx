@@ -119,9 +119,11 @@ export function DayLanes({ lanes, className }: { lanes: Lane[]; className?: stri
         const detail = off ? "выходной" : [range, lane.caption].filter(Boolean).join(", ");
         return (
           <div key={lane.key} className="space-y-1.5">
-            <div className="flex items-baseline justify-between gap-3 text-sm">
-              <span className={cn("truncate", lane.highlight ? "font-semibold" : "text-muted-foreground")}>{lane.name}</span>
-              <span className="shrink-0 text-xs text-muted-foreground tabular">{detail}</span>
+            {/* ТЗ 30.10 §1: a long place shrinks with an ellipsis (the full text is in the list below) instead of
+                widening the page; the name keeps at least its own share */}
+            <div className="flex min-w-0 items-baseline justify-between gap-3 text-sm">
+              <span className={cn("min-w-[30%] truncate", lane.highlight ? "font-semibold" : "text-muted-foreground")}>{lane.name}</span>
+              <span className="min-w-0 truncate text-right text-xs text-muted-foreground tabular" title={detail}>{detail}</span>
             </div>
             <div className={cn("relative h-3 overflow-hidden rounded-full bg-track", off && "hatch")}>
               <Ticks />

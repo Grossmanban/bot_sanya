@@ -1,6 +1,9 @@
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from .config import settings
+
+MSK = ZoneInfo("Europe/Moscow")
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 WEEKDAY_RU = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
@@ -34,3 +37,17 @@ def ddmm(day: date) -> str:
 
 def ddmm_wd(day: date) -> str:
     return f"{ddmm(day)} ({WEEKDAY_SHORT_RU[day.weekday()]})"
+
+
+def msk_datetime(iso: str | None) -> str | None:
+    """ТЗ 30.10 §7: «30.10.2026 в 03:47 МСК» — always Moscow time, whatever the server's zone or the stored offset
+    (a value without an offset was written in the project's zone)."""
+    if not iso:
+        return None
+    try:
+        moment = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=settings.tz)
+    return moment.astimezone(MSK).strftime("%d.%m.%Y в %H:%M МСК")

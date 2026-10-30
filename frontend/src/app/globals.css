@@ -153,6 +153,13 @@
     font-size: 16px !important;
   }
 }
+/* ТЗ 30.10 §1: date and time fields have an intrinsic minimum width on iOS / Android and pushed two-column forms
+   past the screen edge; they shrink with their column like any other field */
+input[type="date"],
+input[type="time"] {
+  min-width: 0;
+  max-width: 100%;
+}
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;

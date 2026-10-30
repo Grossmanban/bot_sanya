@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -9,7 +9,8 @@ import { ddmm, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
-import { CancelCounter, CancelWarning, ContactTimer, ReasonForm, StageBadge, TrainingLine, requestLines } from "../training/shared";
+import { AgreementMark, AttemptsHistory, CancelCounter, CancelWarning, ContactTimer, ReasonForm, StageBadge, Submitted, TrainingLine, agreedCard,
+  requestLines } from "../training/shared";
 
 type Tab = "new" | "scheduled" | "internship" | "done" | "rejected";
 const TABS: { id: Tab; label: string }[] = [
@@ -22,7 +23,19 @@ const TABS: { id: Tab; label: string }[] = [
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 type Trainer = { id: number; name: string; username: string | null };
-type Sort = "new" | "age" | "skill";
+type Sort = "new" | "age" | "skill" | "days";
+type Dir = "desc" | "asc";
+
+/** The questionnaire's moment — newer first; the id keeps the order stable. */
+const byNewest = (a: Application, b: Application) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || b.id - a.id;
+
+/** ТЗ 30.10 §6: «Количество дней в неделю» from the questionnaire; no value — always at the end. */
+const byDays = (dir: Dir) => (a: Application, b: Application) => {
+  const x = a.min_days || null;
+  const y = b.min_days || null;
+  if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+  return dir === "desc" ? y - x : x - y;
+};
 
 /** «Онбординг» (the customer's module 3): candidates from the questionnaire → training → internship → bonuses. */
 export function OnboardingSection({ me }: { me: User }) {
@@ -32,16 +45,27 @@ export function OnboardingSection({ me }: { me: User }) {
   const [skill, setSkill] = useState<[number, number]>([1, 10]);
   const [days, setDays] = useState<number[]>([]);
   const [sort, setSort] = useState<Sort>("new");
+  const [dir, setDir] = useState<Dir>("desc");
+  // ТЗ 30.10 §4: the order follows the confirmations made elsewhere (the bot, the trainer) without a manual reload
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") void reload();
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [reload]);
 
   const items = useMemo(() => {
     const list = (data?.items ?? []).filter((a) =>
       (!age[0] || a.age >= Number(age[0])) && (!age[1] || a.age <= Number(age[1]))
       && a.communication >= skill[0] && a.communication <= skill[1]
       && days.every((d) => a.training_days.includes(d)));
-    if (sort === "age") list.sort((a, b) => a.age - b.age);
-    if (sort === "skill") list.sort((a, b) => b.communication - a.communication);
-    return list;
-  }, [data, age, skill, days, sort]);
+    const chosen = sort === "age" ? (a: Application, b: Application) => a.age - b.age
+      : sort === "skill" ? (a: Application, b: Application) => b.communication - a.communication
+      : sort === "days" ? byDays(dir) : () => 0;
+    // «На обучении» (§4): both confirmed first, then the rest by their progress; inside — the chosen sort, then the questionnaire
+    const agreement = (a: Application) => (tab === "scheduled" ? a.agreement_rank ?? 9 : 0);
+    return list.sort((a, b) => agreement(a) - agreement(b) || chosen(a, b) || byNewest(a, b));
+  }, [data, age, skill, days, sort, dir, tab]);
   const filtered = !!(age[0] || age[1]) || skill[0] > 1 || skill[1] < 10 || days.length > 0;
 
   return (
@@ -92,11 +116,22 @@ export function OnboardingSection({ me }: { me: User }) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="w-24 text-muted-foreground">Сортировка</span>
-            <select className={cn(field, "h-10 w-auto")} value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
+            <select className={cn(field, "h-10 w-auto min-w-0 max-w-full")} value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
               <option value="new">сначала новые</option>
               <option value="age">по возрасту</option>
               <option value="skill">по навыкам</option>
+              <option value="days">количество дней в неделю</option>
             </select>
+            {sort === "days" && (
+              <div className="flex rounded-xl bg-muted p-0.5" role="group" aria-label="Направление сортировки">
+                {([["desc", "по убыванию"], ["asc", "по возрастанию"]] as const).map(([d, label]) => (
+                  <button key={d} type="button" onClick={() => setDir(d)} aria-pressed={dir === d}
+                          className={cn("press h-9 rounded-lg px-3 text-sm font-semibold whitespace-nowrap", dir === d ? "bg-card shadow-lift" : "text-muted-foreground")}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
             {filtered && (
               <Button variant="ghost" size="sm" className="rounded-lg" onClick={() => { setAge(["", ""]); setSkill([1, 10]); setDays([]); }}>
                 Сбросить
@@ -116,6 +151,9 @@ export function OnboardingSection({ me }: { me: User }) {
         </p>
       ) : (
         <ul className="space-y-3">
+          {tab === "scheduled" && items.some((a) => a.agreement === "agreed") && (
+            <li className="px-1 text-xs text-muted-foreground">Сверху — кандидаты, у которых дату и время подтвердили и кандидат, и тренер.</li>
+          )}
           {items.map((a) => (
             <Candidate key={a.id} a={a} me={me} trainers={data.trainers} points={data.points} onDone={reload} />
           ))}
@@ -220,7 +258,7 @@ function Candidate({ a, me, trainers, points, onDone }: {
   if (main.length === 0) [main, rest] = [rest, []];
 
   return (
-    <li className="row-in space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+    <li className={cn("row-in space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6", agreedCard(a))}>
       <div className="flex items-start gap-3">
         {broken ? (
           <span className="grid size-14 shrink-0 place-items-center rounded-2xl bg-muted font-display text-lg font-semibold">
@@ -236,9 +274,10 @@ function Candidate({ a, me, trainers, points, onDone }: {
             {a.age} {plural(a.age, "год", "года", "лет")} · м. {a.metro}{a.username ? ` · @${a.username}` : ""}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Навыки {a.communication}/10 · от {a.min_days} {plural(a.min_days, "дня", "дней", "дней")} в неделю · анкета {ddmm(a.created_at.slice(0, 10))}
+            Навыки {a.communication}/10 · от {a.min_days} {plural(a.min_days, "дня", "дней", "дней")} в неделю
             {a.earlier ? ` · анкет раньше: ${a.earlier}` : ""}
           </p>
+          <Submitted a={a} className="mt-0.5" />
           <div className="mt-2 flex flex-wrap items-center gap-1">
             <StageBadge a={a} />
             {a.training_days.map((d) => <span key={d} className="rounded-lg bg-muted px-2 py-0.5 text-xs font-semibold">{DAYS[d]}</span>)}
@@ -266,9 +305,11 @@ function Candidate({ a, me, trainers, points, onDone }: {
             : <b className="text-wait">Кандидат просит написать ему первым</b>}</p>
         )}
         {(scheduled || (a.cancel_count ?? 0) > 0) && <CancelCounter a={a} />}
+        <AttemptsHistory a={a} />
       </div>
 
       {scheduled && <TrainingLine a={a} />}
+      <AgreementMark a={a} />
       {(a.requests?.length ?? 0) > 0 && (
         <p className="rounded-2xl bg-wait-soft px-4 py-2.5 text-sm text-wait">
           Ожидает согласования: {a.requests!.map((r) => r.title).join(", ")} — решение выше, в списке запросов.
@@ -330,7 +371,7 @@ function Candidate({ a, me, trainers, points, onDone }: {
                                            onSave={(manager) => act("contact", () => api.admin.contactApplication(a.id, manager), "Сообщение отправлено кандидату")} />}
       {panel === "cancel" && <CancelForm busy={!!busy} hasDate={!!a.training_date}
                                          onSave={(reason, kind) => act("cancel", (k) => api.admin.cancelTraining(a.id, reason, kind, k),
-                                           "Обучение отменено, кандидат остаётся за тренером")} />}
+                                           "Обучение отменено: кандидат вернулся в «Ожидают рассмотрения»")} />}
       {panel === "reject" && (
         <ReasonForm kind="reject_candidate" tone="cancel" busy={!!busy} confirm="Да, отказать"
                     note="Кандидат получит отказ, аккаунт будет заблокирован, бот исключит его из «Предзакрепа». Если отказали по ошибке — «Вернуть в резерв» в «Отклонённых»."
@@ -399,8 +440,8 @@ function TrainerForm({ a, trainers, busy, onSave }: { a: Application; trainers: 
 function CancelForm({ busy, hasDate, onSave }: { busy: boolean; hasDate: boolean; onSave: (reason: string, kind: "cancel" | "no_show") => void }) {
   const [kind, setKind] = useState<"cancel" | "no_show">("cancel");
   return (
-    <ReasonForm kind="cancel_training" busy={busy} confirm={kind === "no_show" ? "Отметить неявку" : "Да, отменить обучение"}
-                note="Это не отказ: кандидат остаётся за тренером, дату назначите заново. Отмена считается в «Отмены обучения»; перенос даты — не отмена."
+    <ReasonForm kind="cancel_training" busy={busy} confirm={kind === "no_show" ? "Отметить неявку и отменить" : "Да, отменить обучение"}
+                note="Это не отказ: попытка обучения получит статус «Отменено», закрепление за тренером завершится, кандидат вернётся в «Ожидают рассмотрения» — его можно назначить тому же или другому тренеру. Отмена увеличит счётчик «Отмены обучения»; перенос даты — не отмена."
                 onSave={(reason) => onSave(reason, kind)}>
       {hasDate && (
         <div className="flex gap-1.5">

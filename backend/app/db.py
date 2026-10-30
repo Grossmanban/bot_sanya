@@ -1406,6 +1406,67 @@ INSERT OR IGNORE INTO app_settings (key, value) SELECT 'plus_rate', value FROM a
 """)
 
 
+def _tz3010(conn: sqlite3.Connection) -> None:
+    """Migration 41 — ТЗ 30.10.
+
+    §5: a cancelled training is a finished attempt. training_cancellations (one row per cancellation, already the
+    counter) keeps what the attempt was: the trainer, the date, time and place, both confirmations, when the trainer
+    was assigned and the training started. The candidate goes back to «Ожидают рассмотрения» (status `new`, no
+    trainer); the next assignment is a new attempt, the old one stays in this row. Rows made before are filled
+    from the event log where it has the data. Candidates waiting for a new date after a cancellation (1/3 and more)
+    go back to «Ожидают рассмотрения» right away; refused ones stay where they are.
+
+    §3: «Разрешить доступ» from «Попытки доступа» — who allowed it, when and with what result."""
+    import json
+
+    for column in ("trainer_id INTEGER", "training_date TEXT", "training_time TEXT", "training_location TEXT",
+                   "candidate_confirmed_at TEXT", "trainer_confirmed_at TEXT", "attempt_started_at TEXT",
+                   "training_started_at TEXT"):
+        conn.execute(f"ALTER TABLE training_cancellations ADD COLUMN {column}")
+    for column in ("restored_at TEXT", "restored_by INTEGER", "restore_result TEXT"):
+        conn.execute(f"ALTER TABLE access_attempts ADD COLUMN {column}")
+    # the attempt behind each earlier cancellation: the event written in the same transaction has the old values
+    for row in conn.execute("SELECT id, application_id, at FROM training_cancellations").fetchall():
+        for event in conn.execute("""SELECT old_value, new_value FROM event_logs WHERE event_type = 'TRAINING_CANCELLED'
+                                     AND created_at = ? ORDER BY id""", (row["at"],)).fetchall():
+            try:
+                new, old = json.loads(event["new_value"] or "{}"), json.loads(event["old_value"] or "{}")
+            except ValueError:
+                continue
+            if new.get("application") == row["application_id"]:
+                conn.execute("""UPDATE training_cancellations SET trainer_id = ?, training_date = ?, training_time = ?,
+                                training_location = ? WHERE id = ?""",
+                             (old.get("trainer_id"), old.get("training_date"), old.get("training_time"),
+                              old.get("training_location"), row["id"]))
+                break
+    # waiting for a new date after a cancellation → «Ожидают рассмотрения»; the trainer's part of the attempt ends
+    from .timeutil import now_iso
+
+    stamp = now_iso()
+    waiting = conn.execute("""SELECT * FROM applications a WHERE status = 'scheduled' AND training_date IS NULL
+                              AND training_started_at IS NULL
+                              AND EXISTS (SELECT 1 FROM training_cancellations t WHERE t.application_id = a.id)""").fetchall()
+    for app in waiting:
+        conn.execute("""UPDATE training_cancellations SET trainer_id = COALESCE(trainer_id, ?),
+                        attempt_started_at = COALESCE(attempt_started_at, ?)
+                        WHERE id = (SELECT MAX(id) FROM training_cancellations WHERE application_id = ?)""",
+                     (app["trainer_id"], app["trainer_assigned_at"], app["id"]))
+        conn.execute("""UPDATE applications SET status = 'new', trainer_id = NULL, trainer_assigned_at = NULL,
+                        trainer_confirmed_at = NULL, training_confirmed_at = NULL, training_set_by = NULL,
+                        training_set_at = NULL, contact_timer_at = NULL, contact_answer = NULL, contact_answer_at = NULL,
+                        reminded_eve = NULL, reminded_morning = NULL, version = version + 1 WHERE id = ?""", (app["id"],))
+        conn.execute("""UPDATE training_requests SET status = 'stale', decided_at = ? WHERE application_id = ?
+                        AND status = 'pending'""", (stamp, app["id"]))
+        conn.execute("""INSERT INTO event_logs (user_id, actor_id, event_type, old_value, new_value, idempotency_key,
+                        description, created_at) VALUES (?, 0, 'TRAINING_BACK_TO_REVIEW', ?, ?, ?, ?, ?)""",
+                     (app["user_id"], json.dumps({"trainer_id": app["trainer_id"]}),
+                      json.dumps({"application": app["id"]}), f"migration41:{app['id']}",
+                      "ТЗ 30.10 §5: после отмены — в «Ожидают рассмотрения»", stamp))
+
+
+MIGRATIONS.append(_tz3010)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

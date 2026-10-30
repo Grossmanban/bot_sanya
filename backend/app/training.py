@@ -15,7 +15,14 @@ rejected, returned); the finer stage is derived from the columns of migration 32
 an admin decides: start, refusal, cancellation, a change, the internship. A request is one row: a second tap
 returns the same one; a change made meanwhile makes a change request stale. An admin may act directly.
 Cancellations are counted (a reschedule is not a cancellation, a no-show is); 3 of them (a setting) — a warning,
-never an automatic refusal. A refusal blocks the account (restorable by «Вернуть в резерв»)."""
+never an automatic refusal. A refusal blocks the account (restorable by «Вернуть в резерв»).
+
+ТЗ 30.10: the trainer sets and changes the date and time of their own candidate directly (the same `_apply_schedule`
+as an admin; the trainer who set it has confirmed it). «Отменить обучение» — by an admin or by the candidate's own
+trainer, with a reason — ends the attempt: it is kept in training_cancellations with everything it had (the
+counter), the candidate goes back to «Ожидают рассмотрения» without a trainer and may be given to the same or
+another trainer — a new attempt. «Обучение» is sorted by the agreement: both confirmed first (green), then the
+candidate confirmed, then a date waiting for the candidate, then no date."""
 
 import json
 import sqlite3
@@ -50,8 +57,122 @@ def cancellations(conn: sqlite3.Connection, app_id: int) -> list[dict]:
         r = dict(r)
         who = ids.get(r["initiator_id"]) if r["initiator_role"] in ("trainer", "candidate") else names.get(r["initiator_id"])
         out.append({"at": r["at"], "kind": r["kind"], "reason": r["reason"] or (LEGACY_NOTE if r["legacy"] else None),
-                    "initiator": who, "role": r["initiator_role"], "legacy": bool(r["legacy"])})
+                    "initiator": who, "role": r["initiator_role"], "legacy": bool(r["legacy"]),
+                    # ТЗ 30.10 §5: what the cancelled attempt was
+                    "trainer": ids.get(r["trainer_id"]) if r.get("trainer_id") else None,
+                    "training_date": r.get("training_date"), "training_time": r.get("training_time"),
+                    "training_location": r.get("training_location"),
+                    "candidate_confirmed_at": r.get("candidate_confirmed_at"),
+                    "trainer_confirmed_at": r.get("trainer_confirmed_at"),
+                    "attempt_started_at": r.get("attempt_started_at"), "training_started_at": r.get("training_started_at")})
     return out
+
+
+# ТЗ 30.10 §5: the history of statuses inside each attempt, read from the event log
+EVENT_TITLES = {
+    "TRAINER_ASSIGNED": "Назначен тренер", "TRAINING_ASSIGNED": "Назначены дата и время",
+    "TRAINING_CONFIRMED": "Кандидат подтвердил дату", "TRAINING_TRAINER_CONFIRMED": "Тренер подтвердил дату",
+    "TRAINING_STARTED": "Обучение начато", "TRAINING_REQUESTED": "Запрос тренера",
+    "TRAINING_REQUEST_APPROVED": "Запрос одобрен", "TRAINING_REQUEST_REJECTED": "Запрос отклонён",
+    "TRAINING_CANCELLED": "Обучение отменено", "TRAINING_BACK_TO_REVIEW": "Возвращён в «Ожидают рассмотрения»",
+    "INTERNSHIP_STARTED": "Стажировка начата", "APPLICATION_REJECTED": "Отказано",
+}
+
+
+def _event_title(conn, row: dict, names: dict[int, str]) -> str:
+    title = EVENT_TITLES[row["event_type"]]
+    try:
+        new = json.loads(row["new_value"] or "{}")
+    except ValueError:
+        new = {}
+    if row["event_type"] == "TRAINER_ASSIGNED" and new.get("trainer"):
+        title += f": {names.get(new['trainer'], '—')}"
+    elif row["event_type"] == "TRAINING_ASSIGNED" and new.get("date"):
+        d = new["date"]
+        title += f": {d[8:10]}.{d[5:7]} в {new.get('time') or '—'}" + (" (тренер)" if new.get("by") == "trainer" else "")
+    elif row["event_type"] == "TRAINING_REQUESTED" and new.get("kind") in KINDS:
+        title += f": {KINDS[new['kind']]}"
+    elif row["event_type"] == "TRAINING_CANCELLED" and new.get("kind") == "no_show":
+        title = "Неявка кандидата"
+    return title
+
+
+def attempts(conn: sqlite3.Connection, app: dict, cancels: list[dict] | None = None) -> list[dict]:
+    """ТЗ 30.10 §5: every attempt of training — the cancelled ones (kept in training_cancellations) and the current
+    one — each with its own history of statuses. A new assignment after a cancellation is a new attempt."""
+    cancels = cancellations(conn, app["id"]) if cancels is None else cancels
+    current = app["status"] == "scheduled" or (app["status"] in ("internship", "done") and app.get("trainer_id"))
+    if not cancels and not current:
+        return []
+    names = {r["id"]: svc.full_name(dict(r)) for r in conn.execute("SELECT id, first_name, last_name FROM users")}
+    types = tuple(EVENT_TITLES)
+    events = [dict(r) for r in conn.execute(
+        f"""SELECT event_type, new_value, created_at FROM event_logs WHERE user_id = ? AND created_at >= ?
+            AND event_type IN ({','.join('?' * len(types))}) ORDER BY created_at, id""",
+        (app["user_id"], app["created_at"], *types))]
+    # each «Обучение отменено» closes an attempt (the migration's «back to review» belongs to the one it closed)
+    buckets: list[list[dict]] = [[]]
+    for e in events:
+        if e["event_type"] == "TRAINING_BACK_TO_REVIEW" and len(buckets) > 1:
+            buckets[-2].append(e)
+            continue
+        buckets[-1].append(e)
+        if e["event_type"] == "TRAINING_CANCELLED":
+            buckets.append([])
+    buckets += [[] for _ in range(len(cancels) + 1 - len(buckets))]
+
+    def history(n: int) -> list[dict]:
+        return [{"at": e["created_at"], "title": _event_title(conn, e, names)} for e in buckets[n]]
+
+    out = []
+    for n, c in enumerate(cancels):
+        out.append({"n": n + 1, "status": "cancelled", "status_title": "Неявка — отменено" if c["kind"] == "no_show" else "Отменено",
+                    **{k: c[k] for k in ("trainer", "training_date", "training_time", "training_location",
+                                         "candidate_confirmed_at", "trainer_confirmed_at", "attempt_started_at",
+                                         "training_started_at", "reason", "initiator", "role", "legacy")},
+                    "cancelled_at": c["at"], "events": history(n)})
+    if current:
+        trainer = names.get(app["trainer_id"]) if app.get("trainer_id") else None
+        out.append({"n": len(cancels) + 1, "status": "active", "status_title": stage(conn, app)[1], "trainer": trainer,
+                    "training_date": app.get("training_date"), "training_time": app.get("training_time"),
+                    "training_location": app.get("training_location"),
+                    "candidate_confirmed_at": app.get("training_confirmed_at"),
+                    "trainer_confirmed_at": app.get("trainer_confirmed_at"),
+                    "attempt_started_at": app.get("trainer_assigned_at"), "training_started_at": app.get("training_started_at"),
+                    "reason": None, "initiator": None, "role": None, "legacy": False, "cancelled_at": None,
+                    "events": history(len(cancels)) if len(buckets) > len(cancels) else []})
+    return out
+
+
+# ТЗ 30.10 §4: the agreement of the date — mutual confirmation first
+AGREEMENT = {
+    "agreed": (0, "Обе стороны подтвердили дату и время"),
+    "candidate_confirmed": (1, "Кандидат подтвердил, тренер — ещё нет"),
+    "waiting_candidate": (2, "Дата назначена, кандидат ещё не подтвердил"),
+    "no_date": (3, "Дата и время ещё не назначены"),
+    "cancelled": (4, "Обучение отменено"),
+}
+
+
+def agreement(app: dict) -> str | None:
+    """None outside training. «agreed» — only when both confirmed the current date (never a cancelled one)."""
+    if app["status"] == "new" and app.get("_cancelled"):
+        return "cancelled"
+    if app["status"] != "scheduled":
+        return None
+    if not app.get("training_date"):
+        return "no_date"
+    if app.get("training_confirmed_at") and app.get("trainer_confirmed_at"):
+        return "agreed"
+    if app.get("training_confirmed_at"):
+        return "candidate_confirmed"
+    return "waiting_candidate"
+
+
+def sort_by_agreement(rows: list[dict]) -> list[dict]:
+    """«Обучение» (§4): by the agreement, inside one state by the questionnaire — newer first, stable by id."""
+    newest = sorted(rows, key=lambda a: (a.get("created_at") or "", a["id"]), reverse=True)
+    return sorted(newest, key=lambda a: AGREEMENT[agreement(a)][0] if agreement(a) else 9)
 
 
 def limit(conn: sqlite3.Connection) -> int:
@@ -90,6 +211,8 @@ def stage(conn: sqlite3.Connection, app: dict) -> tuple[str, str]:
     if s == "returned":
         return "returned", "Возвращён в резерв"
     if s == "new":
+        if conn.execute("SELECT 1 FROM training_cancellations WHERE application_id = ?", (app["id"],)).fetchone():
+            return "cancelled", "Обучение отменено — ожидает рассмотрения"
         return "new", "Ожидает рассмотрения"
     if s == "done":
         return "done", "Принят в команду"
@@ -115,6 +238,7 @@ def extra(conn: sqlite3.Connection, app: dict) -> dict:
     code, title = stage(conn, app)
     cancels = cancellations(conn, app["id"])
     n, top = len(cancels), limit(conn)
+    agree = agreement({**app, "_cancelled": bool(cancels)})
     sent = [dict(r) for r in conn.execute(
         "SELECT kind, sent_at, delivered FROM candidate_messages WHERE application_id = ? ORDER BY id", (app["id"],))]
     return {"stage": code, "stage_title": title, "cancellations": cancels, "cancel_count": n, "cancel_limit": top,
@@ -125,6 +249,10 @@ def extra(conn: sqlite3.Connection, app: dict) -> dict:
             # §2: the 48-hour timer from the last «свяжитесь с тренером» (or a manual reset); shown until agreed
             "contact_timer_at": app.get("contact_timer_at") if code in ("trainer", "new_date", "confirm") else None,
             "messages": sent, "referrer_id": app.get("referrer_id"),
+            # ТЗ 30.10 §4: the agreement of the date (green only when both confirmed), §5: the attempts with history
+            "agreement": agree, "agreement_title": AGREEMENT[agree][1] if agree else None,
+            "agreement_rank": AGREEMENT[agree][0] if agree else None, "attempt": n + 1,
+            "attempts": attempts(conn, app, cancels),
             "pre_invited_at": app.get("pre_invited_at"), "team_invited_at": app.get("team_invited_at")}
 
 
@@ -185,8 +313,9 @@ def set_access(conn: sqlite3.Connection, actor: dict, user_id: int, allow: bool,
 
 def my_candidates(conn: sqlite3.Connection, user: dict) -> list[dict]:
     """«Обучение»: the candidates this person trains now (a refusal or the team takes them off the list)."""
-    return [dict(r) for r in conn.execute(
+    rows = [dict(r) for r in conn.execute(
         f"SELECT * FROM applications WHERE trainer_id = ? AND status IN {ACTIVE} ORDER BY id DESC", (user["id"],))]
+    return sort_by_agreement(rows)  # ТЗ 30.10 §4: both confirmed first
 
 
 # ---------------------------------------------------------------- the admin's direct actions
@@ -294,6 +423,40 @@ def schedule(conn: sqlite3.Connection, actor: dict, app_id: int, day: date, at: 
     return get(conn, app_id), True, previous
 
 
+def schedule_by_trainer(conn: sqlite3.Connection, user: dict, app_id: int, day: date, at: str, location: str,
+                        key: str) -> tuple[dict, bool, dict]:
+    """ТЗ 30.10 §2: «Назначить дату» / «Изменить дату» in the trainer's «Обучение» — their own candidate only (checked
+    here, not only by the button), the same mechanism as an admin's (`_apply_schedule`): the candidate confirms again,
+    the reminders start over. The trainer who set the date has confirmed it. Returns (app, changed, the old values)."""
+    try:
+        at = time.fromisoformat(at).strftime("%H:%M")
+    except (TypeError, ValueError) as exc:
+        raise ServiceError("Время — в формате ЧЧ:ММ", 422, "bad_time") from exc
+    location = recruiting._text(location, "Место")
+    _check_key(key)
+    with transaction(conn):
+        app = get(conn, app_id)
+        old = {k: (app or {}).get(k) for k in ("training_date", "training_time", "training_location")}
+        if _seen(conn, key):
+            return app, False, old
+        user = svc.get_user(conn, user["id"])
+        if app is None or app["trainer_id"] != user["id"] or not has_access(conn, user):
+            raise ServiceError("Это не ваш кандидат", 403, "forbidden")
+        if app["status"] != "scheduled":
+            raise ServiceError("Дату назначают до стажировки — обновите экран", 409, "bad_status")
+        if day < now_local().date():
+            raise ServiceError("Дата обучения уже прошла", 422, "past_date")
+        if (app["training_date"], app["training_time"], app["training_location"]) == (day.isoformat(), at, location):
+            return app, False, old  # nothing changed: the confirmations stay
+        _apply_schedule(conn, app, day.isoformat(), at, location, app["trainer_id"], user["telegram_id"])
+        conn.execute("UPDATE applications SET trainer_confirmed_at = ? WHERE id = ?", (now_iso(), app_id))
+        _stale_changes(conn, app_id)
+        log_event(conn, user_id=app["user_id"], actor_id=user["telegram_id"], event_type="TRAINING_ASSIGNED", key=key,
+                  old={**old, "trainer_id": app["trainer_id"]},
+                  new={"date": day.isoformat(), "time": at, "location": location, "trainer": app["trainer_id"], "by": "trainer"})
+    return get(conn, app_id), True, old
+
+
 def _apply_schedule(conn, app: dict, day: str | None, at: str | None, location: str | None, trainer_id: int,
                     actor_tg: int | None) -> None:
     trainer_changed = trainer_id != app["trainer_id"]
@@ -328,8 +491,8 @@ def agreed(app: dict) -> bool:
 
 def cancel(conn: sqlite3.Connection, actor: dict, app_id: int, reason: str | None, key: str, kind: str = "cancel",
            initiator: dict | None = None, role: str = "admin") -> tuple[dict, bool]:
-    """§3, §5: «Отменить обучение» (or a no-show of the candidate). Not a refusal: the candidate stays with the
-    trainer, the date is cleared, the counter grows. A reason is required."""
+    """«Отменить обучение» (or a no-show of the candidate) by an owner or an admin — directly, or a trainer's request
+    approved (initiator, role). A reason is required. ТЗ 30.10 §5: the attempt ends (see _cancel)."""
     if kind not in ("cancel", "no_show"):
         raise ServiceError("Неизвестный вид отмены", 422, "bad_kind")
     reason = templates.require_reason(reason, "Укажите причину отмены")
@@ -338,22 +501,58 @@ def cancel(conn: sqlite3.Connection, actor: dict, app_id: int, reason: str | Non
         actor, app = _load(conn, actor, app_id)
         if _seen(conn, key):
             return app, False
-        if app["status"] != "scheduled":
-            raise ServiceError("Отменить можно только назначенное обучение", 409, "bad_status")
-        if kind == "no_show" and not app["training_date"]:
-            raise ServiceError("Дата обучения ещё не назначена", 409, "no_date")
-        conn.execute("""INSERT INTO training_cancellations (application_id, kind, at, initiator_id, initiator_role, reason)
-                        VALUES (?, ?, ?, ?, ?, ?)""",
-                     (app_id, kind, now_iso(), (initiator or {}).get("id") if role != "admin" else actor["telegram_id"],
-                      role, reason))
-        _bump(conn, app_id, training_date=None, training_time=None, training_location=None, training_confirmed_at=None,
-              trainer_confirmed_at=None, training_started_at=None, reminded_eve=None, reminded_morning=None)
-        _stale_changes(conn, app_id)
-        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="TRAINING_CANCELLED", key=key,
-                  old={k: app[k] for k in ("training_date", "training_time", "training_location", "trainer_id")},
-                  new={"application": app_id, "kind": kind}, description=reason)
-    return {**get(conn, app_id), "cancelled_trainer_id": app["trainer_id"], "cancelled_date": app["training_date"],
-            "cancel_reason": reason, "cancel_kind": kind}, True
+        before = _cancel(conn, app, actor["telegram_id"],
+                         (initiator or {}).get("id") if role != "admin" else actor["telegram_id"], role, reason, kind, key)
+    return _cancelled_view(conn, app_id, before, reason, kind), True
+
+
+def cancel_by_trainer(conn: sqlite3.Connection, user: dict, app_id: int, reason: str | None, key: str) -> tuple[dict, bool]:
+    """ТЗ 30.10 §5: the candidate's own trainer cancels the training — a reason and a confirmation in the app, no
+    admin's approval. Only their own candidate, checked here (not only by the button)."""
+    reason = templates.require_reason(reason, "Укажите причину отмены")
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return get(conn, app_id), False
+        user = svc.get_user(conn, user["id"])
+        app = get(conn, app_id)
+        if app is None or app["trainer_id"] != user["id"] or not has_access(conn, user):
+            raise ServiceError("Это не ваш кандидат", 403, "forbidden")
+        before = _cancel(conn, app, user["telegram_id"], user["id"], "trainer", reason, "cancel", key)
+    return _cancelled_view(conn, app_id, before, reason, "cancel"), True
+
+
+def _cancel(conn, app: dict, actor_tg: int, initiator_id: int | None, role: str, reason: str, kind: str, key: str) -> dict:
+    """Inside the caller's transaction. ТЗ 30.10 §5: the current attempt gets «Отменено» — kept with its trainer,
+    date, time, place and confirmations (the row is also the counter, it never resets); the candidate leaves the
+    trainer's «Обучение» and goes back to «Ожидают рассмотрения»; their pending requests are closed. A no-show is a
+    cancellation too."""
+    if app["status"] != "scheduled":
+        raise ServiceError("Отменить можно только назначенное обучение — обновите экран", 409, "bad_status")
+    if kind == "no_show" and not app["training_date"]:
+        raise ServiceError("Дата обучения ещё не назначена", 409, "no_date")
+    conn.execute("""INSERT INTO training_cancellations (application_id, kind, at, initiator_id, initiator_role, reason,
+                    trainer_id, training_date, training_time, training_location, candidate_confirmed_at,
+                    trainer_confirmed_at, attempt_started_at, training_started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 (app["id"], kind, now_iso(), initiator_id, role, reason, app["trainer_id"], app["training_date"],
+                  app["training_time"], app["training_location"], app["training_confirmed_at"],
+                  app["trainer_confirmed_at"], app["trainer_assigned_at"], app["training_started_at"]))
+    _bump(conn, app["id"], status="new", trainer_id=None, trainer_assigned_at=None, training_date=None, training_time=None,
+          training_location=None, training_set_by=None, training_set_at=None, training_confirmed_at=None,
+          trainer_confirmed_at=None, training_started_at=None, contact_timer_at=None, contact_answer=None,
+          contact_answer_at=None, reminded_eve=None, reminded_morning=None)
+    conn.execute("""UPDATE training_requests SET status = 'stale', decided_at = ? WHERE application_id = ?
+                    AND status = 'pending'""", (now_iso(), app["id"]))
+    log_event(conn, user_id=app["user_id"], actor_id=actor_tg, event_type="TRAINING_CANCELLED", key=key,
+              old={k: app[k] for k in ("training_date", "training_time", "training_location", "trainer_id")},
+              new={"application": app["id"], "kind": kind, "by": role, "status": "new"}, description=reason)
+    return app
+
+
+def _cancelled_view(conn, app_id: int, before: dict, reason: str, kind: str) -> dict:
+    return {**get(conn, app_id), "cancelled_trainer_id": before["trainer_id"], "cancelled_date": before["training_date"],
+            "cancelled_time": before["training_time"], "cancel_reason": reason, "cancel_kind": kind}
 
 
 def ack_cancellations(conn: sqlite3.Connection, actor: dict, app_id: int, key: str) -> dict:

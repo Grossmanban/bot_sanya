@@ -312,6 +312,27 @@ def log_attempt(conn: sqlite3.Connection, tg: dict, kind: str, param: str | None
     return dict(row)
 
 
+def admit(conn: sqlite3.Connection, tg: dict, param: str | None, now: datetime | None = None) -> tuple[str, str | None]:
+    """/start of a person without an account: ('in', 'ref' | 'owner') — the questionnaire or the request;
+    ('silent', None) — no answer, only the log; ('stale', None) — «ссылка неактуальна» (once per link).
+
+    ТЗ 30.10 §3: an earlier /start without a link closes nothing — a live link later binds the person as usual. A
+    person already bound to a live invitation (opened a link before, or an owner let them in by hand) is let in
+    even when the link tapped now has expired or was rotated: before, they got «ссылка неактуальна» although the
+    questionnaire was open to them."""
+    link, st = resolve(conn, param, now)
+    if st == "active" and use(conn, tg["id"], link, now):
+        return "in", link["kind"]
+    kind = entry(conn, tg["id"])
+    if kind is not None:
+        return "in", kind
+    if st == "none":
+        log_attempt(conn, tg, "no_link", now=now)
+        return "silent", None
+    attempt = log_attempt(conn, tg, "bad_link", param, now)
+    return ("stale" if should_answer_stale(conn, attempt) else "silent"), None
+
+
 def should_answer_stale(conn: sqlite3.Connection, attempt: dict) -> bool:
     """«Ссылка неактуальна» only on the first visit with this link."""
     with transaction(conn):
@@ -324,10 +345,88 @@ def attempts(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
     rows = [dict(r) for r in conn.execute(
         """SELECT a.*, (SELECT 1 FROM users u WHERE u.telegram_id = a.telegram_id) AS known
            FROM access_attempts a ORDER BY a.last_at DESC LIMIT ?""", (limit,))]
+    names = {r["telegram_id"]: svc.full_name(dict(r)) for r in conn.execute(
+        "SELECT telegram_id, first_name, last_name FROM users WHERE telegram_id IN (SELECT restored_by FROM access_attempts)")}
     for r in rows:
         r["known"] = bool(r["known"])
         r["param"] = r["param"][:4] + "…" if r["param"] else ""  # the kind of link, not the token itself
+        # ТЗ 30.10 §3: where the person stands now and whether an owner let them in by hand
+        r["access"] = access_state(conn, r["telegram_id"])
+        r["restored_by_name"] = names.get(r["restored_by"]) if r.get("restored_by") else None
     return rows
+
+
+def access_state(conn: sqlite3.Connection, telegram_id: int) -> str:
+    """ТЗ 30.10 §3: blocked / member / rejected / applied / invited (may fill the questionnaire or the request) / none."""
+    user = svc.get_user_by_tg(conn, telegram_id)
+    if user is not None:
+        if user["account_state"] == "blocked":
+            return "blocked"
+        if user["status"] == "approved":
+            return "member"
+        if user["status"] == "rejected":
+            return "rejected"
+        if conn.execute("SELECT 1 FROM applications WHERE user_id = ? AND status IN ('new','scheduled')",
+                        (user["id"],)).fetchone():
+            return "applied"
+        return "invited"
+    return "invited" if entry(conn, telegram_id) else "none"
+
+
+RESTORE_REFUSED = {
+    "blocked": ("Человек заблокирован владельцем или администратором — сначала снимите блокировку в «Команде»", "blocked"),
+    "member": ("Человек уже в команде", "already_member"),
+    "rejected": ("Заявка этого человека отклонена — верните её в «Онбординг» → «Отклонённые» → «Вернуть в резерв»",
+                 "rejected"),
+    "applied": ("Анкета уже отправлена — кандидат в «Онбординге»", "already_applied"),
+}
+
+
+def restore_access(conn: sqlite3.Connection, actor: dict, telegram_id: int, referrer_id: int | None, key: str,
+                   now: datetime | None = None) -> dict:
+    """ТЗ 30.10 §3, часть 2: «Разрешить доступ / Отправить в онбординг» from «Попытки доступа» — only an owner, with a
+    confirmation in the app. The person is bound to a live referral link of the chosen employee (by default the
+    owner themself) — the same binding a link gives, so the usual questionnaire and the referral follow. The existing
+    record (if any) is kept and updated; real blocks and refusals are not bypassed. Who, when and the result are
+    written to access_attempts and the event log. Returns {link, referrer, state}."""
+    _check_key(key)
+    now = _now(now)
+    actor = _owner(conn, actor)
+    if not conn.execute("SELECT 1 FROM access_attempts WHERE telegram_id = ?", (telegram_id,)).fetchone():
+        raise ServiceError("Этого человека нет в «Попытках доступа»", 404, "not_found")
+    st = access_state(conn, telegram_id)
+    if st in RESTORE_REFUSED:
+        message, code = RESTORE_REFUSED[st]
+        raise ServiceError(message, 409, code)
+    referrer = svc.get_user(conn, referrer_id or actor["id"])
+    if (referrer is None or referrer["status"] != "approved" or referrer["account_state"] == "blocked"
+            or referrer["telegram_id"] == telegram_id):
+        raise ServiceError("Выберите действующего сотрудника, от чьего имени приглашение", 422, "bad_referrer")
+    link = current_ref(conn, referrer, now)
+    if not use(conn, telegram_id, link, now):
+        raise ServiceError("Не удалось выдать приглашение — попробуйте ещё раз", 409, "link_failed")
+    with transaction(conn):
+        # the binding is the referrer's (a later referral link of someone else must not take it over silently)
+        conn.execute("""INSERT INTO referral_hits (telegram_id, referrer_id, created_at, link_id) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(telegram_id) DO UPDATE SET referrer_id = excluded.referrer_id, link_id = excluded.link_id""",
+                     (telegram_id, referrer["id"], _iso(now), link["id"]))
+        user = svc.get_user_by_tg(conn, telegram_id)
+        if user is not None:  # a record without a questionnaire (returned to the reserve): updated, never a second one
+            mark_registered(conn, telegram_id, user["id"])
+            conn.execute("UPDATE users SET referrer_id = COALESCE(referrer_id, ?) WHERE id = ?", (referrer["id"], user["id"]))
+        conn.execute("""UPDATE access_attempts SET restored_at = ?, restored_by = ?, restore_result = 'granted'
+                        WHERE telegram_id = ?""", (_iso(now), actor["telegram_id"], telegram_id))
+        if not _seen(conn, key):
+            log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="ACCESS_RESTORED", key=key,
+                      new={"telegram_id": telegram_id, "referrer": referrer["id"], "link": link["id"]})
+    return {"link": get(conn, link["id"]), "referrer": referrer, "state": access_state(conn, telegram_id)}
+
+
+def restore_result(conn: sqlite3.Connection, telegram_id: int, delivered: bool) -> None:
+    """After the bot tried to write: «sent» or «not_delivered» (the person never opened the chat, or blocked the bot)."""
+    with transaction(conn):
+        conn.execute("UPDATE access_attempts SET restore_result = ? WHERE telegram_id = ? AND restored_at IS NOT NULL",
+                     ("sent" if delivered else "not_delivered", telegram_id))
 
 
 def qr_svg(text: str) -> str:

@@ -25,7 +25,7 @@ from . import app_settings, day_actual, finance, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
-from .timeutil import ddmm, ddmm_wd, now_local
+from .timeutil import ddmm, ddmm_wd, msk_datetime, now_local
 
 log = logging.getLogger(__name__)
 
@@ -722,9 +722,11 @@ class Notifier:
 
         user = svc.get_user(self.conn, app["user_id"])
         ref = svc.get_user(self.conn, app["referrer_id"]) if app["referrer_id"] else None
+        sent = msk_datetime(app.get("created_at"))
         return (f"👤 {person_link(user, app['full_name'])}, {app['age']} лет, м. {escape(app['metro'])}\n"
                 f"Дней в неделю: от {app['min_days']}, обучение: {recruiting.days_text(app)}, общение: {app['communication']}/10"
-                + (f"\nПригласил(а): {escape(svc.full_name(ref))}" if ref else ""))
+                + (f"\nПригласил(а): {escape(svc.full_name(ref))}" if ref else "")
+                + (f"\nАнкета отправлена: {sent}" if sent else ""))
 
     async def application_submitted(self, app: dict) -> None:
         markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
@@ -750,7 +752,8 @@ class Notifier:
 
     def _candidate_buttons(self, app: dict) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}")],
+            # the version: a button from an earlier date (or an attempt cancelled since) can't confirm the new one
+            [InlineKeyboardButton(text="✅ Подтвердить запись", callback_data=f"trc:{app['id']}:{app.get('version', 1)}")],
             [InlineKeyboardButton(text="🔁 Прошу перенести", callback_data=f"trr:{app['id']}")]])
 
     def trainer_message_text(self, trainer: dict) -> str:
@@ -819,23 +822,73 @@ class Notifier:
         await self.send(user["telegram_id"], head + "\n\n" + self._training_text(app).split("\n\n")[0].split("\n", 1)[1], markup)
 
     async def training_cancelled(self, app: dict) -> None:
-        """§3, §5: a cancellation (not a refusal) — the candidate waits for a new date; the trainer is told."""
+        """ТЗ 30.10 §5: the attempt is cancelled — the candidate, the trainer and the owners learn who, with which
+        trainer and why; the candidate is back in «Ожидают рассмотрения». At the limit the admins decide (no
+        automatic refusal)."""
         from . import training
 
         user = svc.get_user(self.conn, app["user_id"])
         day = app.get("cancelled_date")
-        when = f" {day[8:10]}.{day[5:7]}" if day else ""
-        what = "Вы не пришли на обучение" if app.get("cancel_kind") == "no_show" else f"Обучение{when} отменено"
-        await self.send(user["telegram_id"], f"ℹ️ {what}. Мы свяжемся с вами, когда согласуем новую дату.")
+        when = f" {day[8:10]}.{day[5:7]}" + (f" в {app['cancelled_time']}" if app.get("cancelled_time") else "") if day else ""
+        no_show = app.get("cancel_kind") == "no_show"
+        reason = escape(app.get("cancel_reason") or "—")
         trainer = svc.get_user(self.conn, app["cancelled_trainer_id"]) if app.get("cancelled_trainer_id") else None
-        n = len(training.cancellations(self.conn, app["id"]))
+        n, top = len(training.cancellations(self.conn, app["id"])), training.limit(self.conn)
+        what = "Вы не пришли на обучение — оно отменено" if no_show else f"Обучение{when} отменено"
+        await self.send(user["telegram_id"], f"ℹ️ {what}.\nПричина: {reason}\n"
+                                             "Мы рассмотрим вашу анкету заново и напишем, когда назначим обучение.")
+        head = "Неявка кандидата — обучение отменено" if no_show else f"Обучение{when} отменено"
+        lines = (f"Кандидат: {person_link(user, app['full_name'])}\n"
+                 f"Тренер: {person_link(trainer) if trainer else '—'}\nПричина: {reason}\n"
+                 f"Отмены обучения: {n}/{top}")
         if trainer:
-            await self.send(trainer["telegram_id"], f"ℹ️ {what if app.get('cancel_kind') != 'no_show' else 'Неявка кандидата'}"
-                                                    f"\n{self._application_who(app)}\nПричина: {escape(app.get('cancel_reason') or '')}\n"
-                                                    f"Отмены обучения: {n}/{training.limit(self.conn)}. Кандидат остаётся за вами.")
-        if n >= training.limit(self.conn) > 0:
-            await self.to_admins(f"⚠️ <b>Отмены обучения: {n}/{training.limit(self.conn)}</b> — {escape(app['full_name'])}.\n"
-                                 "Решите в «Онбординге»: продолжить обучение или отказать. Автоматического отказа нет.", _open_admin())
+            await self.send(trainer["telegram_id"], f"ℹ️ <b>{head}</b>\n{lines}\n"
+                                                    "Кандидат убран из вашего «Обучения» и вернулся в «Ожидают рассмотрения».")
+        for chat in svc.owner_telegram_ids():
+            if trainer is None or chat != trainer["telegram_id"]:
+                await self.send(chat, f"🚫 <b>{head}</b>\n{lines}\nКандидат вернулся в «Онбординг» → «Ожидают рассмотрения» — "
+                                      "его можно назначить тому же или другому тренеру.", _open_app())
+        if n >= top > 0:
+            await self.to_admins(f"⚠️ <b>Отмены обучения: {n}/{top}</b> — {escape(app['full_name'])}.\n"
+                                 "Решите в «Онбординге»: назначить обучение снова или отказать. Автоматического отказа нет.",
+                                 _open_app())
+
+    async def training_set_by_trainer(self, app: dict, old: dict) -> None:
+        """ТЗ 30.10 §2: the trainer set or changed the date — the candidate confirms it, the owners see who set what
+        (with the previous date on a change), the trainer gets a confirmation. Sent only after the save."""
+        from datetime import date as _date
+
+        user = svc.get_user(self.conn, app["user_id"])
+        trainer = svc.get_user(self.conn, app["trainer_id"])
+
+        def when(day: str | None, at: str | None, place: str | None = None) -> str:
+            if not day:
+                return "—"
+            return f"{ddmm_wd(_date.fromisoformat(day))} в {at or '—'}" + (f", {escape(place)}" if place else "")
+
+        new = when(app["training_date"], app["training_time"], app["training_location"])
+        changed = bool(old.get("training_date"))
+        was = when(old.get("training_date"), old.get("training_time"), old.get("training_location"))
+        head = (f"🔁 <b>Обучение перенесено</b>\nБыло: {was}\nСтало: {new}\n\n" if changed else "")
+        await self.send(user["telegram_id"], head + self._training_text(app), self._candidate_buttons(app))
+        who_line = (f"Кандидат: {person_link(user, app['full_name'])}\nТренер: {person_link(trainer)}")
+        text = (f"🔁 <b>Тренер изменил дату обучения</b>\n{who_line}\nБыло: {was}\nСтало: <b>{new}</b>" if changed else
+                f"📅 <b>Тренер назначил дату обучения</b>\n{who_line}\nКогда: <b>{new}</b>")
+        for chat in svc.owner_telegram_ids():
+            if chat != trainer["telegram_id"]:
+                await self.send(chat, text + "\nКандидат получил уведомление и подтвердит запись.", _open_app())
+        await self.send(trainer["telegram_id"],
+                        f"✅ {'Дата обучения изменена' if changed else 'Дата обучения назначена'}: {new}\n"
+                        f"Кандидат {escape(app['full_name'])} получил уведомление"
+                        + (f" (было: {was})" if changed else "") + ". Ждём его подтверждения.")
+
+    async def access_restored(self, telegram_id: int) -> bool:
+        """ТЗ 30.10 §3: an owner let the person in from «Попытки доступа» — the usual questionnaire button."""
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="📝 Заполнить анкету", web_app=WebAppInfo(url=settings.webapp_url))]]) \
+            if settings.webapp_url.startswith("https://") else None
+        return await self.send(telegram_id, "👋 Вам открыли доступ к регистрации. Чтобы присоединиться к команде, "
+                                            "заполните короткую анкету — кнопка ниже (или нажмите /start).", markup)
 
     async def referrer_help(self, app: dict) -> bool:
         """§2: the inviter is asked to help the candidate reach the trainer."""

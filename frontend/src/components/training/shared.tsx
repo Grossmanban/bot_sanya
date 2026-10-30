@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Clock3, LoaderCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Clock3, LoaderCircle, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Application, TrainingStage } from "@/lib/api";
 import { dayMonth } from "@/lib/format";
@@ -13,7 +13,7 @@ export const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] 
 
 // §27: the shared scale — waits for someone → yellow, on track / done → green, refusal → red, returned → grey
 const TONE: Partial<Record<TrainingStage, Tone>> = {
-  new: "wait", trainer: "wait", new_date: "wait", confirm: "wait", finish_review: "wait",
+  new: "wait", trainer: "wait", new_date: "wait", confirm: "wait", finish_review: "wait", cancelled: "bad",
   agreed: "ok", started: "ok", internship: "ok", done: "ok",
   rejected: "bad", returned: "archive",
 };
@@ -97,7 +97,7 @@ export function CancelWarning({ a, children }: { a: Application; children?: Reac
       <p className="flex items-center gap-2 text-sm font-semibold text-cancel">
         <AlertTriangle className="size-4 shrink-0" /> Отмены обучения: {a.cancel_count}/{a.cancel_limit}
       </p>
-      <p className="text-xs text-muted-foreground">Решите: продолжить обучение или отказать кандидату. Автоматического отказа нет.</p>
+      <p className="text-xs text-muted-foreground">Решите: назначить обучение снова или отказать кандидату. Автоматического отказа нет.</p>
       {children}
     </div>
   );
@@ -126,4 +126,87 @@ export function requestLines(r: { kind: string; payload: { date?: string; time?:
   if (r.new_trainer) out.push(`Новый тренер: ${r.new_trainer}`);
   if (r.payload.note) out.push(`Пожелание: ${r.payload.note}`);
   return out;
+}
+
+/** Moscow time of a stored moment: «30.10 в 03:47» (ТЗ 30.10 §7 — never the phone's zone). */
+export function mskShort(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const f = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit",
+    minute: "2-digit", hourCycle: "h23" }).formatToParts(d);
+  const p = (t: string) => f.find((x) => x.type === t)?.value ?? "";
+  return `${p("day")}.${p("month")} в ${p("hour")}:${p("minute")}`;
+}
+
+/** ТЗ 30.10 §7: when the candidate sent the questionnaire — the server's Moscow time. */
+export function Submitted({ a, className }: { a: Application; className?: string }) {
+  if (!a.submitted_text) return null;
+  return (
+    <p className={cn("flex items-center gap-1.5 text-xs text-muted-foreground", className)}>
+      <Send className="size-3.5 shrink-0" /> <span>Анкета отправлена: <b className="font-semibold text-foreground">{a.submitted_text}</b></span>
+    </p>
+  );
+}
+
+/** ТЗ 30.10 §4: the green mark — only when the candidate and the trainer both confirmed the current date. */
+export const agreedCard = (a: Application) => (a.agreement === "agreed" ? "ring-2 ring-go/70" : "");
+
+export function AgreementMark({ a }: { a: Application }) {
+  if (a.agreement === "agreed") {
+    return (
+      <p className="flex items-center gap-1.5 rounded-xl bg-go-soft px-3 py-1.5 text-sm font-semibold text-go">
+        <CheckCircle2 className="size-4 shrink-0" /> Дата согласована обеими сторонами
+      </p>
+    );
+  }
+  if (a.status !== "scheduled" || !a.agreement_title) return null;
+  return <p className="text-xs font-semibold text-wait">{a.agreement_title}</p>;
+}
+
+/** ТЗ 30.10 §5: every attempt of training — trainer, date, confirmations, the cancellation and the statuses. */
+export function AttemptsHistory({ a }: { a: Application }) {
+  const [open, setOpen] = useState(false);
+  const list = a.attempts ?? [];
+  if (list.length === 0 || (list.length === 1 && list[0].status === "active" && list[0].events.length === 0)) return null;
+  return (
+    <div className="text-xs">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+              className="inline-flex items-center gap-1 font-semibold text-muted-foreground underline-offset-2 hover:underline">
+        История попыток обучения: {list.length}
+        <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <ol className="mt-2 space-y-2">
+          {list.slice().reverse().map((t) => (
+            <li key={t.n} className={cn("space-y-1 rounded-xl p-2.5 break-words", t.status === "cancelled" ? "bg-cancel-soft/60" : "bg-muted/60")}>
+              <p className="font-semibold text-foreground">
+                Попытка {t.n} · <span className={t.status === "cancelled" ? "text-cancel" : "text-foreground"}>{t.status_title}</span>
+              </p>
+              <p className="text-muted-foreground">
+                Тренер: {t.trainer ?? "—"}
+                {t.training_date ? ` · ${dayMonth(t.training_date)} в ${t.training_time ?? "—"}${t.training_location ? `, ${t.training_location}` : ""}` : " · дата не назначалась"}
+              </p>
+              {t.training_date && (
+                <p className="text-muted-foreground">
+                  {t.candidate_confirmed_at ? `кандидат подтвердил ${mskShort(t.candidate_confirmed_at)}` : "кандидат не подтвердил"} ·{" "}
+                  {t.trainer_confirmed_at ? `тренер подтвердил ${mskShort(t.trainer_confirmed_at)}` : "тренер не подтвердил"}
+                </p>
+              )}
+              {t.status === "cancelled" && (
+                <p className="text-muted-foreground">
+                  Отменено {mskShort(t.cancelled_at)}{t.initiator ? ` · ${t.initiator}` : ""}{t.reason ? ` · причина: ${t.reason}` : ""}
+                </p>
+              )}
+              {t.events.length > 0 && (
+                <ul className="space-y-0.5 border-l-2 border-border pl-2 text-muted-foreground">
+                  {t.events.map((e, i) => <li key={i}><span className="tabular">{mskShort(e.at)}</span> — {e.title}</li>)}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
 }

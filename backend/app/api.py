@@ -599,6 +599,26 @@ class CancelBody(BaseModel):
     idempotency_key: str
 
 
+class TrainerScheduleBody(BaseModel):
+    """ТЗ 30.10 §2: the trainer sets the date and time (the place — from the same picker as an admin's)."""
+    date: str
+    time: str
+    location: str
+    idempotency_key: str
+
+
+class ReasonKeyBody(BaseModel):
+    reason: str | None = None
+    idempotency_key: str
+
+
+class RestoreBody(BaseModel):
+    """ТЗ 30.10 §3: «Разрешить доступ / Отправить в онбординг»."""
+    telegram_id: int
+    referrer_id: int | None = None  # whose invitation; none — the owner's own
+    idempotency_key: str
+
+
 class TrainingRequestBody(BaseModel):
     kind: str
     reason: str | None = None
@@ -1218,8 +1238,21 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"task": alice.view(conn, task, staff=True)}
 
     @api.get("/admin/access-attempts")
-    async def admin_access_attempts(_: dict = Depends(staff("access_log"))):
-        return {"items": invites.attempts(conn)}
+    async def admin_access_attempts(user: dict = Depends(staff("access_log"))):
+        # ТЗ 30.10 §3: an owner may let a person in on behalf of any active employee (the inviter)
+        people = [{"id": u["id"], "name": svc.full_name(u), "username": u["username"]}
+                  for u in svc.list_users(conn) if u["status"] == "approved" and u["account_state"] == "active"] \
+            if perms.can(user, "invites") else []
+        return {"items": invites.attempts(conn), "people": people, "me": user["id"]}
+
+    @api.post("/admin/access-attempts/restore")
+    async def admin_access_restore(body: RestoreBody, owner: dict = Depends(staff("invites"))):
+        """ТЗ 30.10 §3: only an owner, after the confirmation in the app. The person gets the usual questionnaire."""
+        result = invites.restore_access(conn, owner, body.telegram_id, body.referrer_id, body.idempotency_key)
+        delivered = await notifier.access_restored(body.telegram_id)
+        invites.restore_result(conn, body.telegram_id, delivered)
+        return {"delivered": delivered, "link": invites.url(app.state.bot_username, result["link"]),
+                "referrer": svc.full_name(result["referrer"]), "items": invites.attempts(conn)}
 
     @api.patch("/me/work-status")
     async def work_status(body: WorkStatus, user: dict = Depends(current_user)):
@@ -2465,6 +2498,24 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if changed:
             notifier.spawn(notifier.invite_pre_if_agreed(a))
         return app_out(app_id)
+
+    @api.post("/training/{app_id}/schedule")
+    async def my_training_schedule(app_id: int, body: TrainerScheduleBody, user: dict = Depends(trainer_user)):
+        """ТЗ 30.10 §2: «Назначить дату» / «Изменить дату» — the trainer's own candidate; the notifications go after
+        the save only."""
+        a, changed, old = training.schedule_by_trainer(conn, user, app_id, svc.parse_date(body.date), body.time,
+                                                       body.location, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.training_set_by_trainer(a, old))
+        return {**app_out(app_id), "changed": changed}
+
+    @api.post("/training/{app_id}/cancel")
+    async def my_training_cancel(app_id: int, body: ReasonKeyBody, user: dict = Depends(trainer_user)):
+        """ТЗ 30.10 §5: the trainer cancels their candidate's training (a reason, confirmed in the app)."""
+        a, changed = training.cancel_by_trainer(conn, user, app_id, body.reason, body.idempotency_key)
+        if changed:
+            notifier.spawn(notifier.training_cancelled(a))
+        return {"application": application_out(recruiting.get(conn, app_id)), "changed": changed}
 
     @api.post("/training/{app_id}/finish")
     async def my_training_finish(app_id: int, body: KeyOnly, user: dict = Depends(trainer_user)):

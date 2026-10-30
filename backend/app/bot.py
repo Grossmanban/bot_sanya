@@ -158,20 +158,15 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         return {"id": tg.id, "username": tg.username, "first_name": tg.first_name, "last_name": tg.last_name}
 
     async def stranger(message: Message, state: FSMContext, param: str | None) -> None:
-        """ТЗ 27.10 §5–7: no link — silence; an outdated link — one answer; a live one — the way in."""
+        """ТЗ 27.10 §5–7: no link — silence; an outdated link — one answer; a live one — the way in
+        (ТЗ 30.10 §3: the rules are in invites.admit)."""
         tg = message.from_user
         await state.clear()
-        link, st = invites.resolve(conn, param)
-        if st == "none":
-            if invites.entry(conn, tg.id) is None:
-                invites.log_attempt(conn, tg_dict(tg), "no_link")
-                return
-        elif st != "active" or not invites.use(conn, tg.id, link):
-            attempt = invites.log_attempt(conn, tg_dict(tg), "bad_link", param)
-            if invites.should_answer_stale(conn, attempt):
-                await message.answer(invites.STALE)
+        verdict, kind = invites.admit(conn, tg_dict(tg), param)
+        if verdict == "stale":
+            await message.answer(invites.STALE)
+        if verdict != "in":
             return
-        kind = link["kind"] if link else invites.entry(conn, tg.id)
         if kind == "owner":
             # an owner's invitation: just a surname and a name, then the admins decide (no training)
             await message.answer("👋 Вас пригласили в команду. Чтобы отправить заявку, укажите фамилию и имя.",
@@ -191,6 +186,12 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
             return
         await set_menu(message.bot, tg.id, user)
         svc.touch_username(conn, user, tg.username)
+        if user["status"] == "pending" and param:
+            # ТЗ 30.10 §3: a record without access (e.g. returned to the reserve) and a live link — the same record is
+            # bound to it, so the questionnaire keeps the inviter; no second record
+            link, st = invites.resolve(conn, param)
+            if st == "active" and invites.use(conn, tg.id, link):
+                user = invites.registered(conn, tg.id, user)
         if user["status"] == "pending":
             application = recruiting.current(conn, user["id"])
             if application is None:  # returned to the reserve, or an old chat request
@@ -709,7 +710,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
     @router.callback_query(F.data.startswith("trc:"))
     async def training_confirm(call: CallbackQuery):
         try:
-            application, changed = recruiting.confirm_training(conn, call.from_user.id, int(call.data.split(":")[1]))
+            parts = call.data.split(":")
+            application, changed = recruiting.confirm_training(conn, call.from_user.id, int(parts[1]),
+                                                               int(parts[2]) if len(parts) > 2 else None)
         except svc.ServiceError as exc:
             await call.answer(exc.message, show_alert=True)
             return

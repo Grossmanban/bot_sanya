@@ -454,18 +454,19 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
   return (
     <div className="space-y-4">
       <UnmarkedPanel days={near.data ?? null} onDone={refresh} />
-      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+      {/* ТЗ 30.10 §1: nothing here may be wider than the card — everything wraps or shrinks, any screen width */}
+      <section className="min-w-0 rounded-3xl bg-card p-4 shadow-lift sm:p-5 md:p-6">
         <div className="flex flex-wrap gap-2">
           {chips.map((c) => (
             <button key={c.label} onClick={() => setDay(c.value)}
-                    className={cn("press rounded-full px-4 py-2 text-sm font-semibold", day === c.value ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+                    className={cn("press rounded-full px-3.5 py-2 text-sm font-semibold whitespace-nowrap sm:px-4", day === c.value ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
               {c.label}
             </button>
           ))}
-          <input type="date" aria-label="Другая дата" className="h-9 rounded-full border-0 bg-muted px-4 text-sm outline-none"
+          <input type="date" aria-label="Другая дата" className="h-9 min-w-0 max-w-full rounded-full border-0 bg-muted px-4 text-sm outline-none"
                  value={day} onChange={(e) => e.target.value && setDay(e.target.value)} />
         </div>
-        <h2 className="mt-5 font-display text-2xl font-semibold">{WEEKDAYS[weekday]}, {dayMonth(day)}</h2>
+        <h2 className="mt-5 font-display text-xl font-semibold break-words sm:text-2xl">{WEEKDAYS[weekday]}, {dayMonth(day)}</h2>
         <p className="mt-1 text-[15px] text-muted-foreground">
           {data ? `Выходят ${data.total_count} ${plural(data.total_count, "человек", "человека", "человек")}, ${data.total_volume} шт.` : " "}
         </p>
@@ -490,17 +491,18 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
                 const meta = STATUS_META[s.status];
                 return (
                   <li key={s.id}>
-                    <button onClick={() => onEdit({ ...s })} className="press flex w-full items-center justify-between gap-3 py-3 text-left">
-                      <span className="min-w-0">
+                    <button onClick={() => onEdit({ ...s })} className="press flex w-full items-start justify-between gap-3 py-3 text-left">
+                      <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium">{s.name}</span>
-                        <span className={cn("flex items-center gap-1.5 text-sm", meta.text)}>
-                          <span className={cn("size-1.5 rounded-full", meta.dot)} />
-                          {meta.label}
+                        <span className={cn("flex min-w-0 items-center gap-1.5 text-sm", meta.text)}>
+                          <span className={cn("size-1.5 shrink-0 rounded-full", meta.dot)} />
+                          <span className="truncate">{meta.label}</span>
                         </span>
                       </span>
-                      <span className="shrink-0 text-right text-sm">
-                        <span className="block font-semibold tabular">{s.start_time ? timeRange(s) : ""}</span>
-                        <span className="text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
+                      {/* a long place name wraps inside its column instead of pushing the row off the screen */}
+                      <span className="min-w-0 max-w-[55%] text-right text-sm">
+                        <span className="block font-semibold whitespace-nowrap tabular">{s.start_time ? timeRange(s) : ""}</span>
+                        <span className="block break-words text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
                         {s.fact_volume != null && (
                           <span className={cn("block text-xs font-semibold", s.shortfall ? "text-cancel" : "text-go")}>
                             факт {s.fact_volume}{s.shortfall ? ` (−${s.shortfall})` : ""}
@@ -535,16 +537,19 @@ function UnmarkedPanel({ days, onDone }: { days: readonly [AdminDay, AdminDay] |
   }
   const d = days[which];
   return (
-    <section className="space-y-3 rounded-3xl bg-wait-soft p-4 md:p-5">
+    <section className="min-w-0 space-y-3 rounded-3xl bg-wait-soft p-3 sm:p-4 md:p-5">
       <div className="flex gap-1 rounded-2xl bg-card p-1">
         {([0, 1] as const).map((i) => (
           <button key={i} onClick={() => { tapHaptic(); setWhich(i); }}
-                  className={cn("press inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl text-sm font-semibold",
+                  className={cn("press inline-flex min-h-10 min-w-0 flex-1 flex-wrap items-center justify-center gap-x-1.5 rounded-xl px-2 py-1 text-center text-sm leading-tight font-semibold",
                     which === i ? "bg-primary text-primary-foreground" : "text-muted-foreground")}>
-            {i === 0 ? "Сегодня" : "Завтра"} · {dayMonth(days[i].date)}
-            {days[i].unmarked.length > 0 && (
-              <span className={cn("rounded-full px-1.5 text-xs tabular", which === i ? "bg-white/20" : "bg-wait text-white")}>{days[i].unmarked.length}</span>
-            )}
+            {i === 0 ? "Сегодня" : "Завтра"}{" "}
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+              · {dayMonth(days[i].date)}
+              {days[i].unmarked.length > 0 && (
+                <span className={cn("rounded-full px-1.5 text-xs tabular", which === i ? "bg-white/20" : "bg-wait text-white")}>{days[i].unmarked.length}</span>
+              )}
+            </span>
           </button>
         ))}
       </div>
@@ -633,9 +638,9 @@ function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => vo
     return <p className="rounded-xl bg-card p-3 text-sm text-muted-foreground">✅ {dayMonth(day)}: все отметили день.</p>;
   }
   return (
-    <div className={cn(!bare && "rounded-2xl bg-wait-soft p-4")}>
+    <div className={cn("min-w-0", !bare && "rounded-2xl bg-wait-soft p-3 sm:p-4")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-semibold text-wait">Не отметили {dayMonth(day)}: {people.length}</p>
+        <p className="min-w-0 font-semibold break-words text-wait">Не отметили {dayMonth(day)}: {people.length}</p>
         {data.can_remind && (
           <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy} onClick={() => remind("all")}>
             {busy === "remind-all" && <LoaderCircle className="animate-spin" />} 📣 Напомнить всем
@@ -652,15 +657,17 @@ function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => vo
           const v = p.violation;
           const decided = !!v && v.status !== "pending";
           return (
-            <li key={p.user_id} className="rounded-xl bg-card p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="min-w-0 flex-1">
+            <li key={p.user_id} className="min-w-0 rounded-xl bg-card p-3">
+              {/* ТЗ 30.10 §1: on a phone the name takes the whole line and the buttons wrap below it — the button group
+                  used to keep its one-line width (shrink-0) and pushed the card past the screen edge */}
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                <span className="min-w-0 sm:flex-1">
                   <button className="block max-w-full truncate text-left font-medium underline-offset-2 hover:underline"
                           onClick={() => openProfile(p.username, p.telegram_id, p.name)}>
                     {p.name}{p.network && <span className="font-normal text-muted-foreground"> · {p.network}</span>}
                   </button>
                   <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs">
-                    <span className={cn("rounded-full px-2 py-0.5 font-semibold", TONE_CHIP.wait)}>
+                    <span className={cn("max-w-full rounded-full px-2 py-0.5 font-semibold break-words", TONE_CHIP.wait)}>
                       {dayMonth(day)} · Не в графике и не на выходном
                     </span>
                     {v && (
@@ -671,35 +678,39 @@ function UnmarkedList({ data, onDone, bare }: { data: AdminDay; onDone: () => vo
                     )}
                   </span>
                 </span>
-                {canMark && (
-                  <span className="flex shrink-0 flex-wrap gap-1.5">
-                    <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy}
-                            onClick={() => mark(p, "off")}>Выходной</Button>
-                    <Button size="sm" className="press h-9 rounded-lg" disabled={!!busy}
-                            onClick={() => setForm(form?.user.user_id === p.user_id ? null
-                              : { user: p, start: "10:00", end: "18:00", volume: "", location: "" })}>В график</Button>
-                    {data.can_fine && !decided && (
-                      <Button size="sm" variant="ghost" className="press h-9 rounded-lg text-cancel hover:bg-cancel-soft hover:text-cancel"
-                              disabled={!!busy} onClick={() => setFining(p)}>Оштрафовать</Button>
+                {(canMark || data.can_remind) && (
+                  <span className="flex min-w-0 flex-wrap gap-1.5">
+                    {canMark && (
+                      <>
+                        <Button size="sm" variant="secondary" className="press h-9 rounded-lg" disabled={!!busy}
+                                onClick={() => mark(p, "off")}>Выходной</Button>
+                        <Button size="sm" className="press h-9 rounded-lg" disabled={!!busy}
+                                onClick={() => setForm(form?.user.user_id === p.user_id ? null
+                                  : { user: p, start: "10:00", end: "18:00", volume: "", location: "" })}>В график</Button>
+                        {data.can_fine && !decided && (
+                          <Button size="sm" variant="ghost" className="press h-9 rounded-lg text-cancel hover:bg-cancel-soft hover:text-cancel"
+                                  disabled={!!busy} onClick={() => setFining(p)}>Оштрафовать</Button>
+                        )}
+                      </>
+                    )}
+                    {data.can_remind && (
+                      <Button size="sm" variant="ghost" className="press h-9 rounded-lg" disabled={!!busy}
+                              onClick={() => remind([p.user_id])}>
+                        {busy === `remind-${p.user_id}` && <LoaderCircle className="animate-spin" />} Напомнить
+                      </Button>
                     )}
                   </span>
-                )}
-                {data.can_remind && (
-                  <Button size="sm" variant="ghost" className="press h-9 shrink-0 rounded-lg" disabled={!!busy}
-                          onClick={() => remind([p.user_id])}>
-                    {busy === `remind-${p.user_id}` && <LoaderCircle className="animate-spin" />} Напомнить
-                  </Button>
                 )}
               </div>
               {form?.user.user_id === p.user_id && (
                 <div className="row-in mt-3 grid grid-cols-2 gap-2">
-                  <input type="time" aria-label="С" className={cn(field, "h-10")} value={form.start}
+                  <input type="time" aria-label="С" className={cn(field, "h-10 min-w-0 px-3")} value={form.start}
                          onChange={(e) => setForm({ ...form, start: e.target.value })} />
-                  <input type="time" aria-label="До" className={cn(field, "h-10")} value={form.end}
+                  <input type="time" aria-label="До" className={cn(field, "h-10 min-w-0 px-3")} value={form.end}
                          onChange={(e) => setForm({ ...form, end: e.target.value })} />
-                  <input inputMode="numeric" placeholder="Объём, шт." className={cn(field, "h-10")} value={form.volume}
+                  <input inputMode="numeric" placeholder="Объём, шт." className={cn(field, "h-10 min-w-0 px-3")} value={form.volume}
                          onChange={(e) => setForm({ ...form, volume: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
-                  <input placeholder="Точка" className={cn(field, "h-10")} value={form.location}
+                  <input placeholder="Точка" className={cn(field, "h-10 min-w-0 px-3")} value={form.location}
                          onChange={(e) => setForm({ ...form, location: e.target.value.slice(0, 100) })} />
                   <Button className="press col-span-2 h-10 rounded-xl" disabled={!!busy || !form.volume || !form.location.trim()}
                           onClick={() => mark(p, "shift")}>

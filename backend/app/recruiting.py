@@ -25,7 +25,7 @@ from . import permissions as perms
 from . import services as svc
 from .db import transaction
 from .services import ACTIVE, ServiceError, _check_key, _fresh_actor, _seen, log_event
-from .timeutil import now_iso, now_local
+from .timeutil import msk_datetime, now_iso, now_local
 
 OPEN = ("new", "scheduled")              # waiting for staff
 # «Ожидают рассмотрения», «На обучении», «Стажировка», «Завершённые» (the second stage is tracked there), «Отклонённые»
@@ -171,6 +171,8 @@ def view(conn: sqlite3.Connection, app: dict) -> dict:
                                "training_confirmed_at", "contact_manager", "contacted_at", "contact_answer",
                                "contact_answer_at", "stage1_counted", "stage1_at", "stage2_counted", "stage2_at")},
         "training_days": _days(app),
+        # ТЗ 30.10 §7: the moment the candidate sent the questionnaire, in Moscow time
+        "submitted_text": msk_datetime(app["created_at"]),
         "user_id": user["id"], "telegram_id": user["telegram_id"], "username": user["username"],
         "referrer": svc.full_name(ref) if ref else None,
         "referrer_tg": {"telegram_id": ref["telegram_id"], "username": ref["username"]} if ref else None,
@@ -192,9 +194,13 @@ def listing(conn: sqlite3.Connection, tab: str) -> list[dict]:
     if tab not in TABS:
         raise ServiceError("Неизвестная вкладка", 422, "bad_tab")
     statuses = TABS[tab]
-    rows = conn.execute(f"SELECT * FROM applications WHERE status IN ({','.join('?' * len(statuses))}) ORDER BY id DESC LIMIT 300",
-                        statuses)
-    return [dict(r) for r in rows]
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM applications WHERE status IN ({','.join('?' * len(statuses))}) ORDER BY id DESC LIMIT 300", statuses)]
+    if tab == "scheduled":  # ТЗ 30.10 §4: both confirmed first
+        from . import training
+
+        rows = training.sort_by_agreement(rows)
+    return rows
 
 
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -267,17 +273,22 @@ def assign_training(conn: sqlite3.Connection, actor: dict, app_id: int, day: dat
     return get(conn, app_id), True
 
 
-def confirm_training(conn: sqlite3.Connection, telegram_id: int, app_id: int) -> tuple[dict, bool]:
-    """The candidate's «Подтвердить запись»."""
+def confirm_training(conn: sqlite3.Connection, telegram_id: int, app_id: int, version: int | None = None) -> tuple[dict, bool]:
+    """The candidate's «Подтвердить запись». ТЗ 30.10 §4: the button carries the version of the date — one from an
+    earlier date or a cancelled attempt doesn't confirm the current one (buttons sent before had no version)."""
     with transaction(conn):
         app = get(conn, app_id)
         user = svc.get_user_by_tg(conn, telegram_id)
         if (app is None or user is None or app["user_id"] != user["id"] or app["status"] != "scheduled"
                 or not app["training_date"]):
             raise ServiceError("Запись не найдена или изменилась", 404, "not_found")
+        if version is not None and version != app["version"]:
+            raise ServiceError("Дата обучения уже изменилась — подтвердите новую по последнему сообщению", 409, "stale")
         if app["training_confirmed_at"]:
             return app, False
         conn.execute("UPDATE applications SET training_confirmed_at = ? WHERE id = ?", (now_iso(), app_id))
+        log_event(conn, user_id=user["id"], actor_id=telegram_id, event_type="TRAINING_CONFIRMED", key=svc.new_key(),
+                  new={"application": app_id, "date": app["training_date"], "time": app["training_time"]})
     return get(conn, app_id), True
 
 

@@ -190,10 +190,11 @@ def test_cancellations_are_counted_and_three_only_warn(conn, world):
             r = c.post(f"/api/admin/onboarding/{app['id']}/cancel-training",
                        json={"reason": "Тренер заболел", "idempotency_key": key()}, headers=oh)
         a = r.json()["application"]
-        assert a["status"] == "scheduled" and a["trainer"]["id"] == world["vera"]["id"] and not a["training_date"]
+        # ТЗ 30.10 §5: a cancellation ends the attempt — back to «Ожидают рассмотрения», without the trainer
+        assert a["status"] == "new" and a["trainer"] is None and not a["training_date"]
     assert a["cancel_count"] == 3 and a["cancel_limit"] == 3 and a["cancel_warning"] is True
-    assert a["stage"] == "new_date" and [x["kind"] for x in a["cancellations"]] == ["cancel", "cancel", "no_show"]
-    assert recruiting.get(conn, app["id"])["status"] == "scheduled"  # no automatic refusal
+    assert a["stage"] == "cancelled" and [x["kind"] for x in a["cancellations"]] == ["cancel", "cancel", "no_show"]
+    assert recruiting.get(conn, app["id"])["status"] == "new"  # no automatic refusal
     a = c.post(f"/api/admin/onboarding/{app['id']}/cancel-ack", json={"idempotency_key": key()}, headers=oh).json()["application"]
     assert a["cancel_warning"] is False and a["cancel_count"] == 3
 

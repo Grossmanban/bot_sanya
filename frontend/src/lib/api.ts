@@ -224,6 +224,12 @@ export interface AccessAttempt {
   last_at: string;
   count: number;
   known: boolean;
+  /** ТЗ 30.10 §3: where the person stands now */
+  access: "none" | "invited" | "applied" | "member" | "rejected" | "blocked";
+  restored_at: string | null;
+  restored_by: number | null;
+  restored_by_name: string | null;
+  restore_result: "granted" | "sent" | "not_delivered" | null;
 }
 
 export const isStaff = (u: User) => u.role !== "employee" && u.account_state !== "blocked";
@@ -332,7 +338,8 @@ export interface Application {
   referrer_id?: number | null;
   stage?: TrainingStage;
   stage_title?: string;
-  cancellations?: { at: string; kind: "cancel" | "no_show"; reason: string | null; initiator: string | null; role: string | null; legacy: boolean }[];
+  cancellations?: { at: string; kind: "cancel" | "no_show"; reason: string | null; initiator: string | null; role: string | null; legacy: boolean;
+    trainer?: string | null; training_date?: string | null; training_time?: string | null }[];
   cancel_count?: number;
   cancel_limit?: number;
   cancel_warning?: boolean;
@@ -346,9 +353,41 @@ export interface Application {
   messages?: { kind: string; sent_at: string; delivered: number }[];
   pre_invited_at?: string | null;
   team_invited_at?: string | null;
+  // ТЗ 30.10
+  /** §7: «30.10.2026 в 03:47 МСК» — when the candidate sent the questionnaire */
+  submitted_text?: string | null;
+  /** §4: the agreement of the date; green only for «agreed» */
+  agreement?: Agreement | null;
+  agreement_title?: string | null;
+  agreement_rank?: number | null;
+  attempt?: number;
+  /** §5: every attempt of training with its history */
+  attempts?: TrainingAttempt[];
 }
 
-export type TrainingStage = "new" | "trainer" | "new_date" | "confirm" | "agreed" | "started" | "internship" | "finish_review"
+export type Agreement = "agreed" | "candidate_confirmed" | "waiting_candidate" | "no_date" | "cancelled";
+
+export interface TrainingAttempt {
+  n: number;
+  status: "cancelled" | "active";
+  status_title: string;
+  trainer: string | null;
+  training_date: string | null;
+  training_time: string | null;
+  training_location: string | null;
+  candidate_confirmed_at: string | null;
+  trainer_confirmed_at: string | null;
+  attempt_started_at: string | null;
+  training_started_at: string | null;
+  reason: string | null;
+  initiator: string | null;
+  role: string | null;
+  legacy: boolean;
+  cancelled_at: string | null;
+  events: { at: string; title: string }[];
+}
+
+export type TrainingStage = "new" | "cancelled" | "trainer" | "new_date" | "confirm" | "agreed" | "started" | "internship" | "finish_review"
   | "done" | "rejected" | "returned";
 export type TrainingRequestKind = "start" | "refuse" | "cancel" | "change" | "internship";
 
@@ -1342,6 +1381,12 @@ export const api = {
     location?: string; trainer_id?: number }, key: string) =>
     post<{ request: TrainingRequest; application: Application }>(`/api/training/${id}/request`, { ...body, idempotency_key: key }),
   trainingConfirm: (id: number, key: string) => post<{ application: Application }>(`/api/training/${id}/confirm`, { idempotency_key: key }),
+  /** ТЗ 30.10 §2: the trainer sets or changes the date of their own candidate */
+  trainingSchedule: (id: number, body: { date: string; time: string; location: string }, key: string) =>
+    post<{ application: Application; changed: boolean }>(`/api/training/${id}/schedule`, { ...body, idempotency_key: key }),
+  /** ТЗ 30.10 §5: the trainer cancels — the candidate goes back to «Ожидают рассмотрения» */
+  trainingCancel: (id: number, reason: string, key: string) =>
+    post<{ application: Application; changed: boolean }>(`/api/training/${id}/cancel`, { reason, idempotency_key: key }),
   trainingFinish: (id: number, key: string) => post<{ application: Application }>(`/api/training/${id}/finish`, { idempotency_key: key }),
   event: (id: number) => request<{ event: LiveEvent }>(`/api/events/${id}`),
   submitEntry: (id: number, value: number, photo: Blob, key: string) =>
@@ -1448,7 +1493,12 @@ export const api = {
     rotateInvites: (key: string) =>
       post<{ rotated: { ref: number; owner: number }; items: Invite[]; ttl_minutes: number }>("/api/admin/invites/rotate",
         { idempotency_key: key }),
-    accessAttempts: () => request<{ items: AccessAttempt[] }>("/api/admin/access-attempts"),
+    accessAttempts: () => request<{ items: AccessAttempt[]; people: { id: number; name: string; username: string | null }[]; me: number }>(
+      "/api/admin/access-attempts"),
+    /** ТЗ 30.10 §3: «Разрешить доступ / Отправить в онбординг» — owners only */
+    restoreAccess: (telegramId: number, referrerId: number | null, key: string) =>
+      post<{ delivered: boolean; link: string | null; referrer: string; items: AccessAttempt[] }>("/api/admin/access-attempts/restore",
+        { telegram_id: telegramId, referrer_id: referrerId, idempotency_key: key }),
     users: () => request<{ items: User[] }>("/api/admin/users"),
     points: () => request<{ items: Point[] }>("/api/admin/points"),
     createPoint: (name: string, capacity: number | null) => post<{ point: Point }>("/api/admin/points", { name, capacity }),

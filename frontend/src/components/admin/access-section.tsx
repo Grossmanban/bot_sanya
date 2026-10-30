@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Ban, Check, Copy, LoaderCircle, Plus, QrCode, RefreshCw, ShieldAlert, X } from "lucide-react";
+import { Ban, Check, Copy, DoorOpen, LoaderCircle, Plus, QrCode, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -218,8 +218,28 @@ function InviteRow({ inv, onChanged }: { inv: Invite; onChanged: (d: { items: In
   );
 }
 
+// ТЗ 30.10 §3: where the person stands now
+const ACCESS: Record<AccessAttempt["access"], { label: string; tone: string }> = {
+  none: { label: "Нет доступа", tone: "bg-muted text-muted-foreground" },
+  invited: { label: "Может заполнить анкету", tone: "bg-go-soft text-go" },
+  applied: { label: "Анкета отправлена", tone: "bg-go-soft text-go" },
+  member: { label: "Уже в команде", tone: "bg-go-soft text-go" },
+  rejected: { label: "Заявка отклонена", tone: "bg-cancel-soft text-cancel" },
+  blocked: { label: "Заблокирован", tone: "bg-cancel-soft text-cancel" },
+};
+const RESULT: Record<NonNullable<AccessAttempt["restore_result"]>, string> = {
+  granted: "доступ выдан", sent: "сообщение с анкетой доставлено", not_delivered: "бот не смог написать — отправьте ссылку сами",
+};
+
+type People = { id: number; name: string; username: string | null }[];
+
 function Attempts() {
-  const { data, loading, reload } = useLoad(() => api.admin.accessAttempts(), []);
+  const { data, loading, reload, setData } = useLoad(() => api.admin.accessAttempts(), []);
+  const canRestore = useCan("invites");
+  const [open, setOpen] = useState<number | null>(null);
+  // one row per person (the kinds of their attempts are listed inside)
+  const people = new Map<number, AccessAttempt[]>();
+  for (const a of data?.items ?? []) people.set(a.telegram_id, [...(people.get(a.telegram_id) ?? []), a]);
   return (
     <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
       <div className="flex items-center justify-between px-5 pt-5 pb-2 md:px-6">
@@ -228,31 +248,133 @@ function Attempts() {
           {loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
         </Button>
       </div>
-      {!data ? <Skeleton className="m-5 h-24 rounded-2xl" /> : data.items.length === 0 ? (
+      {!data ? <Skeleton className="m-5 h-24 rounded-2xl" /> : people.size === 0 ? (
         <p className="px-5 pb-5 text-sm text-muted-foreground md:px-6">Посторонних не было.</p>
       ) : (
         <ul className="divide-y">
-          {data.items.map((a) => (
-            <li key={a.id} className="flex items-start gap-3 px-5 py-3 md:px-6">
-              <ShieldAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1">
-                <button className="block max-w-full truncate text-left font-medium underline-offset-2 hover:underline"
-                        onClick={() => openProfile(a.username, a.telegram_id, [a.first_name, a.last_name].filter(Boolean).join(" "))}>
-                  {[a.first_name, a.last_name].filter(Boolean).join(" ") || "Без имени"}
-                  {a.username ? ` @${a.username}` : ""}
-                </button>
-                <span className="block text-xs text-muted-foreground">
-                  ID {a.telegram_id} · {KIND[a.kind]}{a.param ? ` (${a.param})` : ""}{a.known ? " · уже есть в базе" : ""}
-                </span>
-                <span className="block text-xs text-muted-foreground">
-                  {a.count > 1 ? `${a.count} раз, первый ${when(a.first_at)}, последний ${when(a.last_at)}` : when(a.last_at)}
-                </span>
-              </span>
-            </li>
-          ))}
+          {[...people.values()].map((rows) => {
+            const a = rows[0];
+            const name = [a.first_name, a.last_name].filter(Boolean).join(" ");
+            const st = ACCESS[a.access] ?? ACCESS.none;
+            const restorable = canRestore && (a.access === "none" || a.access === "invited");
+            return (
+              <li key={a.telegram_id} className="space-y-2 px-5 py-3 md:px-6">
+                <div className="flex items-start gap-3">
+                  <ShieldAlert className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1">
+                    <button className="block max-w-full truncate text-left font-medium underline-offset-2 hover:underline"
+                            onClick={() => openProfile(a.username, a.telegram_id, name)}>
+                      {name || "Без имени"}{a.username ? ` @${a.username}` : ""}
+                    </button>
+                    <span className="block text-xs break-words text-muted-foreground">
+                      ID {a.telegram_id}{a.known ? " · уже есть в базе" : ""}
+                    </span>
+                    {rows.map((r) => (
+                      <span key={r.id} className="block text-xs break-words text-muted-foreground">
+                        {KIND[r.kind]}{r.param ? ` (${r.param})` : ""} ·{" "}
+                        {r.count > 1 ? `${r.count} раз, первый ${when(r.first_at)}, последний ${when(r.last_at)}` : when(r.last_at)}
+                      </span>
+                    ))}
+                    {a.restored_at && (
+                      <span className="mt-0.5 block text-xs break-words text-go">
+                        Доступ разрешил(а) {a.restored_by_name ?? `ID ${a.restored_by}`} {when(a.restored_at)}
+                        {a.restore_result ? ` — ${RESULT[a.restore_result]}` : ""}
+                      </span>
+                    )}
+                  </span>
+                  <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", st.tone)}>{st.label}</span>
+                </div>
+                {restorable && open !== a.telegram_id && (
+                  <Button variant="secondary" size="sm" className="press ml-7 h-auto min-h-9 max-w-[calc(100%-1.75rem)] rounded-xl py-1.5 text-left whitespace-normal"
+                          onClick={() => setOpen(a.telegram_id)}>
+                    <DoorOpen /> Разрешить доступ / Отправить в онбординг
+                  </Button>
+                )}
+                {restorable && open === a.telegram_id && (
+                  <Restore a={a} name={name} people={data.people} me={data.me} onClose={() => setOpen(null)}
+                           onDone={(items) => setData({ ...data, items })} />
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>
+  );
+}
+
+/** ТЗ 30.10 §3: an owner lets a person in by hand — the inviter is chosen, the action is confirmed; the person gets
+ * the usual questionnaire. When the bot can't write to them, the link is shown to send by hand. */
+function Restore({ a, name, people, me, onClose, onDone }: { a: AccessAttempt; name: string; people: People; me: number;
+  onClose: () => void; onDone: (items: AccessAttempt[]) => void }) {
+  const { busy, run } = useAction();
+  const [referrer, setReferrer] = useState<number>(me);
+  const [confirm, setConfirm] = useState(false);
+  const [link, setLink] = useState<string | null>(null);
+  const field = "h-11 w-full min-w-0 rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
+  async function send() {
+    try {
+      const res = await run("restore", (k) => api.admin.restoreAccess(a.telegram_id, referrer === me ? null : referrer, k));
+      if (!res) return;
+      if (res.delivered) {
+        toast.success("Доступ разрешён: человек получил сообщение с анкетой");
+        onDone(res.items);
+        onClose();
+      } else {
+        toast.warning("Доступ разрешён, но бот не смог написать человеку — отправьте ему ссылку");
+        setLink(res.link);
+        onDone(res.items);
+      }
+    } catch {
+      /* toast shown */
+    }
+  }
+  if (link) {
+    return (
+      <div className="row-in ml-7 space-y-2 rounded-2xl bg-wait-soft p-3 text-sm">
+        <p>Бот не смог написать {name || `ID ${a.telegram_id}`} (он не открывал чат с ботом или заблокировал его). Доступ уже открыт — отправьте ссылку сами:</p>
+        <p className="rounded-xl bg-card p-2 text-xs break-all">{link}</p>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" className="press h-9 rounded-xl" onClick={() => copy(link)}><Copy /> Копировать</Button>
+          <Button size="sm" variant="ghost" className="press h-9 rounded-xl" onClick={onClose}>Готово</Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="row-in ml-7 space-y-2 rounded-2xl bg-muted/50 p-3 text-sm">
+      <p>
+        <b>{name || "Без имени"}</b>{a.username ? ` @${a.username}` : ""} · Telegram ID <b className="tabular">{a.telegram_id}</b>{" "}
+        <button type="button" className="font-semibold underline underline-offset-2" onClick={() => openProfile(a.username, a.telegram_id, name)}>
+          открыть профиль
+        </button>
+      </p>
+      <label className="block space-y-1">
+        <span className="text-xs text-muted-foreground">Чьё приглашение (кто пригласил — для реферала)</span>
+        <select className={field} value={referrer} onChange={(e) => { setReferrer(Number(e.target.value)); setConfirm(false); }}>
+          {people.some((p) => p.id === me) ? null : <option value={me}>Моё приглашение</option>}
+          {people.map((p) => <option key={p.id} value={p.id}>{p.id === me ? "Моё приглашение" : `${p.name}${p.username ? ` @${p.username}` : ""}`}</option>)}
+        </select>
+      </label>
+      <p className="text-xs text-muted-foreground">
+        Человек получит сообщение «Вам открыли доступ к регистрации» с кнопкой анкеты и пройдёт обычный онбординг.
+        Его запись в базе обновится, вторая не появится. Настоящие блокировки так не снимаются.
+      </p>
+      {confirm ? (
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="secondary" className="press h-11 rounded-xl" disabled={!!busy} onClick={() => setConfirm(false)}>Назад</Button>
+          <Button className="press h-11 rounded-xl" disabled={!!busy} onClick={send}>
+            {busy ? <LoaderCircle className="animate-spin" /> : <Check />} Подтвердить
+          </Button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="ghost" className="press h-11 rounded-xl" onClick={onClose}>Отмена</Button>
+          <Button className="press h-11 rounded-xl" onClick={() => setConfirm(true)}>Разрешить доступ</Button>
+        </div>
+      )}
+      {confirm && <p className="text-xs font-semibold">Точно разрешить доступ и отправить анкету? Действие запишется: кто, когда и с каким результатом.</p>}
+    </div>
   );
 }
 
