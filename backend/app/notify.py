@@ -95,10 +95,11 @@ def role_title(user: dict | None) -> str:
 
 def broadcast_signature(author: dict | None, signed: bool) -> str | None:
     """ТЗ 28.10 §13: the header comes from the author's real role, not from a switch in the app. Owners and admins
-    may send without it; a trainer or an instructor always signs with their name and a link to their profile."""
+    may send without it; a trainer or an instructor always signs with their name and a link to their profile.
+    An employee writing to everyone (the personal grant, 18.11) signs the same way — never as the administration."""
     role = perms.role_of(author) if author else perms.ADMIN
-    if role in (perms.TRAINER, perms.INSTRUCTOR):
-        title = "тренера" if role == perms.TRAINER else "инструктора"
+    if role in (perms.TRAINER, perms.INSTRUCTOR, perms.EMPLOYEE):
+        title = {perms.TRAINER: "тренера", perms.INSTRUCTOR: "инструктора", perms.EMPLOYEE: "сотрудника"}[role]
         return f"📣 <b>Сообщение от {title}</b>\n👤 {person_link(author)}"
     return ADMIN_SIGNATURE if signed else None
 
@@ -963,7 +964,7 @@ class Notifier:
                 rows.insert(0, [InlineKeyboardButton(text="📅 Назначить в приложении", web_app=WebAppInfo(url=settings.webapp_url))])
             markup = InlineKeyboardMarkup(inline_keyboard=rows)
         text = self._request_text(req)
-        for chat in svc.admin_telegram_ids(self.conn):
+        for chat in svc.onboarding_telegram_ids(self.conn):  # 18.11: personal onboarding grants decide too
             if self.bot is None:
                 log.info("[request → %s] %s", chat, text[:80])
                 continue
@@ -1071,8 +1072,8 @@ class Notifier:
         return sent
 
     async def finish_requested(self, app: dict) -> None:
-        await self.to_admins(f"🎯 <b>{escape(app['full_name'])}</b>: тренер отметил, что стажировка завершена. "
-                             "Ожидает проверки администратора — «Онбординг» → «Принять в команду».", _open_admin())
+        await self.to_onboarding(f"🎯 <b>{escape(app['full_name'])}</b>: тренер отметил, что стажировка завершена. "
+                                 "Ожидает проверки администратора — «Онбординг» → «Принять в команду».", _open_admin())
 
     async def group_invite_button(self, user: dict, kind: str, inv: dict, text: str) -> bool:
         """§6: a personal invitation with a button (the link only sends a join request — the bot approves it for
@@ -1183,6 +1184,12 @@ class Notifier:
         for admin_id in svc.admin_telegram_ids(self.conn):
             if admin_id != exclude:
                 await self.send(admin_id, text, markup)
+
+    async def to_onboarding(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None):
+        """Owners, admins and the personal onboarding grants (18.11) — they decide questionnaires and training."""
+        for chat in svc.onboarding_telegram_ids(self.conn):
+            if chat != exclude:
+                await self.send(chat, text, markup)
 
     async def to_managers(self, user: dict, text: str, markup: InlineKeyboardMarkup | None = None,
                           exclude: int | None = None, trainer_buttons: bool = True) -> None:

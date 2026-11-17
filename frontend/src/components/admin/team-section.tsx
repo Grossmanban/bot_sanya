@@ -409,6 +409,9 @@ function MemberSheet({
               {approved && caps.includes("products") && <ProductAccess key={`p-${user.id}`} user={user} />}
               {approved && caps.includes("manuals") && <ManualAccess key={`m-${user.id}`} userId={user.id} />}
               {approved && caps.includes("registrations") && <TrainingAccess key={`t-${user.id}`} user={user} onChanged={() => onUpdated(user)} />}
+              {approved && caps.includes("grants") && !isSelf && !user.is_owner
+                && ["employee", "trainer", "instructor"].includes(user.role)
+                && <Grants key={`g-${user.id}`} user={user} onUpdated={onUpdated} />}
 
               {canRole && (
                 <div className="mt-6">
@@ -819,6 +822,49 @@ function TrainingAccess({ user, onChanged }: { user: User; onChanged: () => void
         }
       }} />
     </label>
+  );
+}
+
+/** 18.11: personal permissions — broadcasts to everyone (a trainer: outside their network too) and onboarding
+ * without an admin's confirmation. Owners and admins flip them; the roles that already have the right don't need them. */
+function Grants({ user, onUpdated }: { user: User; onUpdated: (u: User) => void }) {
+  const [state, setState] = useState(user.grants ?? { broadcast_all: false, onboarding: false });
+  const { busy, run } = useAction();
+  const flip = async (field: "broadcast_all" | "onboarding", v: boolean) => {
+    try {
+      const res = await run(`grant-${field}`, (k) => api.admin.setGrants(user.id, { [field]: v }, k),
+        v ? "Разрешение выдано" : "Разрешение снято");
+      if (res) {
+        setState(res.grants);
+        onUpdated(res.user);
+      }
+    } catch {
+      /* toast shown */
+    }
+  };
+  const broadcastHint = user.role === "trainer"
+    ? "Рассылки всей команде — и вне своей сети"
+    : user.role === "instructor"
+      ? "Рассылки всей команде — и не только своим людям"
+      : "Рассылки всей команде";
+  return (
+    <div className="mt-4 space-y-2 rounded-2xl bg-muted/50 px-4 py-3">
+      <span className="block text-[15px] font-semibold">Личные разрешения</span>
+      <label className="flex cursor-pointer items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px]">Рассылка всем</span>
+          <span className="block text-xs text-muted-foreground">{broadcastHint}</span>
+        </span>
+        <Switch checked={state.broadcast_all} disabled={!!busy} onCheckedChange={(v) => flip("broadcast_all", v)} />
+      </label>
+      <label className="flex cursor-pointer items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px]">Онбординг без админа</span>
+          <span className="block text-xs text-muted-foreground">Анкеты, обучение и приём в команду — без согласования</span>
+        </span>
+        <Switch checked={state.onboarding} disabled={!!busy} onCheckedChange={(v) => flip("onboarding", v)} />
+      </label>
+    </div>
   );
 }
 

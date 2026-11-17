@@ -152,6 +152,13 @@ class RoleBody(BaseModel):
     idempotency_key: str
 
 
+class GrantsBody(BaseModel):
+    """18.11: the personal toggles from «Команда»; only what is sent changes."""
+    broadcast_all: bool | None = None
+    onboarding: bool | None = None
+    idempotency_key: str
+
+
 class AccessBody(BaseModel):
     allow: bool
     idempotency_key: str
@@ -706,6 +713,8 @@ def public_user(user: dict) -> dict:
         "status_days": svc.status_days(user),
         "min_weekly_shifts": user.get("min_weekly_shifts"),
         "created_at": user["created_at"],
+        # 18.11: the personal toggles from «Команда» (the app opens the admin tab for a grant holder)
+        "grants": svc.grants_of(user),
     }
 
 
@@ -1526,23 +1535,26 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_broadcasts(admin: dict = Depends(staff("broadcast_network"))):
         nets = networks.names(conn)
         marked = svc.marked_on(conn, today_local() + timedelta(days=1))
+        everyone = perms.can(admin, "broadcast_all")
+        # 18.11: whoever may write to everyone picks from the whole team; network names without the members tree
+        pool = svc.list_users(conn) if everyone else visible(admin, svc.list_users(conn))
         people = [
             {"id": u["id"], "name": svc.full_name(u), "working": u["work_status"] == "working", "admin": u["role"] == "admin",
              "network_id": u["network_id"], "network": nets.get(u["network_id"]), "marked_tomorrow": u["id"] in marked}
-            for u in visible(admin, svc.list_users(conn)) if u["account_state"] != "blocked"
+            for u in pool if u["account_state"] != "blocked"
         ]
-        everyone = perms.can(admin, "broadcast_all")
         role = perms.role_of(admin)
         return {
             "items": [{**b, "media_url": media.photo_url(b["id"], kind="broadcast") if b["media_file_id"] else None,
                        "signature_text": notify.plain(notify.broadcast_signature_of(b))}
                       for b in svc.list_broadcasts(conn, author_tg=None if everyone else admin["telegram_id"])],
-            # ТЗ 28.10 §13: owners and admins choose whether to sign; trainers and instructors always sign by name
-            "signer": {"optional": role not in (perms.TRAINER, perms.INSTRUCTOR),
+            # ТЗ 28.10 §13: owners and admins choose whether to sign; trainers, instructors and grant holders sign by name
+            "signer": {"optional": role in (perms.OWNER, perms.ADMIN),
                        "text": notify.plain(notify.broadcast_signature(admin, True))},
             "audiences": svc.AUDIENCE_LABELS,
             "people": people,
-            "networks": [{"id": n["id"], "name": n["name"]} for n in networks.listing(conn, admin)],
+            "networks": [{"id": i, "name": n} for i, n in nets.items()] if everyone
+                       else [{"id": n["id"], "name": n["name"]} for n in networks.listing(conn, admin)],
             "scope": "all" if everyone else "network",
         }
 
@@ -2468,6 +2480,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_training_access(user_id: int, body: AllowBody, admin: dict = Depends(staff("registrations"))):
         training.set_access(conn, admin, user_id, body.allow, body.idempotency_key)
         return {"training": {"granted": training.granted(conn, user_id), "assigned": training.assigned(conn, user_id)}}
+
+    @api.post("/admin/team/{user_id}/grants")
+    async def admin_set_grants(user_id: int, body: GrantsBody, admin: dict = Depends(staff("grants"))):
+        """18.11: personal permissions — broadcasts to everyone and onboarding without an admin."""
+        user, grants, changed = svc.set_grants(conn, admin, user_id, body.broadcast_all, body.onboarding,
+                                               body.idempotency_key)
+        return {"user": public_user(user), "grants": grants, "changed": changed}
 
     # ------------------------------------------------------------ «Обучение» for the candidate's trainer (§3–§4)
 

@@ -1,6 +1,6 @@
 # Справочник REST API
 
-**Обновлено:** 2026-11-17 · **Исходники:** `backend/app/api.py` (все маршруты), фронтенд-клиент `frontend/src/lib/api.ts`
+**Обновлено:** 2026-11-18 · **Исходники:** `backend/app/api.py` (все маршруты), фронтенд-клиент `frontend/src/lib/api.ts`
 
 ## Общие правила
 
@@ -45,6 +45,8 @@
 ## Админ: команда, доступ, группы
 
 `GET /api/admin/users` · `GET /api/admin/team` · `POST /api/admin/team/{uid}/role|access|state|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile` ·
+`POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?}` (owner/admin, 18.11; в `GET /api/me`
+и «Команде» поля приходят как `grants`) ·
 инвайты `GET/POST /api/admin/invites`, `/{id}/revoke|qr`, `POST /api/admin/invites/rotate` · попытки доступа
 `GET /api/admin/access-attempts`, `POST /api/admin/access-attempts/restore` · группы `GET/POST /api/admin/groups(/check|/invite|/mode|/not-newbie|/remove)`.
 
@@ -91,3 +93,4 @@
 ## История изменений
 
 - 2026-11-17 — страница создана по всем маршрутам коммита `78c73da`.
+- 2026-11-18 — добавлен `POST /api/admin/team/{uid}/grants` (личные разрешения), поле `grants` в user.

@@ -260,8 +260,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         user = invites.registered(conn, tg.id, user)
         await call.message.answer("Заявка отправлена. Ожидайте решения администратора.")
         await call.answer()
-        await notifier.to_admins(notify.registration_text(user, invites.owner_invited(conn, tg.id)),
-                                 notify.registration_keyboard(user["id"]))
+        # 18.11: people with the personal onboarding grant decide questionnaires as well
+        await notifier.to_onboarding(notify.registration_text(user, invites.owner_invited(conn, tg.id)),
+                                     notify.registration_keyboard(user["id"]))
 
     @router.callback_query(F.data == "reg_send")
     async def registration_send_stale(call: CallbackQuery):

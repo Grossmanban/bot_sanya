@@ -31,8 +31,11 @@ def role_of(user: dict | None) -> str:
 
 def is_staff(user: dict | None) -> bool:
     """Has the admin panel at all (scope may still be limited for trainers)."""
-    return role_of(user) in (OWNER, ADMIN, TRAINER, INSTRUCTOR) and user["status"] == "approved" \
-        and user["account_state"] != "blocked"
+    if not user or user["status"] != "approved" or user["account_state"] == "blocked":
+        return False
+    # a personal grant from «Команда» opens the panel too, even for a plain employee (18.11)
+    return role_of(user) in (OWNER, ADMIN, TRAINER, INSTRUCTOR) or has_grant(user, "broadcast_all") \
+        or has_grant(user, "registrations")
 
 
 def sees_everyone(user: dict | None) -> bool:
@@ -47,6 +50,8 @@ def manages(actor: dict | None, target: dict | None) -> bool:
         return True
     if role_of(actor) == INSTRUCTOR:  # only the people assigned to them
         return target.get("instructor_id") == actor["id"] and target["id"] != actor["id"]
+    if role_of(actor) != TRAINER:  # an employee with a personal grant (18.11) manages nobody
+        return False
     # a trainer — the network they lead (networks.trainer_id, ТЗ 28.10 В32); set_role/set_member keep a trainer the head
     # of their own network, so the fallback to network_id only covers rows read without led_network_id
     led = actor.get("led_network_id") or actor.get("network_id")
@@ -84,11 +89,26 @@ CAN = {
     "groups": {OWNER, ADMIN},       # ТЗ 27.10 §26–27: «Предзакреп» / «Основная команда»
     "products": {OWNER, ADMIN},     # ТЗ 27.10 §28: give and take access to «Работа» products
     "alice": {OWNER, ADMIN},        # ТЗ 27.10 §32, §38: QR codes, search queries, moderation, statistics
+    "grants": {OWNER, ADMIN},       # 18.11: the personal toggles in «Команда» (broadcasts to everyone, onboarding)
+}
+
+# 18.11: personal grants — the users columns the toggles in «Команда» set; they widen CAN for this one person
+GRANTS = {
+    "broadcast_all": "can_broadcast_all",     # may write to everyone; a trainer — outside their network too
+    "broadcast_network": "can_broadcast_all",  # the grant also opens the «Рассылка» section itself
+    "registrations": "can_onboard",            # onboarding: questionnaires, training, hiring — without an admin
 }
 
 
+def has_grant(user: dict | None, capability: str) -> bool:
+    column = GRANTS.get(capability)
+    return bool(column and user and user.get(column))
+
+
 def can(actor: dict | None, capability: str, target: dict | None = None) -> bool:
-    if not actor or not is_staff(actor) or role_of(actor) not in CAN[capability]:
+    if not actor or not is_staff(actor):
+        return False
+    if not (has_grant(actor, capability) or role_of(actor) in CAN[capability]):
         return False
     if target is not None and not manages(actor, target):
         return False

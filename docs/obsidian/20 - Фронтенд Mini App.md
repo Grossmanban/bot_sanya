@@ -33,7 +33,8 @@
 goals, events) · **Связь и настройки** (broadcast, points, networks, settings). Раздел виден по capability
 (`need: …` из [[03 - Роли и права]]), бейджи «ждут решения» на разделах и суммарный на вкладке.
 
-Крупные компоненты: `team-section.tsx` (карточка человека: роли, состояние, ставки, доступ, продукты, методички, профиль),
+Крупные компоненты: `team-section.tsx` (карточка человека: роли, состояние, ставки, доступ, продукты, методички, профиль,
+«Личные разрешения» — тумблеры «Рассылка всем» и «Онбординг без админа» для employee/trainer/instructor, capability `grants`, 18.11),
 `onboarding-section.tsx`, `broadcast-section.tsx` (+ `rich-editor.tsx` — виз. редактор HTML), `alice-admin.tsx`,
 `payouts-section.tsx` (мастер выплат), `money.tsx`/`finance-section.tsx` (журнал, решения), `reports.tsx`, `events-admin.tsx`,
 `groups-section.tsx`, `access-section.tsx` (инвайты, попытки), `networks-section.tsx`, `templates-section.tsx` (причины/тексты),
@@ -54,3 +55,4 @@ goals, events) · **Связь и настройки** (broadcast, points, netwo
 ## История изменений
 
 - 2026-11-18 — страница создана (коммит `78c73da`).
+- 2026-11-18 — «Команда»: блок «Личные разрешения» (рассылка всем / онбординг без админа); вкладка «Админ» открывается и держателю гранта (`isStaff`).

@@ -213,6 +213,17 @@ def owner_telegram_ids() -> list[int]:
     return sorted(settings.admin_ids)
 
 
+def onboarding_telegram_ids(conn: sqlite3.Connection) -> list[int]:
+    """Who decides questionnaires and training: owners, admins and people with the personal onboarding grant (18.11)."""
+    granted = {
+        r[0]
+        for r in conn.execute(
+            "SELECT telegram_id FROM users WHERE can_onboard = 1 AND status = 'approved' AND account_state != 'blocked'"
+        )
+    }
+    return sorted(granted | set(admin_telegram_ids(conn)))
+
+
 def create_registration(conn, telegram_id: int, username: str | None, first_name: str, last_name: str) -> tuple[dict, bool]:
     first_name, last_name = first_name.strip()[:100], last_name.strip()[:100]
     if not first_name or not last_name:
@@ -398,6 +409,40 @@ def _fresh_actor(conn, actor: dict) -> dict:
     if fresh is None or fresh["status"] != "approved" or fresh["account_state"] == "blocked":
         raise ServiceError("Нет доступа", 403, "forbidden")
     return fresh
+
+
+GRANT_COLUMNS = {"broadcast_all": "can_broadcast_all", "onboarding": "can_onboard"}  # the toggles in «Команда» (18.11)
+
+
+def grants_of(user: dict) -> dict[str, bool]:
+    return {"broadcast_all": bool(user.get("can_broadcast_all")), "onboarding": bool(user.get("can_onboard"))}
+
+
+def set_grants(conn, actor: dict, user_id: int, broadcast_all: bool | None, onboarding: bool | None,
+               key: str) -> tuple[dict, dict[str, bool], bool]:
+    """The personal permissions from «Команда»: broadcast to everyone (a trainer — outside their network too)
+    and onboarding without an admin's confirmation. Owners and admins set them (the «grants» capability)."""
+    _check_key(key)
+    with transaction(conn):
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "grants"):
+            raise ServiceError("Разрешения меняют владелец и администраторы", 403, "forbidden")
+        user = get_user(conn, user_id)
+        if user is None or user["status"] != "approved":
+            raise ServiceError("Сотрудник не найден", 404, "not_found")
+        if _seen(conn, key):
+            return user, grants_of(user), False
+        if is_owner(user):
+            raise ServiceError("Владельцу разрешения не нужны", 409, "owner")
+        changes = {c: int(v) for c, v in (("can_broadcast_all", broadcast_all), ("can_onboard", onboarding)) if v is not None}
+        if not changes:
+            raise ServiceError("Нечего менять", 422, "empty")
+        before = grants_of(user)
+        conn.execute(f"UPDATE users SET {', '.join(f'{c} = ?' for c in changes)} WHERE id = ?", (*changes.values(), user_id))
+        user = get_user(conn, user_id)
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="GRANTS_CHANGED", key=key,
+                  old=before, new=grants_of(user))
+    return user, grants_of(user), True
 
 
 def set_account_state(conn, actor: dict, user_id: int, state: str, reason: str | None, key: str) -> tuple[dict, bool]:
@@ -1443,7 +1488,8 @@ def broadcast_recipients(conn, audiences: list[str] | str, network_id: int | Non
     people = [dict(r) for r in conn.execute(
         f"""SELECT * FROM users WHERE status = 'approved' AND account_state != 'blocked' AND ({' OR '.join(parts)})
             ORDER BY id""", params)]
-    if actor is not None and not perms.sees_everyone(actor):
+    # who may write to everyone (broadcast_all) skips the network fence — owners, admins and personal grants (18.11)
+    if actor is not None and not perms.can(actor, "broadcast_all"):
         people = [u for u in people if perms.manages(actor, u)]
     if only_unmarked is not None:
         marked = marked_on(conn, only_unmarked)

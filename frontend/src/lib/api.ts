@@ -45,6 +45,8 @@ export interface User {
   personal_commission?: number | null;
   /** ТЗ 27.10 §22: the instructor this person works under (null — directly under the trainer) */
   instructor_id?: number | null;
+  /** 18.11: the personal toggles from «Команда» — broadcast to everyone and onboarding without an admin */
+  grants?: { broadcast_all: boolean; onboarding: boolean };
 }
 
 export type Role = "owner" | "admin" | "trainer" | "instructor" | "employee";
@@ -62,7 +64,7 @@ export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
   | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups"
-  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals";
+  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals" | "grants";
 
 /** ТЗ 27.10 §28: «Работа» — products a person has access to */
 export type Product = "alice" | "plus";
@@ -232,7 +234,9 @@ export interface AccessAttempt {
   restore_result: "granted" | "sent" | "not_delivered" | null;
 }
 
-export const isStaff = (u: User) => u.role !== "employee" && u.account_state !== "blocked";
+/** 18.11: a personal grant from «Команда» opens the admin tab even for a plain employee */
+export const isStaff = (u: User) =>
+  (u.role !== "employee" || !!u.grants?.broadcast_all || !!u.grants?.onboarding) && u.account_state !== "blocked";
 
 export interface Pricing {
   base_rate: number;
@@ -1542,6 +1546,9 @@ export const api = {
       post<{ request: TrainingRequest; requests: TrainingRequest[] }>(`/api/admin/training-requests/${id}/decide`, { ...body, idempotency_key: key }),
     trainingAccess: (userId: number, allow: boolean, key: string) =>
       post<{ training: { granted: boolean; assigned: number } }>(`/api/admin/team/${userId}/training-access`, { allow, idempotency_key: key }),
+    setGrants: (userId: number, body: { broadcast_all?: boolean; onboarding?: boolean }, key: string) =>
+      post<{ user: User; grants: { broadcast_all: boolean; onboarding: boolean }; changed: boolean }>(
+        `/api/admin/team/${userId}/grants`, { ...body, idempotency_key: key }),
     groupMode: (user_id: number, mode: "pre" | "main" | "both" | null, key: string) =>
       post<GroupsBoard>("/api/admin/groups/mode", { user_id, mode, idempotency_key: key }),
     notNewbie: (user_id: number, value: boolean, key: string) =>

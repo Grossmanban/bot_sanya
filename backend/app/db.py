@@ -1476,6 +1476,12 @@ CREATE TABLE event_entry_messages (
 )
 """)
 
+# 18.11: личные разрешения из «Команды» — рассылка всем (тренеру — вне своей сети) и онбординг без админа
+MIGRATIONS.append("""
+ALTER TABLE users ADD COLUMN can_broadcast_all INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN can_onboard INTEGER NOT NULL DEFAULT 0
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
