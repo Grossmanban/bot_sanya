@@ -6,6 +6,9 @@ services:
       DB_PATH: /data/bot.db
       # files on the persistent disk too (a QR before it is in Telegram, photos waiting to be sent, kept videos)
       MEDIA_DIR: /data/media
+    extra_hosts:
+      # «Заполнить по фото»: the local opencode server (or any model API) on the host, docker0 side
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data
     restart: unless-stopped

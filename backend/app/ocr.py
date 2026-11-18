@@ -7,6 +7,7 @@ the names to the team (the wizard's network, when chosen). Nothing is saved: the
 row in the app and commits the payout as usual — recognition only pre-fills the amounts.
 """
 
+import asyncio
 import base64
 import difflib
 import json
@@ -21,7 +22,8 @@ from . import services as svc
 from .config import settings
 from .services import ServiceError
 
-TIMEOUT = 90  # a vision model may think for a while on a big photo
+TIMEOUT = 120  # a vision model may think for a while on a big photo
+POLL_EVERY = 2  # the opencode service answers through its inbox — we poll the session messages
 MAX_ROWS = 100  # a sane report is a couple dozen lines; garbage guards the JSON size
 
 PROMPT = (
@@ -42,10 +44,16 @@ def configured() -> bool:
 
 
 async def _ask(data: bytes, mime: str) -> str:
-    """One call to the OpenAI-compatible endpoint; any failure becomes a clear ServiceError."""
-    url = settings.ocr_base_url + "/chat/completions"
-    if not urlparse(url).scheme.startswith("http"):
+    """The photo → the model's text reply, through whichever endpoint kind .env points at."""
+    if not urlparse(settings.ocr_base_url).scheme.startswith("http"):
         raise ServiceError("OCR_BASE_URL должен быть http(s) адресом", 409, "ocr_bad_url")
+    if settings.ocr_kind == "opencode":
+        return await _ask_opencode(data, mime)
+    return await _ask_openai(data, mime)
+
+
+async def _ask_openai(data: bytes, mime: str) -> str:
+    """One call to an OpenAI-compatible endpoint; any failure becomes a clear ServiceError."""
     payload = {
         "model": settings.ocr_model,
         "temperature": 0,
@@ -60,7 +68,7 @@ async def _ask(data: bytes, mime: str) -> str:
     headers = {"Authorization": f"Bearer {settings.ocr_api_key}"} if settings.ocr_api_key else {}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
+            async with session.post(settings.ocr_base_url + "/chat/completions", json=payload, headers=headers) as resp:
                 body = await resp.text()
                 if resp.status != 200:
                     raise ServiceError(f"Модель не ответила (HTTP {resp.status}): {body[:200]}", 502, "ocr_error")
@@ -71,6 +79,70 @@ async def _ask(data: bytes, mime: str) -> str:
     except aiohttp.ClientError as exc:
         raise ServiceError(f"Распознавание недоступно: {exc.__class__.__name__}. Проверьте, что сервер модели запущен",
                            502, "ocr_unreachable") from exc
+
+
+# ---------------------------------------------------------------- the local `opencode serve --service` API
+
+
+async def _oc_request(method: str, path: str, body: dict | None = None) -> tuple[int, dict | list | None]:
+    """One HTTP call to the opencode service (Basic auth: OCR_API_KEY = «user:password»)."""
+    key = settings.ocr_api_key or ""
+    user, _, password = key.partition(":")
+    auth = aiohttp.BasicAuth(user or "opencode", password or key)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
+            async with session.request(method, settings.ocr_base_url + path, json=body, auth=auth) as resp:
+                text = await resp.text()
+                try:
+                    return resp.status, json.loads(text) if text else None
+                except json.JSONDecodeError:
+                    return resp.status, {"raw": text[:200]}
+    except aiohttp.ClientError as exc:
+        raise ServiceError(f"Сервер opencode недоступен: {exc.__class__.__name__}. Проверьте, что он запущен",
+                           502, "ocr_unreachable") from exc
+
+
+def _assistant_text(messages: list) -> str:
+    """The last assistant reply's text parts of the session's message list."""
+    texts = []
+    for msg in messages or []:
+        info = msg.get("info") or {}
+        if info.get("type") != "assistant" and info.get("role") != "assistant":
+            continue
+        texts += [p.get("text", "") for p in (msg.get("parts") or []) if p.get("type") == "text"]
+    return "\n".join(t for t in texts if t)
+
+
+async def _ask_opencode(data: bytes, mime: str) -> str:
+    """A throw-away session: attach the photo, ask, poll for the answer, delete the session."""
+    status, made = await _oc_request("POST", "/api/session", {})
+    if status != 200 or not isinstance(made, dict) or "id" not in made:
+        raise ServiceError(f"opencode не создал сессию (HTTP {status})", 502, "ocr_error")
+    session_id = made["id"]
+    try:
+        provider, _, model = settings.ocr_model.partition("/")
+        if provider and model:
+            await _oc_request("POST", f"/api/session/{session_id}/model",
+                              {"model": {"providerID": provider, "modelID": model}})
+        status, _ = await _oc_request("POST", f"/api/session/{session_id}/prompt", {
+            "text": PROMPT,
+            "files": [{"uri": f"data:{mime};base64,{base64.b64encode(data).decode()}"}],
+        })
+        if status not in (200, 201, 202):
+            raise ServiceError(f"opencode не принял запрос (HTTP {status})", 502, "ocr_error")
+        waited = 0
+        while waited < TIMEOUT:
+            await asyncio.sleep(POLL_EVERY)
+            waited += POLL_EVERY
+            status, listed = await _oc_request("GET", f"/api/session/{session_id}/message")
+            if status != 200 or not isinstance(listed, dict):
+                continue
+            text = _assistant_text(listed.get("data"))
+            if text.strip():
+                return text
+        raise ServiceError("Модель не ответила за отведённое время — попробуйте ещё раз", 504, "ocr_timeout")
+    finally:
+        await _oc_request("DELETE", f"/api/session/{session_id}")
 
 
 def _to_rubles(raw) -> int | None:

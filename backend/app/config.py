@@ -38,9 +38,12 @@ class Settings:
     media_dir: str = field(default_factory=lambda: os.environ.get("MEDIA_DIR", str(ROOT / "data" / "media")))
     # 18.11: «Заполнить по фото» in the payout wizard — a vision model through an OpenAI-compatible
     # endpoint (e.g. the local opencode server). Empty OCR_BASE_URL — the feature is off.
+    # OCR_KIND: "openai" — {base}/chat/completions; "opencode" — the local `opencode serve --service`
+    # API (Basic auth, a session with a picture attached); OCR_MODEL "providerID/modelID".
     ocr_base_url: str = field(default_factory=lambda: os.environ.get("OCR_BASE_URL", "").rstrip("/"))
     ocr_model: str = field(default_factory=lambda: os.environ.get("OCR_MODEL", ""))
     ocr_api_key: str = field(default_factory=lambda: os.environ.get("OCR_API_KEY", ""))
+    ocr_kind: str = field(default_factory=lambda: os.environ.get("OCR_KIND", "openai"))
     init_data_max_age: int = 24 * 3600
 
     @property

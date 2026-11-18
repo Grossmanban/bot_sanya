@@ -82,3 +82,40 @@ def test_the_route_requires_configuration_and_parses(conn, make_user, monkeypatc
     # a trainer can't call it; garbage instead of an image is rejected before the model
     assert client.post_raw("/api/admin/payouts/parse-photo", vera["telegram_id"], PNG).status_code == 403
     assert client.post_raw("/api/admin/payouts/parse-photo", 999, b"not-an-image").status_code == 415
+
+
+def test_opencode_transport_makes_a_session_polls_and_cleans_up(monkeypatch):
+    """The local `opencode serve --service` protocol: session → model → prompt with the photo → poll → delete."""
+    import asyncio
+    from types import SimpleNamespace
+
+    calls = []
+
+    async def fake_oc_request(method, path, body=None):
+        calls.append((method, path))
+        if (method, path) == ("POST", "/api/session"):
+            return 200, {"id": "ses_1"}
+        if path.endswith("/model"):
+            return 200, {}
+        if path.endswith("/prompt"):
+            assert body and body["files"] and body["files"][0]["uri"].startswith("data:image/png;base64,")
+            assert "Фамилия" in body["text"]  # the strict JSON prompt goes as is
+            return 200, {"data": {"id": "msg_1"}}
+        if path.endswith("/message"):
+            if len([c for c in calls if c[1].endswith("/message")]) == 1:  # the first poll: nothing yet
+                return 200, {"data": [{"info": {"type": "user"}, "parts": [{"type": "text", "text": "вопрос"}]}]}
+            return 200, {"data": [{"info": {"type": "assistant"},
+                                   "parts": [{"type": "text", "text": fake_reply([{"name": "X Y", "amount": 1}])}]}]}
+        return 200, {}
+
+    monkeypatch.setattr(ocr, "_oc_request", fake_oc_request)
+    monkeypatch.setattr(ocr, "settings", SimpleNamespace(ocr_kind="opencode", ocr_base_url="http://opencode.local",
+                                                         ocr_model="opencode/nemotron-vl", ocr_api_key="opencode:secret"))
+    monkeypatch.setattr(ocr, "POLL_EVERY", 0)
+
+    text = asyncio.run(ocr._ask(b"png-bytes", "image/png"))
+    rows, dropped = ocr.parse_report(text)
+    assert rows == [{"name": "X Y", "amount": 1}] and dropped == []
+    ops = {(m, p) for m, p in calls}
+    assert ("POST", "/api/session") in ops and ("DELETE", "/api/session/ses_1") in ops
+    assert ("POST", "/api/session/ses_1/model") in ops and ("POST", "/api/session/ses_1/prompt") in ops
