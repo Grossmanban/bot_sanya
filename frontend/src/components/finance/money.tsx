@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { useReasons } from "@/lib/reasons";
 import { Button } from "@/components/ui/button";
 import { api, type Balance, type MoneySummary, type Product, type Tx, type TxType } from "@/lib/api";
-import { useCan } from "@/lib/caps";
+import { useCan, useProductsEnabled } from "@/lib/caps";
 import { dayMonth, rub } from "@/lib/format";
 import { moscowToday, useAction } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -292,8 +292,10 @@ export function TxForm({ userId, initial = "fine", onDone }: { userId: number; i
   const [day, setDay] = useState(moscowToday());
   const pieceMode = type === "deduction" && inPieces;
   const [uploaded, setUploaded] = useState<{ blob: Blob; id: string } | null>(null);
-  // ТЗ 28.10 §24: a fine for «Алиса» (owners and admins), optionally for one task «Алиса #N»
-  const canAlice = useCan("alice");
+  // ТЗ 28.10 §24: a fine for «Алиса» (owners and admins), optionally for one task «Алиса #N»; 18.11 — hidden while
+  // the products are switched off
+  const productsOn = useProductsEnabled();
+  const canAlice = useCan("alice") && productsOn;
   // ТЗ «Яндекс Плюс» §9: the same fine for «Яндекс Плюс»; null — for the shifts
   const [alice, setAlice] = useState<Product | null>(null);
   const [taskNo, setTaskNo] = useState("");

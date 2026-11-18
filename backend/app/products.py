@@ -17,6 +17,11 @@ from .timeutil import now_iso
 # those of «Алиса» (alice.py serves both)
 PRODUCTS = {"alice": "Яндекс Алиса", "plus": "Яндекс Плюс"}
 
+# 18.11: «Алиса» и «Яндекс Плюс» выключены целиком — работа, выдача доступа, модерация, QR-коды, выплаты, штрафы за
+# них; разделы скрыты и в приложении, и в боте. Вернуть: поставить True — данные (доступы, задания, история выплат)
+# не удалялись, всё оживёт как было.
+PRODUCTS_ENABLED = False
+
 
 def check_product(product: str | None) -> str | None:
     if product is not None and product not in PRODUCTS:
@@ -25,6 +30,8 @@ def check_product(product: str | None) -> str | None:
 
 
 def of_user(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    if not PRODUCTS_ENABLED:
+        return []
     return [r[0] for r in conn.execute(
         "SELECT product FROM product_access WHERE user_id = ? AND revoked_at IS NULL ORDER BY product", (user_id,))]
 
@@ -32,6 +39,8 @@ def of_user(conn: sqlite3.Connection, user_id: int) -> list[str]:
 def has(conn: sqlite3.Connection, user: dict | None, product: str | None) -> bool:
     if product is None:
         return True
+    if not PRODUCTS_ENABLED:
+        return False
     if user is None or user["status"] != "approved" or user["account_state"] == "blocked":
         return False
     return conn.execute("SELECT 1 FROM product_access WHERE user_id = ? AND product = ? AND revoked_at IS NULL",
@@ -42,6 +51,8 @@ def manageable(conn: sqlite3.Connection, actor: dict | None) -> list[str]:
     """ТЗ «Яндекс Плюс» §11: products the actor may tie goals, events and the like to. Those who hand out access to
     products (owner, admins) — every product; anyone else (trainers, instructors) — only the products they have access
     to themselves."""
+    if not PRODUCTS_ENABLED:
+        return []
     if actor is None or not perms.is_staff(actor):
         return []
     if perms.can(actor, "products"):
@@ -63,6 +74,8 @@ def require(conn: sqlite3.Connection, user: dict, product: str) -> None:
 
 def set_access(conn: sqlite3.Connection, actor: dict, user_id: int, product: str, allow: bool, key: str) -> tuple[dict, bool]:
     check_product(product)
+    if not PRODUCTS_ENABLED:
+        raise ServiceError("Раздел «Алиса»/«Яндекс Плюс» временно отключён", 409, "products_disabled")
     _check_key(key)
     with transaction(conn):
         user = svc.get_user(conn, user_id)

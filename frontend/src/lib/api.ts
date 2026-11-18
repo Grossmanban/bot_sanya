@@ -268,6 +268,8 @@ export interface Me {
   internship?: StageProgress | null;
   /** ТЗ 27.10 §28: products in «Работа» */
   products?: Product[];
+  /** 18.11: whether «Алиса»/«Яндекс Плюс» are on at all (false — every product section is hidden) */
+  products_enabled?: boolean;
   /** ТЗ «Яндекс Плюс» §11: products this person may tie goals and events to (owner, admins — all; others — their own) */
   manageable_products?: Product[];
   /** ТЗ 28.10 §3: «Обучение» — the trainer of a candidate or a grant */

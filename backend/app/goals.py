@@ -257,6 +257,8 @@ def listing(conn: sqlite3.Connection, viewer: dict) -> list[dict]:
     rows = [dict(r) for r in conn.execute("SELECT * FROM goals WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 100")]
     out = []
     for g in rows:
+        if g.get("product") and not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off
+            continue
         if not perms.sees_everyone(viewer):
             if g["kind"] in ("team", "point"):
                 continue
@@ -513,6 +515,8 @@ def check_completions(conn: sqlite3.Connection, today: date | None = None,
     out = []
     for g in [dict(r) for r in conn.execute(
             "SELECT * FROM goals WHERE status = 'active' AND deleted_at IS NULL AND visibility != 'hidden'")]:
+        if g.get("product") and not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off
+            continue
         if g["kind"] == "point":
             day = goal_day(g, now)
             if not g["date_from"] <= day.isoformat() <= g["date_to"]:

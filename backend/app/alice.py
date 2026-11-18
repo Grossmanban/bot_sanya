@@ -78,6 +78,8 @@ KINDS = {
 def check(product: str | None) -> str:
     if product not in KINDS:
         raise ServiceError("Неизвестный продукт", 404, "bad_product")
+    if not products.PRODUCTS_ENABLED:  # 18.11: the whole «Алиса»/«Яндекс Плюс» section is switched off
+        raise ServiceError("Раздел «Алиса»/«Яндекс Плюс» временно отключён", 409, "products_disabled")
     return product
 
 

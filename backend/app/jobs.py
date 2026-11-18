@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import alice, app_settings, events, export, goals, groups, notify, recruiting, reports, violations
+from . import alice, app_settings, events, export, goals, groups, notify, products, recruiting, reports, violations
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -115,7 +115,8 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
             for _ in await groups.auto_invites(conn, notifier.bot, notifier.group_invited):
                 ran.append("group_invite")
     # ТЗ 27.10 §36: an execution whose photos didn't reach the group is sent again (never left as «sent»)
-    if notifier.bot is not None and _every(conn, "alice_retry", now, minutes=10):
+    # 18.11: the products are switched off — no retries, no queries (tasks stay as they are)
+    if notifier.bot is not None and products.PRODUCTS_ENABLED and _every(conn, "alice_retry", now, minutes=10):
         for task_id in alice.to_retry(conn):
             task = await alice.deliver(conn, notifier.bot, task_id, notifier)
             if task and task["status"] == "moderation":

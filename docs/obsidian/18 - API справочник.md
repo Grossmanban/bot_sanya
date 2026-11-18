@@ -37,6 +37,9 @@
 
 ## «Работа» (продукты; `{product}` = alice | plus)
 
+> [!warning] 18.11: раздел выключен — `products.PRODUCTS_ENABLED = False`; все маршруты «Работы», «Алисы» и
+> продуктовых выплат отвечают `409 products_disabled`, разделы в приложении скрыты. Возврат — `True`.
+
 `GET /api/work` (список доступных) · `GET /api/work/{product}` · `POST …/start` · `POST …/{task}/scanned` ·
 `PUT/DELETE …/{task}/photo/{stage}` · `POST …/{task}/goto/{stage}` (назад) · `POST …/{task}/next` · `POST …/{task}/finish` ·
 `POST …/{task}/retry` · `POST …/{task}/abandon` · `GET /api/media/alice/{photo}` · `GET /api/media/aliceqr/{qr}`.
@@ -113,3 +116,6 @@
 - 2026-11-18 — `GET /api/admin/broadcasts`: в `people` флаги `shift_today`/`shift_tomorrow`; аудитории `shift_today`/`shift_tomorrow` в `POST`.
 - 2026-11-18 — `POST /api/admin/finances/pieces`: вычет всегда по базовой ставке сотрудника (личная/общая), в долю
   добавлен инструктор человека.
+- 2026-11-18 — «Алиса»/«Яндекс Плюс» выключены (`products.PRODUCTS_ENABLED = False`): `/api/work*`, `/api/admin/alice*`,
+  `/api/admin/team/{uid}/products` и продуктовые штрафы отвечают `409 products_disabled`; `GET /api/me` отдаёт
+  `products_enabled`.

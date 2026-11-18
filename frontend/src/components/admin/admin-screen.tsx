@@ -20,7 +20,7 @@ import {
 } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { haptic, openProfile, tapHaptic } from "@/lib/telegram";
-import { CapsContext, ProductsContext } from "@/lib/caps";
+import { CapsContext, ProductsContext, ProductsEnabledContext } from "@/lib/caps";
 import { PENDING_LABELS, refreshPending, sectionCount, sectionOf, usePending } from "@/lib/pending";
 import { readSession, rememberScroll, useScrollMemory, writeSession } from "@/lib/scroll";
 import { cn } from "@/lib/utils";
@@ -89,9 +89,11 @@ const groupOf = (s: Section): Group => GROUPS.find((g) => g.sections.includes(s)
 
 const field = "h-12 w-full rounded-2xl border-0 bg-muted px-4 outline-none focus:ring-2 focus:ring-ring/25";
 
-export function AdminScreen({ me, caps, network, manageable = [] }: { me: User; caps: Capability[]; network?: string | null;
-  manageable?: Product[] }) {
-  const sections = SECTIONS.filter((s) => (s.id === "decisions" ? DECIDES.some((c) => caps.includes(c)) : caps.includes(s.need)));
+export function AdminScreen({ me, caps, network, manageable = [], productsEnabled = false }: { me: User; caps: Capability[];
+  network?: string | null; manageable?: Product[]; productsEnabled?: boolean }) {
+  // 18.11: «Алиса»/«Яндекс Плюс» are switched off — their sections vanish (the server refuses them anyway)
+  const sections = SECTIONS.filter((s) => ((s.id === "alice" || s.id === "plus") && !productsEnabled) ? false
+    : (s.id === "decisions" ? DECIDES.some((c) => caps.includes(c)) : caps.includes(s.need)));
   const visible = new Set(sections.map((s) => s.id));
   const groups = GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => visible.has(s)) })).filter((g) => g.sections.length > 0);
   // the open section and its scroll survive a reload and switching tabs
@@ -129,6 +131,7 @@ export function AdminScreen({ me, caps, network, manageable = [] }: { me: User; 
   return (
     <CapsContext.Provider value={caps}>
     <ProductsContext.Provider value={manageable}>
+    <ProductsEnabledContext.Provider value={productsEnabled}>
     <div className="mx-auto max-w-3xl space-y-5">
       <nav className="space-y-2">
         <div ref={groupStrip} className="no-scrollbar -mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
@@ -218,6 +221,7 @@ export function AdminScreen({ me, caps, network, manageable = [] }: { me: User; 
         }}
       />
     </div>
+    </ProductsEnabledContext.Provider>
     </ProductsContext.Provider>
     </CapsContext.Provider>
   );

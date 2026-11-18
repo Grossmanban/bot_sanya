@@ -13,3 +13,9 @@ export const useCan = (capability: Capability) => useContext(CapsContext).includ
 export const ProductsContext = createContext<Product[]>([]);
 
 export const useManageableProducts = () => useContext(ProductsContext);
+
+/** 18.11: «Алиса»/«Яндекс Плюс» are switched off on the server (products.PRODUCTS_ENABLED) — every product section
+ * hides while it's false; the flag comes from `/api/me`. */
+export const ProductsEnabledContext = createContext(false);
+
+export const useProductsEnabled = () => useContext(ProductsEnabledContext);

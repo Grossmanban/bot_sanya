@@ -10,7 +10,7 @@ unmarked who already has an «unmarked» violation for that day is «Дисци�
 import sqlite3
 from datetime import date, timedelta
 
-from . import day_actual, recruiting, violations
+from . import day_actual, products, recruiting, violations
 from . import permissions as perms
 from . import services as svc
 from .timeutil import today_local
@@ -99,14 +99,14 @@ def counts(conn: sqlite3.Connection, viewer: dict, today: date | None = None) ->
             if mine(r["user_id"]) and r["user_id"] != viewer["id"])
         # ТЗ 29.10 §5: today and tomorrow (each person-day once; with a violation it is «Дисциплина»'s)
         out["unmarked"] = len(unmarked(conn, viewer, today)) + len(unmarked(conn, viewer, today + timedelta(days=1)))
-    if perms.can(viewer, "alice"):
+    if perms.can(viewer, "alice") and products.PRODUCTS_ENABLED:  # 18.11: off — no counts, no queries at all
         for product in ("alice", "plus"):  # ТЗ «Яндекс Плюс»: each product's queue is counted on its own
             out[f"{product}_moderation"] = conn.execute(
                 "SELECT COUNT(*) FROM alice_tasks WHERE product = ? AND status = 'moderation'", (product,)).fetchone()[0]
             out[f"{product}_failed"] = conn.execute(
                 "SELECT COUNT(*) FROM alice_tasks WHERE product = ? AND status = 'send_failed' AND send_attempts >= ?",
                 (product, ALICE_GIVE_UP)).fetchone()[0]
-    out["total"] = sum(out[k] for k in KEYS)
+    out["total"] = sum(out.get(k, 0) for k in KEYS)
     return out
 
 

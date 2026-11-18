@@ -218,6 +218,8 @@ def view(conn: sqlite3.Connection, event: dict, viewer: dict | None = None, now:
 def _scoped(conn: sqlite3.Connection, user: dict, where: str, order: str) -> list[dict]:
     rows = [dict(r) for r in conn.execute(
         f"SELECT * FROM events WHERE deleted_at IS NULL AND status != 'cancelled' AND {where} ORDER BY {order}")]
+    if not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off — their events are hidden entirely
+        rows = [r for r in rows if not r.get("product")]
     return [r for r in rows if open_to(conn, r, user)]
 
 
@@ -252,6 +254,8 @@ def managed(conn: sqlite3.Connection, viewer: dict, limit: int = 100) -> list[di
     """The admin list: everything not deleted (running, finished, hidden, cancelled), newest first."""
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM events WHERE deleted_at IS NULL ORDER BY (status = 'active') DESC, id DESC LIMIT ?", (limit,))]
+    if not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off — their events are hidden entirely
+        rows = [r for r in rows if not r.get("product")]
     if perms.sees_everyone(viewer):
         return rows
     return [r for r in rows if r["network_id"] is not None and r["network_id"] == viewer.get("network_id")]
@@ -567,6 +571,8 @@ def finish_due(conn: sqlite3.Connection, now: datetime | None = None) -> list[di
     now = now or now_local()
     done = []
     for e in [dict(r) for r in conn.execute("SELECT * FROM events WHERE status = 'active' AND deleted_at IS NULL")]:
+        if e.get("product") and not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off
+            continue
         if now >= _dt(e["ends_at"]) + timedelta(minutes=e["buffer_min"]):
             with transaction(conn):
                 flipped = conn.execute("UPDATE events SET status = 'finished', finished_at = ? WHERE id = ? AND status = 'active'",

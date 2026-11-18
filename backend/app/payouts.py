@@ -19,7 +19,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
-from . import app_settings, finance, networks, pricing, recruiting
+from . import app_settings, finance, networks, pricing, products, recruiting
 from .rates import Book
 from . import permissions as perms
 from . import services as svc
@@ -730,12 +730,14 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> dict | None:
 
 def history(conn: sqlite3.Connection, limit: int = 60) -> list[dict]:
     """The registry; annulled payouts go to its «Архив» (the client splits by status)."""
+    product_filter = "" if products.PRODUCTS_ENABLED else "WHERE b.product IS NULL"  # 18.11: products off —
+    # their payouts stay in the database but don't show in the registry until the flag is back
     return [{**dict(r), "people": r["people"]} for r in conn.execute(
-        """SELECT b.id, b.title, b.period_from, b.period_to, b.total, b.created_at, b.product, b.status, b.version,
+        f"""SELECT b.id, b.title, b.period_from, b.period_to, b.total, b.created_at, b.product, b.status, b.version,
                   b.annulled_at, b.annul_reason,
                   (SELECT COUNT(*) FROM payout_items i WHERE i.batch_id = b.id
                    AND i.voided = CASE WHEN b.status = 'annulled' THEN 2 ELSE 0 END) AS people
-           FROM payout_batches b ORDER BY b.id DESC LIMIT ?""", (limit,))]
+           FROM payout_batches b {product_filter} ORDER BY b.id DESC LIMIT ?""", (limit,))]
 
 
 def bank_text(b: dict) -> str:

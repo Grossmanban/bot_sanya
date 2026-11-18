@@ -12,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Point, type ScheduleSettings, type SettingsResponse, type User } from "@/lib/api";
 import { WEEKDAYS, plural } from "@/lib/format";
-import { useCan } from "@/lib/caps";
+import { useCan, useProductsEnabled } from "@/lib/caps";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { GlobalLinkCard, HeaderTitleCard, ReasonsCard, TextsCard } from "./templates-section";
@@ -474,12 +474,13 @@ const RATES: { key: RateKey; label: string; unit: string }[] = [
 function RatesCard({ cfg, set }: { cfg: ScheduleSettings; set: (p: Partial<ScheduleSettings>) => void }) {
   const [resetting, setResetting] = useState(false);
   const { busy, run } = useAction();
+  const productsOn = useProductsEnabled();  // 18.11: the products are off — their rates are hidden
   return (
     <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <h2 className="font-semibold">Ставки</h2>
       <p className="text-sm text-muted-foreground">Сохраняются кнопкой выше. В мастере выплаты их можно изменить для одной выплаты.</p>
       <div className="mt-4 grid grid-cols-2 gap-3">
-        {RATES.map((r) => (
+        {RATES.filter((r) => productsOn || (r.key !== "alice_rate" && r.key !== "plus_rate")).map((r) => (
           <label key={r.key} className="space-y-1.5">
             <span className="text-xs text-muted-foreground">{r.label}</span>
             <span className="flex items-center gap-2">

@@ -18,6 +18,7 @@ import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerTitle } fr
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, ROLE_TITLES, type Capability, type Role, type User } from "@/lib/api";
+import { useProductsEnabled } from "@/lib/caps";
 import { dayMonth, offFor } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { haptic, openProfile, webApp } from "@/lib/telegram";
@@ -269,6 +270,7 @@ function MemberSheet({
   onUpdated: (u: User) => void;
 }) {
   const wide = useWide();
+  const productsOn = useProductsEnabled();  // 18.11: the products are off — no product access block, no request
   const { busy, run } = useAction();
   const [pausing, setPausing] = useState(false);
   const [money, setMoney] = useState(false);
@@ -437,7 +439,7 @@ function MemberSheet({
               {approved && caps.includes("money") && (
                 <PersonalRates key={user.id} user={user} onUpdated={onUpdated} />
               )}
-              {approved && caps.includes("products") && <ProductAccess key={`p-${user.id}`} user={user} />}
+              {productsOn && approved && caps.includes("products") && <ProductAccess key={`p-${user.id}`} user={user} />}
               {approved && caps.includes("manuals") && <ManualAccess key={`m-${user.id}`} userId={user.id} />}
               {approved && caps.includes("registrations") && <TrainingAccess key={`t-${user.id}`} user={user} onChanged={() => onUpdated(user)} />}
               {approved && caps.includes("grants") && !isSelf && !user.is_owner
@@ -899,12 +901,14 @@ function Grants({ user, onUpdated }: { user: User; onUpdated: (u: User) => void 
   );
 }
 
-/** ТЗ 27.10 §28: access to «Работа» products — give, take back, the log of changes. */
+/** ТЗ 27.10 §28: access to «Работа» products — give, take back, the log of changes. 18.11: hidden while the products
+ * are switched off. */
 function ProductAccess({ user }: { user: User }) {
+  const productsOn = useProductsEnabled();
   const { data, setData } = useLoad(() => api.admin.userProducts(user.id), [user.id]);
   const { busy, run } = useAction();
   const [log, setLog] = useState(false);
-  if (!data) return null;
+  if (!productsOn || !data) return null;
   return (
     <div className="mt-4 space-y-3 rounded-2xl bg-muted/50 px-4 py-3">
       <span className="block text-[15px] font-semibold">Работа: продукты</span>

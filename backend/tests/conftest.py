@@ -9,19 +9,28 @@ os.environ["MEDIA_DIR"] = __import__("tempfile").mkdtemp(prefix="media-")
 import pytest  # noqa: E402
 
 from app import services as svc  # noqa: E402
+from app import products  # noqa: E402
 from app.db import connect  # noqa: E402
+
+# 18.11: in production «Алиса»/«Яндекс Плюс» are switched off (products.PRODUCTS_ENABLED = False). The suite
+# exercises their mechanics with the flag on (set once at import, no fixture-order pitfalls); the off state is
+# checked in test_products_disabled.py, whose `off` fixture monkeypatches the flag back to False.
+products.PRODUCTS_ENABLED = True
 
 
 @pytest.fixture(autouse=True)
 def schedule_noon(monkeypatch):
     """The schedule rules depend on the clock (22:00 the day before a shift): tests run at noon of the real day,
-    so booking «tomorrow» works whenever the suite runs. Tests about the deadline pass `now` themselves."""
+    so booking «tomorrow» works whenever the suite runs. Tests about the deadline pass `now` themselves.
+    Event timestamps (`svc.log_event` → `svc.now_iso`) follow the same noon — otherwise a suite run between
+    midnight and noon MSK fails recency checks («напомнили 5 минут назад»: a 00:xx real stamp is «older» than noon)."""
     from datetime import datetime, time
 
     from app.config import settings
     from app.timeutil import now_local
 
     monkeypatch.setattr(svc, "now_local", lambda: datetime.combine(now_local().date(), time(12), tzinfo=settings.tz))
+    monkeypatch.setattr(svc, "now_iso", lambda: svc.now_local().isoformat(timespec="seconds"))
 
 
 @pytest.fixture

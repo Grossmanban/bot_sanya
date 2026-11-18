@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from . import app_settings, notify
 from . import permissions as perms
-from . import alice, broadcasts, day_actual, finance, groups, invites, pending, recruiting, reports, templates, training
+from . import alice, broadcasts, day_actual, finance, groups, invites, pending, products, recruiting, reports, templates, training
 from . import services as svc
 from .config import settings
 from .notify import Notifier
@@ -1012,6 +1012,9 @@ def build_router(conn: sqlite3.Connection, notifier: Notifier) -> Router:
         """ТЗ 27.10 §36 / ТЗ «Яндекс Плюс» §7.1: the forum group for the product's photo reports — a topic per employee.
         Each product keeps its own group: connecting one never overwrites the other, and one chat serves one product."""
         if message.from_user.id not in settings.admin_ids:
+            return
+        if not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off
+            await message.answer("Раздел «Алиса»/«Яндекс Плюс» сейчас отключён — подключать группу фотоотчётов не нужно.")
             return
         command = alice.KINDS[product]["command"]
         if message.chat.type != "supergroup" or not message.chat.is_forum:

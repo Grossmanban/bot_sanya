@@ -24,6 +24,7 @@ from datetime import date
 
 from . import media
 from . import permissions as perms
+from . import products
 from . import services as svc
 from .db import transaction
 from .services import MAX_PENALTY, ServiceError, _check_key, _fresh_actor, _seen, log_event
@@ -349,6 +350,8 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
         raise ServiceError("Неизвестный продукт", 422, "bad_product")
     if alice_task_id is not None and product is None:
         product = "alice"
+    if product is not None and not products.PRODUCTS_ENABLED:  # 18.11: the products are switched off
+        raise ServiceError("Штрафы за «Алису»/«Яндекс Плюс» временно отключены", 409, "products_disabled")
     if type not in TYPES:
         raise ServiceError("Неизвестный тип", 422, "bad_type")
     if type == "fine":

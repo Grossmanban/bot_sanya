@@ -23,6 +23,13 @@ from .timeutil import now_iso, now_local, today_local
 from .db import transaction
 
 
+def products_on() -> None:
+    """18.11: «Алиса»/«Яндекс Плюс» are switched off (products.PRODUCTS_ENABLED) — the routes that don't take the
+    product through alice.check() refuse here too. Turning the flag back on re-opens everything."""
+    if not products.PRODUCTS_ENABLED:
+        raise svc.ServiceError("Раздел «Алиса»/«Яндекс Плюс» временно отключён", 409, "products_disabled")
+
+
 class ShiftPayload(BaseModel):
     start_time: str
     end_time: str
@@ -870,6 +877,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "capabilities": perms.capabilities(user),
             # ТЗ 27.10 §28: «Работа» shows only the products the person has access to
             "products": products.of_user(conn, user["id"]),
+            # 18.11: «Алиса»/«Яндекс Плюс» are switched off — the app hides every product section when this is false
+            "products_enabled": products.PRODUCTS_ENABLED,
             # ТЗ «Яндекс Плюс» §11: the products this person may tie goals and events to (the server checks it again)
             "manageable_products": products.manageable(conn, user),
             # ТЗ 28.10 §3, §8: «Обучение» — the trainer of a candidate or a grant by an admin
@@ -1117,11 +1126,13 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/team/{user_id}/products")
     async def admin_user_products(user_id: int, admin: dict = Depends(staff("products"))):
+        products_on()
         require(admin, "products", user_id)
         return products.view(conn, user_id)
 
     @api.post("/admin/team/{user_id}/products")
     async def admin_user_products_set(user_id: int, body: ProductAccess, admin: dict = Depends(staff("products"))):
+        products_on()
         user, changed = products.set_access(conn, admin, user_id, body.product, body.allow, body.idempotency_key)
         if changed:
             notifier.spawn(notifier.product_access(user, body.product, body.allow, admin))
@@ -1157,6 +1168,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/alice/{task_id}/decide")
     async def admin_alice_decide(task_id: int, body: AliceDecide, admin: dict = Depends(staff("alice"))):
+        products_on()
         task, changed = alice.moderate(conn, admin, task_id, body.approve, body.reason, body.idempotency_key)
         if changed:
             notifier.spawn(notifier.alice_decided(task))
@@ -1165,6 +1177,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/alice/{task_id}/retry")
     async def admin_alice_retry(task_id: int, body: KeyOnly, admin: dict = Depends(staff("alice"))):
+        products_on()
         """В56: «Не отправлено» after all automatic attempts — an admin sends it again."""
         task = staff_task(task_id)
         if task["status"] not in ("sending", "send_failed"):
@@ -1197,6 +1210,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.put("/admin/alice/qr/{qr_id}/image")
     async def admin_alice_qr_image(qr_id: int, request: Request, idempotency_key: str, admin: dict = Depends(staff("alice"))):
+        products_on()
         product = qr_product(qr_id)
         data, ext = await read_photo(request, required=True)
         image = await notifier.store_photo(admin["telegram_id"], data, ext, f"🔳 Новая картинка QR-кода {alice.KINDS[product]['of']}")
@@ -1205,12 +1219,14 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.patch("/admin/alice/qr/{qr_id}")
     async def admin_alice_qr_patch(qr_id: int, body: AliceQrPatch, admin: dict = Depends(staff("alice"))):
+        products_on()
         product = qr_product(qr_id)
         alice.update_qr(conn, admin, qr_id, body.idempotency_key, number_=body.number, archive=body.archive)
         return {"items": alice.qr_list(conn, product=product)}
 
     @api.post("/admin/alice/qr/{qr_id}/assign")
     async def admin_alice_qr_assign(qr_id: int, body: AliceAssign, admin: dict = Depends(staff("alice"))):
+        products_on()
         product = qr_product(qr_id)
         if alice.assign(conn, admin, qr_id, body.user_id, body.on, body.idempotency_key):
             notifier.spawn(notifier.alice_qr_changed(svc.get_user(conn, body.user_id), body.on, product))
@@ -1218,14 +1234,17 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/alice/qr/{qr_id}/history")
     async def admin_alice_qr_history(qr_id: int, _: dict = Depends(staff("alice"))):
+        products_on()
         return {"items": alice.qr_history(conn, qr_id)}
 
     @api.get("/admin/alice/queries")
     async def admin_alice_queries(_: dict = Depends(staff("alice"))):
+        products_on()
         return {"items": alice.queries(conn)}
 
     @api.put("/admin/alice/queries")
     async def admin_alice_queries_set(body: AliceQueries, admin: dict = Depends(staff("alice"))):
+        products_on()
         return {"items": alice.set_queries(conn, admin, body.text, body.idempotency_key)}
 
     @api.get("/admin/alice/stats")
@@ -1255,6 +1274,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/alice/{task_id}/delete")
     async def admin_alice_delete(task_id: int, body: AliceDelete, admin: dict = Depends(staff("alice"))):
         """§23: deleted softly; the photos go to «Архив», the publication leaves the employee's topic."""
+        products_on()
         task, changed = alice.delete_task(conn, admin, task_id, body.reason, body.idempotency_key)
         task = await alice.archive_and_unpublish(conn, notifier.bot, task_id, admin)
         if changed:

@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ROLE_TITLES, type ParsedReport, type PayoutBatch, type PayoutRates, type PayoutRow, type PayoutSummary } from "@/lib/api";
+import { useProductsEnabled } from "@/lib/caps";
 import { compressImage } from "@/lib/image";
 import { addDays, dayMonth, plural, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
@@ -25,6 +26,7 @@ const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline
 /** Payout registry (ТЗ модуль 10): history and the three-step wizard. Owners only. */
 export function PayoutsSection() {
   const list = useLoad(() => api.admin.payouts(), []);
+  const productsOn = useProductsEnabled();  // 18.11: «Алиса»/«Яндекс Плюс» off — no product payouts in the registry
   const [mode, setMode] = useState<"list" | "new" | "alice" | "plus" | number>("list");
   const [archive, setArchive] = useState(false);
 
@@ -51,14 +53,18 @@ export function PayoutsSection() {
                 disabled={!list.data} onClick={() => { tapHaptic(); setMode("new"); }}>
           <Plus /> Новая выплата
         </Button>
-        <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
-                disabled={!list.data} onClick={() => { tapHaptic(); setMode("alice"); }}>
-          По «Алисе»
-        </Button>
-        <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
-                disabled={!list.data} onClick={() => { tapHaptic(); setMode("plus"); }}>
-          По «Яндекс Плюсу»
-        </Button>
+        {productsOn && (
+          <>
+            <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
+                    disabled={!list.data} onClick={() => { tapHaptic(); setMode("alice"); }}>
+              По «Алисе»
+            </Button>
+            <Button variant="ghost" className="press mt-4 ml-2 h-12 rounded-2xl px-4 text-[15px] text-hero-foreground hover:bg-white/10"
+                    disabled={!list.data} onClick={() => { tapHaptic(); setMode("plus"); }}>
+              По «Яндекс Плюсу»
+            </Button>
+          </>
+        )}
       </section>
       <div className="flex gap-1 rounded-2xl bg-card p-1 shadow-lift">
         {([[false, "Действующие"], [true, "Архив"]] as const).map(([a, label]) => (
