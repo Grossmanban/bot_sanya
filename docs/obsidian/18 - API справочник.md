@@ -18,7 +18,7 @@
 | `GET /api/me` | всё о текущем: user, role_title, capabilities, products, manageable_products, training, manuals, internship, pricing, global_link, header, events |
 | `POST /api/register` | анкета кандидата |
 | `GET /api/me/referrals` · `/qr` | реферальная ссылка (TTL, секунды), QR SVG, список приглашённых |
-| `PATCH /api/me/work-status` | «Работаю/Не работаю» |
+| `PATCH /api/me/work-status` | «Работаю/Не работаю» (18.11: сам сотрудник больше не переключает — 403; персонал свой статус меняет) |
 | `PATCH /api/me/notifications` | включить/выключить напоминания |
 | `POST /api/profile-link` | карточка человека без username (в чат с ботом) |
 | `GET /api/points` | справочник точек |
@@ -45,7 +45,8 @@
 ## Админ: команда, доступ, группы
 
 `GET /api/admin/users` · `GET /api/admin/team` (18.11: держателю `money` — `lazy_pool`, копилка налога на лень человека) ·
-`POST /api/admin/team/{uid}/role|access|state|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile` ·
+`POST /api/admin/team/{uid}/role|access|state|work-status|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile`
+(`work-status`, 18.11: `{work_status}` — переключают только начальники: инструктор своим, тренер своей сети, админ/владелец любому; 403 у чужих) ·
 `POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?}` (owner/admin, 18.11; в `GET /api/me`
 и «Команде» поля приходят как `grants`) ·
 инвайты `GET/POST /api/admin/invites`, `/{id}/revoke|qr`, `POST /api/admin/invites/rotate` · попытки доступа
@@ -101,3 +102,5 @@
 - 2026-11-18 — превью/коммит выплат: `manual`/`amounts`/`included`/`amount`; новый `POST /api/admin/lazy-pool/reset`.
 - 2026-11-18 — добавлен `POST /api/admin/payouts/parse-photo` («Заполнить по фото»), флаг `ocr` в списке выплат.
 - 2026-11-18 — `GET /api/admin/team`: держателю `money` приходит `lazy_pool` (копилка налога на лень, шт.).
+- 2026-11-18 — `POST /api/admin/team/{uid}/work-status`: «Работаю» переключают только начальники; `PATCH /api/me/work-status`
+  самим сотрудником — 403.

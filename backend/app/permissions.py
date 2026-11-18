@@ -71,6 +71,7 @@ CAN = {
     "fine_request": {TRAINER, INSTRUCTOR},
     "bonus": {OWNER, ADMIN, TRAINER},
     "pause": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
+    "work_status": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # 18.11: «Работаю» переключают только начальники — manages(actor, target)
     "review": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "schedule": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "broadcast_all": {OWNER, ADMIN},

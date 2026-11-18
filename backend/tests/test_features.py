@@ -268,11 +268,11 @@ def test_old_shifts_never_become_no_shows(conn, make_user):
 
 
 def test_eve_reminder_auto_raspred_once(conn, make_user):
-    svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     a, b = make_user(), make_user("Ваня", "Бургер", None)
     shift(conn, a)
     shift(conn, b, payload={**P, "start_time": "14:00"})
-    b = svc.set_work_status(conn, b, "not_working", svc.new_key())  # «Не работаю» mutes the reminders
+    b = svc.set_work_status(conn, owner, "not_working", svc.new_key(), b["id"])  # «Не работаю» mutes the reminders
     n = FakeNotifier(conn)
     ran = run(jobs.tick(conn, n, at(TODAY, "21:05")))
     assert "eve_reminder" in ran and "auto_raspred" in ran

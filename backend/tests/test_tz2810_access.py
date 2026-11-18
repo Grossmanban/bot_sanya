@@ -15,6 +15,7 @@ from app.timeutil import today_local, week_start
 
 from .test_api import headers, key
 from .test_features import P, TODAY, run, shift
+from .test_violations import person
 
 
 class Recorder:
@@ -194,7 +195,7 @@ def test_not_working_blocks_work_actions_on_the_server(conn, make_user):
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     u = make_user()
     s = shift(conn, u, payload=P)
-    u = svc.set_work_status(conn, u, "not_working", svc.new_key())
+    u = svc.set_work_status(conn, owner, "not_working", svc.new_key(), u["id"])
     with pytest.raises(svc.ServiceError) as e:  # editing a booked shift
         svc.edit_shift(conn, u, s["id"], {**P, "volume": 30}, svc.new_key(), today=TODAY)
     assert e.value.code == "not_working"
@@ -206,9 +207,9 @@ def test_not_working_blocks_work_actions_on_the_server(conn, make_user):
     with pytest.raises(svc.ServiceError) as e:
         alice.start(conn, u, svc.new_key())
     assert e.value.code == "not_working"
-    u = svc.set_work_status(conn, u, "working", svc.new_key())
+    u = svc.set_work_status(conn, owner, "working", svc.new_key(), u["id"])
     task = alice.start(conn, u, svc.new_key())
-    u = svc.set_work_status(conn, u, "not_working", svc.new_key())
+    u = svc.set_work_status(conn, owner, "not_working", svc.new_key(), u["id"])
     assert alice.start(conn, u, svc.new_key())["id"] == task["id"]
     assert alice.scanned(conn, u, task["id"])["step"] == 1
 
@@ -225,6 +226,39 @@ def test_not_working_skips_the_weekly_norm_but_switching_off_later_does_not_dodg
                  (today.isoformat() + "T08:00:00+03:00", late["id"]))
     created = {v["user_id"] for v in violations.scan(conn, 3, today)}
     assert off["id"] not in created and {late["id"], on["id"]} <= created
+
+
+def test_only_superiors_switch_the_work_status(conn, make_user):
+    """18.11: the person themself can't touch the toggle — the instructor for their people, the trainer for
+    their network, the admin for anyone; the staff may still switch their own."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    admin = person(conn, make_user, "Админка", role="admin")
+    north, south = networks.create(conn, owner, "Север", svc.new_key()), networks.create(conn, owner, "Юг", svc.new_key())
+    trainer = person(conn, make_user, "Тренерка", network=north["id"], role="trainer")
+    networks.set_trainer(conn, owner, north["id"], trainer["id"], svc.new_key())
+    instructor = person(conn, make_user, "Инструкторка", network=north["id"], role="instructor")
+    own, alien = person(conn, make_user, "Своя"), person(conn, make_user, "Чужая")
+    networks.set_member(conn, owner, own["id"], north["id"], svc.new_key())
+    networks.set_member(conn, owner, alien["id"], south["id"], svc.new_key())
+    networks.set_instructor(conn, owner, own["id"], instructor["id"], svc.new_key())
+
+    with pytest.raises(svc.ServiceError) as e:  # the person themself — never
+        svc.set_work_status(conn, own, "not_working", svc.new_key())
+    assert e.value.code == "forbidden" and "тренер" in e.value.message
+    # the instructor — their people only
+    assert svc.set_work_status(conn, instructor, "not_working", svc.new_key(), own["id"])["work_status"] == "not_working"
+    with pytest.raises(svc.ServiceError):
+        svc.set_work_status(conn, instructor, "working", svc.new_key(), alien["id"])
+    # the trainer — the whole network, its instructor too
+    assert svc.set_work_status(conn, trainer, "working", svc.new_key(), own["id"])["work_status"] == "working"
+    assert svc.set_work_status(conn, trainer, "not_working", svc.new_key(), instructor["id"])["work_status"] == "not_working"
+    with pytest.raises(svc.ServiceError):
+        svc.set_work_status(conn, trainer, "working", svc.new_key(), alien["id"])
+    # the admin and the owner — anyone; a staff member switches their own status too
+    assert svc.set_work_status(conn, admin, "working", svc.new_key(), alien["id"])["work_status"] == "working"
+    assert svc.set_work_status(conn, owner, "not_working", svc.new_key(), alien["id"])["work_status"] == "not_working"
+    assert svc.set_work_status(conn, trainer, "not_working", svc.new_key())["work_status"] == "not_working"
+    assert svc.set_work_status(conn, trainer, "working", svc.new_key())["work_status"] == "working"
 
 
 def test_not_working_gets_no_goal_announcements(conn, make_user):

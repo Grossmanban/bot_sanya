@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from app import services as svc
+from app import networks, services as svc
 from app.api import create_app
 from app.auth import sign_init_data, validate_init_data, InitDataError
 from app.config import settings
@@ -26,6 +26,12 @@ def client(conn):
 
 def key():
     return str(uuid.uuid4())
+
+
+def set_working(conn, tg_id: int) -> None:
+    """18.11: an employee can't switch their own status — tests set the state directly."""
+    conn.execute("UPDATE users SET work_status = 'working', work_status_at = datetime('now'), notify_reminders = 1 "
+                 "WHERE telegram_id = ?", (tg_id,))
 
 
 def test_init_data_signature():
@@ -73,7 +79,7 @@ def test_full_flow_over_http(client, conn):
 
     r = client.post("/api/shifts/create", json={**body, "idempotency_key": key()}, headers=h)
     assert r.status_code == 403 and r.json()["code"] == "not_working"
-    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
+    set_working(conn, 7)
 
     k = key()
     r1 = client.post("/api/shifts/create", json={**body, "idempotency_key": k}, headers=h)
@@ -103,7 +109,7 @@ def test_invalid_payload_422(client, conn):
     user, _ = svc.create_registration(conn, 8, None, "Иван", "Петров")
     svc.decide_registration(conn, user["id"], True, 999)
     h = headers(8, username=None)
-    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
+    set_working(conn, 8)
     day = (today_local() + timedelta(days=1)).isoformat()
     r = client.post("/api/shifts/create", json={"shift_date": day, "start_time": "19:00", "end_time": "16:00",
                                                 "volume": 5, "location": "x", "idempotency_key": key()}, headers=h)
@@ -114,7 +120,7 @@ def test_admin_decides_urgent_from_panel(client, conn):
     user, _ = svc.create_registration(conn, 9, "ivan", "Иван", "Петров")
     svc.decide_registration(conn, user["id"], True, 999)
     h = headers(9)
-    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
+    set_working(conn, 9)
     body = {"shift_date": today_local().isoformat(), "start_time": "20:00", "end_time": "23:00", "volume": 20,
             "location": "Европа", "idempotency_key": key()}
     sid = client.post("/api/shifts/create", json=body, headers=h).json()["shift"]["id"]
@@ -173,7 +179,7 @@ def test_points_settings_and_fact_endpoints(client, conn):
     h = headers(60)
     assert client.patch("/api/me/notifications", json={"enabled": False}, headers=h).json()["user"]["notify_reminders"] is False
     assert client.get("/api/points", headers=h).json()["items"][0]["name"] == "Европа"
-    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
+    set_working(conn, 60)
     today = today_local().isoformat()
     sid = client.post("/api/shifts/create", json={"shift_date": today, "start_time": "00:00", "end_time": "00:30", "volume": 10,
                                                   "location": "европа", "idempotency_key": key()}, headers=h).json()["shift"]["id"]
@@ -399,7 +405,7 @@ def test_event_endpoints(client, conn):
     assert client.get(f"/api/events/{ev['id']}", headers=h).json()["event"]["my"]["not_working"] is True
     r = client.post(f"/api/events/{ev['id']}/entries?value=7&idempotency_key={key()}", content=jpeg, headers=h)
     assert r.status_code == 403 and r.json()["code"] == "not_working"
-    client.patch("/api/me/work-status", json={"work_status": "working", "idempotency_key": key()}, headers=h)
+    set_working(conn, 88)
     r = client.post(f"/api/events/{ev['id']}/entries?value=7&idempotency_key={key()}", content=jpeg, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["event"]["my"]["pending"] is True and r.json()["event"]["leaderboard"][0]["score"] == 7
@@ -409,3 +415,35 @@ def test_event_endpoints(client, conn):
     r = client.post(f"/api/admin/event-entries/{pending[0]['id']}/review", json={"approve": True, "idempotency_key": key()},
                     headers=owner)
     assert r.json()["event"]["leaderboard"][0]["confirmed"] == 7
+
+
+def test_the_work_status_route_needs_a_superior(client, conn, make_user):
+    """18.11: «Работаю» switches the superiors (POST /admin/team/{uid}/work-status); the person themself
+    gets 403 from /me and a trainer can't reach outside their network."""
+    from .test_violations import person
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    owner_h = headers(999, "Саня", "Владелец", "boss")
+    north, south = networks.create(conn, owner, "Север", svc.new_key()), networks.create(conn, owner, "Юг", svc.new_key())
+    trainer = person(conn, make_user, "Тренерка", network=north["id"], role="trainer")
+    networks.set_trainer(conn, owner, north["id"], trainer["id"], svc.new_key())
+    own, alien = person(conn, make_user, "Своя"), person(conn, make_user, "Чужая")
+    networks.set_member(conn, owner, own["id"], north["id"], svc.new_key())
+    networks.set_member(conn, owner, alien["id"], south["id"], svc.new_key())
+    h = headers(trainer["telegram_id"])
+    # the person themself — 403 even through /me
+    r = client.patch("/api/me/work-status", json={"work_status": "not_working", "idempotency_key": key()},
+                     headers=headers(own["telegram_id"]))
+    assert r.status_code == 403 and r.json()["code"] == "forbidden"
+    # the trainer switches their own network's person…
+    r = client.post(f"/api/admin/team/{own['id']}/work-status", json={"work_status": "not_working", "idempotency_key": key()},
+                    headers=h)
+    assert r.status_code == 200 and r.json()["user"]["work_status"] == "not_working"
+    # …but not a stranger of another network
+    r = client.post(f"/api/admin/team/{alien['id']}/work-status", json={"work_status": "not_working", "idempotency_key": key()},
+                    headers=h)
+    assert r.status_code == 403 and r.json()["code"] == "forbidden"
+    # the owner — anyone
+    r = client.post(f"/api/admin/team/{alien['id']}/work-status", json={"work_status": "working", "idempotency_key": key()},
+                    headers=owner_h)
+    assert r.status_code == 200 and r.json()["user"]["work_status"] == "working"

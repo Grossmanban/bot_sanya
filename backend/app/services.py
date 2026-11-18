@@ -281,32 +281,43 @@ def claim_welcome(conn, user_id: int) -> bool:
     return cur.rowcount == 1
 
 
-def set_work_status(conn, user: dict, work_status: str, key: str) -> dict:
+def set_work_status(conn, actor: dict, work_status: str, key: str, user_id: int | None = None) -> dict:
+    """«Работаю»/«Не работаю» (18.11): the person themself can't touch the toggle — their superiors do.
+    The instructor switches the people assigned to them, the trainer — anyone in their network,
+    the admin/owner — anyone; the staff may still switch their own status."""
     if work_status not in ("working", "not_working"):
         raise ServiceError("Некорректный статус", 422, "bad_work_status")
     _check_key(key)
     with transaction(conn):
         if _seen(conn, key):
-            return get_user(conn, user["id"])
-        current = get_user(conn, user["id"])
-        if work_status == "working" and current["account_state"] == "paused":
+            return get_user(conn, user_id if user_id is not None else actor["id"])
+        actor = _fresh_actor(conn, actor)
+        target = get_user(conn, user_id) if user_id is not None else actor
+        if target is None:
+            raise ServiceError("Сотрудник не найден", 404, "not_found")
+        if target["id"] == actor["id"]:
+            if not perms.is_staff(actor):
+                raise ServiceError("Статус «Работаю» переключает ваш тренер или инструктор", 403, "forbidden")
+        elif not perms.can(actor, "work_status", target):
+            raise ServiceError("Статус работы переключает только тот, кто стоит над сотрудником", 403, "forbidden")
+        if work_status == "working" and target["account_state"] == "paused":
             raise ServiceError("Аккаунт на паузе: статус «Работаю» включит администратор, сняв паузу", 403, "paused")
-        if current["work_status"] != work_status:
+        if target["work_status"] != work_status:
             # the customer: «Не работаю» switches the bot's reminders off, «Работаю» — on
             conn.execute(
                 "UPDATE users SET work_status = ?, work_status_at = ?, notify_reminders = ? WHERE id = ?",
-                (work_status, now_iso(), int(work_status == "working"), user["id"]),
+                (work_status, now_iso(), int(work_status == "working"), target["id"]),
             )
             log_event(
                 conn,
-                user_id=user["id"],
-                actor_id=user["telegram_id"],
+                user_id=target["id"],
+                actor_id=actor["telegram_id"],
                 event_type="WORK_STATUS_CHANGED",
                 key=key,
-                old={"work_status": current["work_status"]},
+                old={"work_status": target["work_status"]},
                 new={"work_status": work_status},
             )
-    return get_user(conn, user["id"])
+    return get_user(conn, target["id"])
 
 
 def status_days(user: dict, today: date | None = None) -> int | None:

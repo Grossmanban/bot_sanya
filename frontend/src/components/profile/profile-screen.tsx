@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type Pricing, type User } from "@/lib/api";
+import { api, isStaff, type Pricing, type User } from "@/lib/api";
 import { STATUS_META, WEEKDAYS_SHORT, offFor, parseDay, rub, timeRange, weekRange } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { bindBackButton } from "@/lib/telegram";
@@ -96,7 +96,9 @@ export function ProfileScreen({
             <h2 className="font-semibold">Статус</h2>
             {busy === "work" && <LoaderCircle className="size-4 animate-spin text-muted-foreground" />}
           </div>
-          <div role="radiogroup" className="relative mt-3 grid grid-cols-2 rounded-2xl bg-muted p-1">
+          {/* 18.11: the person themself can't touch the toggle — their superiors switch it */}
+          <div role="radiogroup" aria-disabled={!isStaff(user)}
+               className={cn("relative mt-3 grid grid-cols-2 rounded-2xl bg-muted p-1", !isStaff(user) && "opacity-75")}>
             <span
               aria-hidden
               className={cn(
@@ -109,6 +111,7 @@ export function ProfileScreen({
                 key={s}
                 role="radio"
                 aria-checked={user.work_status === s}
+                disabled={!isStaff(user)}
                 onClick={() => setStatus(s)}
                 className={cn(
                   "relative z-10 h-12 rounded-xl text-[15px] font-semibold transition-colors duration-300",
@@ -120,7 +123,7 @@ export function ProfileScreen({
             ))}
           </div>
           <p className="mt-3 text-sm text-muted-foreground">
-            {working
+            {!isStaff(user) ? "Статус переключает ваш тренер или инструктор." : working
               ? "Можно записываться на выходы."
               : `Запись в график закрыта, пока не включишь «Работаю».${offFor(user.status_days) ? ` Не работаешь: ${offFor(user.status_days)}.` : ""}`}
           </p>

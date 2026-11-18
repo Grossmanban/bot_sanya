@@ -1504,6 +1504,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                 notifier.spawn(groups.kick_blocked(conn, notifier.bot, notifier, user, admin))
         return {"user": public_user(user), "changed": changed}
 
+    @api.post("/admin/team/{user_id}/work-status")
+    async def admin_set_work_status(user_id: int, body: WorkStatus, admin: dict = Depends(staff("work_status"))):
+        """18.11: «Работаю» switches only whoever stands above the person — the instructor, the trainer, the admin."""
+        user = svc.set_work_status(conn, admin, body.work_status, body.idempotency_key, user_id)
+        return {"user": public_user(user)}
+
     @api.get("/admin/points")
     async def admin_points(_: dict = Depends(admin_user)):
         return {"items": svc.list_points(conn, include_inactive=True)}

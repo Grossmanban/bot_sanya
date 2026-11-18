@@ -289,7 +289,7 @@ def test_unmarked_tomorrow_reminder_then_violation(conn, make_user):
 
     owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     going, off, silent, resting = (person(conn, make_user, n) for n in ("Аня", "Боря", "Вика", "Гоша"))
-    resting = svc.set_work_status(conn, resting, "not_working", svc.new_key())  # «Не работаю» isn't checked
+    resting = svc.set_work_status(conn, owner, "not_working", svc.new_key(), resting["id"])  # «Не работаю» isn't checked
     today = now_local().date()
     tomorrow = today + timedelta(days=1)
     conn.execute("""INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, created_at, updated_at)

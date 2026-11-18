@@ -296,6 +296,18 @@ function MemberSheet({
     }
   }
 
+  /** 18.11: the superiors switch «Работаю» here; the card stays open and updates the person's row. */
+  async function setWork(working: boolean) {
+    if (!user) return;
+    try {
+      const res = await run("work-status", (k) => api.admin.setUserWorkStatus(user.id, working ? "working" : "not_working", k),
+        working ? "Статус: работает" : "Статус: не работает");
+      if (res) onUpdated(res.user);
+    } catch {
+      /* toast shown */
+    }
+  }
+
   const statusText = !user
     ? ""
     : user.status === "pending"
@@ -375,6 +387,25 @@ function MemberSheet({
                   </div>
                 )}
               </dl>
+
+              {/* 18.11: «Работаю» switches only whoever stands above the person — the employee themself can't */}
+              {approved && !isSelf && state !== "blocked" && caps.includes("work_status") && (
+                <label className="mt-4 flex cursor-pointer items-center gap-3 rounded-2xl bg-muted/50 px-4 py-3">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[15px] font-semibold">Статус работы</span>
+                    <span className="block text-xs text-muted-foreground">
+                      {user.work_status === "working"
+                        ? "Работает — напоминания о сменах включены"
+                        : user.account_state === "paused"
+                          ? "На паузе — «Работаю» включится после снятия паузы"
+                          : "Не работает — напоминания выключены, запись в график закрыта"}
+                    </span>
+                  </span>
+                  {busy === "work-status" && <LoaderCircle className="size-4 animate-spin text-muted-foreground" />}
+                  <Switch checked={user.work_status === "working"} disabled={!!busy || user.account_state === "paused"}
+                          onCheckedChange={(v) => setWork(v)} />
+                </label>
+              )}
 
               {approved && <PersonData key={`d-${user.id}`} userId={user.id} />}
               {approved && <Requisites userId={user.id} />}

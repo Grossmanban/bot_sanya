@@ -355,17 +355,18 @@ def test_four_roles_and_permissions(conn, make_user):
 
 
 def test_reminders_locked_while_working(conn, make_user):
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
     u = make_user()  # working
     with pytest.raises(svc.ServiceError) as e:
         svc.set_notify(conn, u, False)
     assert e.value.code == "reminders_locked"
-    u = svc.set_work_status(conn, u, "not_working", svc.new_key())
+    u = svc.set_work_status(conn, owner, "not_working", svc.new_key(), u["id"])
     assert u["notify_reminders"] == 0  # «Не работаю» switches them off by itself (the customer)
     with pytest.raises(svc.ServiceError) as e:  # and they stay off until «Работаю»
         svc.set_notify(conn, u, True)
     assert e.value.code == "reminders_off"
     assert svc.status_days(u, today_local() + timedelta(days=12)) == 12
-    u = svc.set_work_status(conn, u, "working", svc.new_key())
+    u = svc.set_work_status(conn, owner, "working", svc.new_key(), u["id"])
     assert u["notify_reminders"] == 1  # switched back on automatically
 
 

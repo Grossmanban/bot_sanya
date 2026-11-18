@@ -41,7 +41,10 @@ def make_user(conn):
         if approve:
             user, _ = svc.decide_registration(conn, user["id"], True, 999)
         if working:
-            user = svc.set_work_status(conn, user, "working", svc.new_key())
+            # 18.11: an employee can't switch their own status — tests set the state directly
+            conn.execute("UPDATE users SET work_status = 'working', work_status_at = ?, notify_reminders = 1 WHERE id = ?",
+                         (svc.now_iso(), user["id"]))
+            user = svc.get_user(conn, user["id"])
         return user
 
     return make

@@ -66,7 +66,7 @@ export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
   | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups"
-  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals" | "grants";
+  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals" | "grants" | "work_status";
 
 /** ТЗ 27.10 §28: «Работа» — products a person has access to */
 export type Product = "alice" | "plus";
@@ -1579,6 +1579,9 @@ export const api = {
     setGrants: (userId: number, body: { broadcast_all?: boolean; onboarding?: boolean }, key: string) =>
       post<{ user: User; grants: { broadcast_all: boolean; onboarding: boolean }; changed: boolean }>(
         `/api/admin/team/${userId}/grants`, { ...body, idempotency_key: key }),
+    // 18.11: «Работаю» switches only whoever stands above the person (the employee themself can't)
+    setUserWorkStatus: (userId: number, work_status: User["work_status"], key: string) =>
+      post<{ user: User }>(`/api/admin/team/${userId}/work-status`, { work_status, idempotency_key: key }),
     groupMode: (user_id: number, mode: "pre" | "main" | "both" | null, key: string) =>
       post<GroupsBoard>("/api/admin/groups/mode", { user_id, mode, idempotency_key: key }),
     notNewbie: (user_id: number, value: boolean, key: string) =>
