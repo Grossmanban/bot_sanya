@@ -41,6 +41,8 @@ export interface User {
   /** owners only: personal rate (null — the network's or the common) and «не применять налог на лень» */
   personal_rate?: number | null;
   lazy_exempt?: boolean;
+  /** owners only («Команда», 18.11): the accumulated «налог на лень» pool, pieces */
+  lazy_pool?: number;
   /** owners only: a trainer's or an instructor's own rate per piece of their people (null — the ladder / common) */
   personal_commission?: number | null;
   /** ТЗ 27.10 §22: the instructor this person works under (null — directly under the trainer) */

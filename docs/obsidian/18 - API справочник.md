@@ -44,7 +44,8 @@
 
 ## Админ: команда, доступ, группы
 
-`GET /api/admin/users` · `GET /api/admin/team` · `POST /api/admin/team/{uid}/role|access|state|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile` ·
+`GET /api/admin/users` · `GET /api/admin/team` (18.11: держателю `money` — `lazy_pool`, копилка налога на лень человека) ·
+`POST /api/admin/team/{uid}/role|access|state|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile` ·
 `POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?}` (owner/admin, 18.11; в `GET /api/me`
 и «Команде» поля приходят как `grants`) ·
 инвайты `GET/POST /api/admin/invites`, `/{id}/revoke|qr`, `POST /api/admin/invites/rotate` · попытки доступа
@@ -99,3 +100,4 @@
 - 2026-11-18 — добавлен `POST /api/admin/team/{uid}/grants` (личные разрешения), поле `grants` в user.
 - 2026-11-18 — превью/коммит выплат: `manual`/`amounts`/`included`/`amount`; новый `POST /api/admin/lazy-pool/reset`.
 - 2026-11-18 — добавлен `POST /api/admin/payouts/parse-photo` («Заполнить по фото»), флаг `ocr` в списке выплат.
+- 2026-11-18 — `GET /api/admin/team`: держателю `money` приходит `lazy_pool` (копилка налога на лень, шт.).

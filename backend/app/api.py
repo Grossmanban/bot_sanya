@@ -1466,7 +1466,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             people = [u for u in people if u["status"] == "approved"]
         nets = networks.names(conn)
         money = perms.can(admin, "money")
+        # 18.11: the owner watches each person's «налог на лень» pool next to bonuses, fines and deductions
+        book = rates.Book.load(conn) if money else None
+        today = now_local().date()
         items = [{**public_user(u), "network": nets.get(u["network_id"]), **(money_fields(u) if money else {}),
+                  **({"lazy_pool": payouts.lazy_pool(conn, u["id"], book.user_rates(u["id"])["lazy_threshold"], today)}
+                     if money else {}),
                   "profile_state": profiles.state(conn, u),
                   "candidate": u["status"] == "pending" and svc.is_candidate(conn, u["id"]),
                   "training": {"granted": training.granted(conn, u["id"]), "assigned": training.assigned(conn, u["id"])}}

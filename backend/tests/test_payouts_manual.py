@@ -1,5 +1,5 @@
 """18.11: ручные суммы в мастере выплат — штуки из ставки, комиссии с включённых, полный зачёт денег,
-сброс копилок налога на лень и список для банка с полями на отдельных строках."""
+копилка налога на лень платится по ставке лени с переносом остатка, сброс копилок и список для банка."""
 
 from datetime import date, timedelta
 
@@ -42,22 +42,24 @@ def rows_of(conn, d_from, d_to, amounts, included, **common):
 
 def test_the_amount_is_the_pay_and_the_units_feed_the_trainer(conn, make_user):
     owner, north, vera, ivan, petya = world(conn, make_user)
-    did(conn, ivan, WEEK[0], 10)
+    did(conn, ivan, WEEK[0], 10)  # a lazy day (below 20): 10 pieces into the pool
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1200}, {ivan["id"], vera["id"]})
-    # 1200 ₽ at the common 120 → 10 units; the shifts' fact is only a reference now
+    # 1200 ₽ at the common 120 → 10 units; the pool has 10 — all 10 pay at the lazy 100, so 1000 ₽
     assert rows[ivan["id"]]["entered_amount"] == 1200 and rows[ivan["id"]]["entered_units"] == 10
-    assert rows[ivan["id"]]["pieces_pay"] == 1200 and rows[ivan["id"]]["auto_pay"] == 10 * 100
+    assert rows[ivan["id"]]["pieces_pay"] == 1000 and rows[ivan["id"]]["lazy_units"] == 10
+    assert rows[ivan["id"]]["auto_pay"] == 10 * 100
     assert rows[ivan["id"]]["plan_volume"] == 20  # the plan of the day (did() defaults to 20)
     # the trainer's commission: 10 units × min(trainer_commission=10, delta=30) — she did nothing herself
     vera_row = rows[vera["id"]]
     assert vera_row["team_volume"] == 10 and vera_row["commission"] == 100
     assert vera_row["commission_detail"] == {"volume": 10, "step_rate": 10, "rate": 10, "amount": 100}
-    # a personal rate changes the units: 1200 ₽ at 200 → 6 units
+    # a personal rate changes the units: 1200 ₽ at 200 → 6 units; the tax comes off the entered rubles
     from app import rates
 
     rates.set_user_rates(conn, owner, ivan["id"], {"personal_rate": 200}, svc.new_key())
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1200}, {ivan["id"], vera["id"]})
     assert rows[ivan["id"]]["entered_units"] == 6 and rows[vera["id"]]["team_volume"] == 6
+    assert rows[ivan["id"]]["pieces_pay"] == 1200 - 6 * (200 - 100)  # the lazy rate of his personal ladder
 
 
 def test_commissions_count_only_the_included_people(conn, make_user):
@@ -128,14 +130,26 @@ def test_a_fine_bigger_than_the_payout_eats_it_all_and_keeps_the_debt(conn, make
     assert rows[ivan["id"]]["fines"] == 1840 and rows[ivan["id"]]["total"] == 3160
 
 
-def test_the_lazy_pool_is_written_off_by_a_manual_payout(conn, make_user):
+def test_the_lazy_pool_pays_at_the_lazy_rate_and_carries_over(conn, make_user):
+    """18.11: the entered amount is the units; their first min(units, L) pay at the lazy rate, the tax comes
+    off the pay. Only what actually fit is written off — the rest waits for the next payout."""
     owner, north, vera, ivan, petya = world(conn, make_user)
     for i, fact in enumerate((10, 15, 5)):
         did(conn, ivan, WEEK[i], fact)
     assert payouts.lazy_pool(conn, ivan["id"], 20, WEEK[-1]) == 30
+    rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1200}, {ivan["id"]})
+    r = rows[ivan["id"]]
+    # 1200 ₽ → 10 units; the pool has 30 — all 10 pay at the lazy 100 ₽: 1000 ₽
+    assert r["lazy_units"] == 10 and r["full_units"] == 0 and r["pieces_pay"] == 1000
     payouts.commit(conn, owner, "Зарплата", WEEK[0], WEEK[-1], payouts.Rates.from_dict(None), north["id"],
                    [{"user_id": ivan["id"], "amount": 1200}], [], [], svc.new_key())
-    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE) == 0
+    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE) == 20  # 10 of 30 consumed, the rest carried
+    # the next payout eats the rest: 2400 ₽ → 20 units → all 20 lazy → 2000 ₽, and the pool is empty
+    rows = rows_of(conn, FUTURE, FUTURE, {ivan["id"]: 2400}, {ivan["id"]})
+    assert rows[ivan["id"]]["lazy_units"] == 20 and rows[ivan["id"]]["pieces_pay"] == 2000
+    payouts.commit(conn, owner, "Зарплата 2", FUTURE, FUTURE, payouts.Rates.from_dict(None), north["id"],
+                   [{"user_id": ivan["id"], "amount": 2400}], [], [], svc.new_key())
+    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE + timedelta(days=30)) == 0
 
 
 # ---------------------------------------------------------------- the pools reset
@@ -167,6 +181,19 @@ def test_resetting_the_pools_wipes_the_past_for_everyone(conn, make_user):
     assert payouts.lazy_pool(conn, ivan["id"], 20, tomorrow + timedelta(days=30)) == 7
     did(conn, free, tomorrow, 7)
     assert payouts.lazy_pool(conn, free["id"], free_threshold, tomorrow + timedelta(days=30)) == 0  # still exempt
+
+
+def test_the_team_shows_each_persons_pool(conn, make_user):
+    """The owner watches the pool in «Команда», next to bonuses, fines and deductions; the staff doesn't."""
+    owner, north, vera, ivan, petya = world(conn, make_user)
+    did(conn, ivan, WEEK[0], 10)  # a lazy day — 10 pieces into the pool
+    client = Http(conn)
+    r = client.inner.get("/api/admin/team", headers=headers(owner["telegram_id"]))
+    assert r.status_code == 200
+    items = {u["id"]: u for u in r.json()["items"]}
+    assert items[ivan["id"]]["lazy_pool"] == 10 and items[petya["id"]]["lazy_pool"] == 0
+    r = client.inner.get("/api/admin/team", headers=headers(vera["telegram_id"]))
+    assert r.status_code == 200 and all("lazy_pool" not in u for u in r.json()["items"])
 
 
 # ---------------------------------------------------------------- the bank list

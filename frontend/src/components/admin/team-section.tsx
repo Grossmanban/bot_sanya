@@ -988,6 +988,18 @@ function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) =
         <Switch checked={!!user.lazy_exempt} disabled={!!busy}
                 onCheckedChange={(v) => save({ lazy_exempt: v }, v ? "Налог на лень не применяется" : "Налог на лень применяется")} />
       </label>
+      {/* 18.11: the owner watches the accumulated pool like bonuses, fines and deductions */}
+      {user.lazy_pool != null && (
+        <p className="text-xs text-muted-foreground">
+          Копилка налога на лень:{" "}
+          <span className={cn("font-semibold tabular", user.lazy_pool > 0 ? "text-wait" : "text-foreground")}>
+            {user.lazy_pool} шт.
+          </span>
+          {user.lazy_pool > 0
+            ? ` — столько штук ближайшей выплаты оплатятся по ставке лени, не по полной${user.lazy_exempt ? " (сейчас налог не применяется)" : ""}`
+            : " — пуста"}
+        </p>
+      )}
     </div>
   );
 }
