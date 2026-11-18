@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, Star, Timer, UserCog, UserX, Users } from "lucide-react";
+import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, ShieldCheck, Star, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type Role, type StageProgress, type TrainingRequest, type User } from "@/lib/api";
@@ -23,7 +23,7 @@ const TABS: { id: Tab; label: string }[] = [
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
 type Trainer = { id: number; name: string; username: string | null; role?: Role };
-type Sort = "new" | "age" | "skill" | "days";
+type Sort = "new" | "age" | "skill" | "days" | "wait";
 type Dir = "desc" | "asc";
 
 /** The questionnaire's moment — newer first; the id keeps the order stable. */
@@ -44,6 +44,11 @@ export function OnboardingSection({ me }: { me: User }) {
   const [age, setAge] = useState<[string, string]>(["", ""]);
   const [skill, setSkill] = useState<[number, number]>([1, 10]);
   const [days, setDays] = useState<number[]>([]);
+  const [metro, setMetro] = useState("");
+  const [minDays, setMinDays] = useState("");
+  // 19.11: quick chips — «конкретный вид людей»: the ⭐ ones, or without cancelled trainings and no-shows
+  const [prioOnly, setPrioOnly] = useState(false);
+  const [respOnly, setRespOnly] = useState(false);
   const [sort, setSort] = useState<Sort>("new");
   const [dir, setDir] = useState<Dir>("desc");
   // ТЗ 30.10 §4: the order follows the confirmations made elsewhere (the bot, the trainer) without a manual reload
@@ -55,20 +60,29 @@ export function OnboardingSection({ me }: { me: User }) {
   }, [reload]);
 
   const items = useMemo(() => {
+    const metroQ = metro.trim().toLowerCase();
     const list = (data?.items ?? []).filter((a) =>
       (!age[0] || a.age >= Number(age[0])) && (!age[1] || a.age <= Number(age[1]))
       && a.communication >= skill[0] && a.communication <= skill[1]
-      && days.every((d) => a.training_days.includes(d)));
+      && days.every((d) => a.training_days.includes(d))
+      && (!metroQ || a.metro.toLowerCase().includes(metroQ))
+      && (!minDays || a.min_days >= Number(minDays))
+      && (!prioOnly || a.priority) && (!respOnly || !(a.cancel_count ?? 0)));
     const chosen = sort === "age" ? (a: Application, b: Application) => a.age - b.age
       : sort === "skill" ? (a: Application, b: Application) => b.communication - a.communication
+      // «кто дольше ждёт» — by the server's waiting hours (only «Ожидают рассмотрения» has them; elsewhere — newest)
+      : sort === "wait" ? (a: Application, b: Application) => (b.waiting?.hours ?? 0) - (a.waiting?.hours ?? 0)
       : sort === "days" ? byDays(dir) : () => 0;
     // «На обучении» (§4): both confirmed first, then the rest by their progress; inside — the chosen sort, then the questionnaire
     const agreement = (a: Application) => (tab === "scheduled" ? a.agreement_rank ?? 9 : 0);
-    // 19.11: in «Ожидают рассмотрения» the priority questionnaires (⭐) come first — whatever the chosen sort
-    const prio = (a: Application) => (tab === "new" ? Number(!!a.priority) : 0);
-    return list.sort((a, b) => prio(b) - prio(a) || agreement(a) - agreement(b) || chosen(a, b) || byNewest(a, b));
-  }, [data, age, skill, days, sort, dir, tab]);
-  const filtered = !!(age[0] || age[1]) || skill[0] > 1 || skill[1] < 10 || days.length > 0;
+    // 19.11: the priority questionnaires (⭐) come right after the agreement (§4) — before the chosen sort, on every tab
+    const prio = (a: Application) => Number(!!a.priority);
+    return list.sort((a, b) => agreement(a) - agreement(b) || prio(b) - prio(a) || chosen(a, b) || byNewest(a, b));
+  }, [data, age, skill, days, metro, minDays, prioOnly, respOnly, sort, dir, tab]);
+  const filtered = !!(age[0] || age[1]) || skill[0] > 1 || skill[1] < 10 || days.length > 0
+    || !!metro.trim() || !!minDays || prioOnly || respOnly;
+  // the chip counts the ⭐ ones in the current tab (before the other filters)
+  const prioCount = (data?.items ?? []).filter((a) => a.priority).length;
   // 18.11: in all the pickers the owners and the trainers/instructors come first (the inviter tops it on the card)
   const trainersSorted = useMemo(() => sortedTrainers(data?.trainers ?? []), [data]);
 
@@ -87,6 +101,23 @@ export function OnboardingSection({ me }: { me: User }) {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* 19.11: quick kind-of-person chips, always in sight; combined with the filters below */}
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" aria-pressed={prioOnly} onClick={() => setPrioOnly(!prioOnly)}
+                title="Только приоритетные анкеты — обучение в первую очередь"
+                className={cn("press inline-flex h-9 items-center gap-1.5 rounded-xl px-3.5 text-sm font-semibold", prioOnly ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+          <Star className={cn("size-4", prioOnly && "fill-current")} /> Приоритетные
+          {prioCount > 0 && (
+            <span className={cn("rounded-full px-1.5 text-xs tabular", prioOnly ? "bg-white/20" : "bg-card")}>{prioCount}</span>
+          )}
+        </button>
+        <button type="button" aria-pressed={respOnly} onClick={() => setRespOnly(!respOnly)}
+                title="Без отмен обучения и неявок — кто уже показал ответственность"
+                className={cn("press inline-flex h-9 items-center gap-1.5 rounded-xl px-3.5 text-sm font-semibold", respOnly ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+          <ShieldCheck className="size-4" /> Ответственные
+        </button>
       </div>
 
       <details className="group rounded-3xl bg-card p-5 shadow-lift md:p-6" open={filtered || undefined}>
@@ -109,6 +140,16 @@ export function OnboardingSection({ me }: { me: User }) {
               {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="w-24 text-muted-foreground">Метро</span>
+            <input aria-label="Метро содержит" placeholder="станция" className={cn(field, "h-10 w-40")} value={metro}
+                   onChange={(e) => setMetro(e.target.value.slice(0, 30))} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="w-24 text-muted-foreground">Дней в неделю</span>
+            <input inputMode="numeric" aria-label="Дней в неделю не меньше" placeholder="от" className={cn(field, "h-10 w-20")} value={minDays}
+                   onChange={(e) => setMinDays(e.target.value.replace(/\D/g, "").slice(0, 1))} />
+          </div>
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="w-24 text-muted-foreground">Свободен в</span>
             {DAYS.map((d, i) => (
@@ -122,6 +163,7 @@ export function OnboardingSection({ me }: { me: User }) {
             <span className="w-24 text-muted-foreground">Сортировка</span>
             <select className={cn(field, "h-10 w-auto min-w-0 max-w-full")} value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
               <option value="new">сначала новые</option>
+              <option value="wait">кто дольше ждёт</option>
               <option value="age">по возрасту</option>
               <option value="skill">по навыкам</option>
               <option value="days">количество дней в неделю</option>
@@ -137,7 +179,7 @@ export function OnboardingSection({ me }: { me: User }) {
               </div>
             )}
             {filtered && (
-              <Button variant="ghost" size="sm" className="rounded-lg" onClick={() => { setAge(["", ""]); setSkill([1, 10]); setDays([]); }}>
+              <Button variant="ghost" size="sm" className="rounded-lg" onClick={() => { setAge(["", ""]); setSkill([1, 10]); setDays([]); setMetro(""); setMinDays(""); setPrioOnly(false); setRespOnly(false); }}>
                 Сбросить
               </Button>
             )}
