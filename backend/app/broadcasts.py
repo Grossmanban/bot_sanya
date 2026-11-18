@@ -10,6 +10,7 @@ author in one tidy message (who, @username, a link to their Telegram, ID). A rep
 
 import json
 import sqlite3
+from datetime import datetime
 
 from . import permissions as perms
 from . import services as svc
@@ -114,3 +115,56 @@ def replies_by_user(conn: sqlite3.Connection, broadcast_id: int) -> dict[int, li
             "text": r["text"], "created_at": r["created_at"],
             "photos": sum(m["kind"] == "photo" for m in media), "videos": sum(m["kind"] == "video" for m in media)})
     return out
+
+
+# ---------------------------------------------------------------- read deadline (19.11)
+
+
+def _excerpt(b: dict) -> str:
+    text = " ".join((b["text"] or "").split())
+    return (text[:48] + "…") if len(text) > 48 else text
+
+
+async def enforce_deadlines(conn: sqlite3.Connection, notifier, now: datetime | None = None) -> list[dict]:
+    """The read deadline passed (the scheduler calls this every tick): everyone who got the message but didn't
+    press «✅ Я ознакомился» (a reply counts as read) gets the fine in the units the author set — active at once,
+    whoever the author is: the whole point is that it runs without anyone pressing anything. One pass per
+    broadcast (`ack_fines_done`), so a restart or a re-tick never fines twice. People who never received the
+    message and blocked accounts are not fined. Returns [{broadcast, fined}] for the scheduler's log."""
+    from . import finance  # local: finance imports services; it also needs no imports of this module
+
+    now = now or svc.now_local()  # services' clock: tests patch it to noon (deadline_at is written in the same terms)
+    done = []
+    for b in [dict(r) for r in conn.execute(
+            """SELECT * FROM broadcasts WHERE require_ack = 1 AND ack_fines_done = 0 AND ack_fine_units IS NOT NULL
+               AND ack_fine_units > 0 AND ack_deadline_at IS NOT NULL AND ack_deadline_at <= ?""",
+            (now.isoformat(timespec="seconds"),))]:
+        author = svc.get_user_by_tg(conn, b["author_id"])
+        fined: list[tuple[dict, dict]] = []
+        with transaction(conn):
+            rows = [dict(r) for r in conn.execute(
+                """SELECT d.*, u.status, u.account_state FROM broadcast_deliveries d JOIN users u ON u.id = d.user_id
+                   WHERE d.broadcast_id = ? AND d.delivered = 1 AND d.read_at IS NULL AND d.fined_at IS NULL""",
+                (b["id"],))]
+            for d in rows:
+                if d["status"] != "approved" or d["account_state"] == "blocked":
+                    continue
+                tx = finance.record_fine(conn, user_id=d["user_id"], units=b["ack_fine_units"],
+                                         reason=f"Не подтвердил(а) прочтение рассылки «{_excerpt(b)}» в срок",
+                                         actor_tg=b["author_id"], source="broadcast")
+                conn.execute("UPDATE broadcast_deliveries SET fined_at = ? WHERE id = ?", (now_iso(), d["id"]))
+                fined.append((svc.get_user(conn, d["user_id"]), tx))
+            conn.execute("UPDATE broadcasts SET ack_fines_done = 1 WHERE id = ?", (b["id"],))
+        for user, tx in fined:
+            if author is not None:
+                await notifier.tx_created(tx, author)  # «💸 Вам назначен штраф…» to the person + #штраф to the archive
+            else:
+                await notifier.send(user["telegram_id"], f"💸 Вам назначен штраф: {finance.units_text(tx)}.\n"
+                                                        f"Причина: {tx['reason']}")
+        if fined and author is not None:
+            names = ", ".join(svc.full_name(u) for u, _ in fined[:20]) + ("…" if len(fined) > 20 else "")
+            await notifier.send(author["telegram_id"],
+                                f"⏳ Срок отметки по рассылке «{_excerpt(b)}» истёк. Штраф ({b['ack_fine_units']} ед.) "
+                                f"назначен: {len(fined)} чел. — {names}")
+        done.append({"broadcast": b["id"], "fined": len(fined)})
+    return done

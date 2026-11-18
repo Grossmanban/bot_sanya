@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiogram.types import InlineKeyboardMarkup
 
-from . import alice, app_settings, events, export, goals, groups, notify, products, recruiting, reports, violations
+from . import alice, app_settings, broadcasts, events, export, goals, groups, notify, products, recruiting, reports, violations
 from . import services as svc
 from .config import settings
 from .db import transaction
@@ -101,6 +101,9 @@ async def tick(conn: sqlite3.Connection, notifier: Notifier, now: datetime | Non
         ran.append("event_finished")
         if event["visibility"] != "hidden":  # a hidden event finishes quietly
             await notifier.event_finished(event)
+    # 19.11: a broadcast's read deadline passed — the unread ones get the fine the author set (once per broadcast)
+    for done in await broadcasts.enforce_deadlines(conn, notifier, now):
+        ran.append(f"ack_fine:{done['broadcast']}x{done['fined']}")
     # recruiting: training reminders and trainees who reached a stage (each once)
     for application, kind in recruiting.training_reminders(conn, now):
         ran.append("training_reminder")

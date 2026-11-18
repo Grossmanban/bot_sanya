@@ -93,8 +93,10 @@
 Алиса: `GET /api/admin/alice(/queue|/qr|/queries|/stats)` · `POST /api/admin/alice/{task}/decide|retry|delete` ·
 `POST /api/admin/alice/qr`, `PUT/PATCH /api/admin/alice/qr/{id}`, `POST …/assign`, `GET …/history`, `PUT /api/admin/alice/queries`.
 Методички: `GET/POST /api/admin/manuals`, `GET/PATCH/POST /api/admin/manuals/{id}(/delete|/sections|/upload|/document)`.
-Рассылки: `GET/POST /api/admin/broadcasts` (18.11: в `people` — флаги `shift_today`/`shift_tomorrow`, активная смена дня;
-аудитории `shift_today`/`shift_tomorrow` валидны и в `POST`), `GET /api/admin/broadcasts/{id}`, `GET /api/media/broadcast/{id}`,
+Рассылки: `GET/POST /api/admin/broadcasts` (18.11: в `people` — флаги `shift_today`/`shift_tomorrow`, аудитории
+`shift_today`/`shift_tomorrow` валидны и в `POST`; 19.11: в POST — `ack_deadline_min` (5 мин…30 дней, включает
+`require_ack`) и `ack_fine_units` (1…1000, None — без штрафа); в списке — `ack_deadline_at`, `fined`),
+`GET /api/admin/broadcasts/{id}` (в `items` — `fined_at`), `GET /api/media/broadcast/{id}`,
 `POST …/{id}/remind`, `POST /api/admin/broadcasts/test`, шаблоны `/api/admin/broadcast-templates`.
 Настройки: `GET/PATCH /api/admin/settings` · `GET/POST/PATCH /api/admin/reasons(/{id})` · `GET/PUT /api/admin/texts/{key}` ·
 `GET/PUT/DELETE /api/admin/header-title` · `GET/PUT/DELETE /api/admin/global-link` · `GET /api/reasons` · `POST /api/admin/media(/video)`.
@@ -119,3 +121,5 @@
 - 2026-11-18 — «Алиса»/«Яндекс Плюс» выключены (`products.PRODUCTS_ENABLED = False`): `/api/work*`, `/api/admin/alice*`,
   `/api/admin/team/{uid}/products` и продуктовые штрафы отвечают `409 products_disabled`; `GET /api/me` отдаёт
   `products_enabled`.
+- 2026-11-19 — `POST /api/admin/broadcasts`: `ack_deadline_min`/`ack_fine_units` (срок отметки + автноштраф);
+  `GET /api/admin/broadcasts(/​{id})`: `ack_deadline_at`, `fined`, `fined_at`.

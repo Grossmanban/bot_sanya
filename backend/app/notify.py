@@ -552,9 +552,16 @@ class Notifier:
 
     async def broadcast(self, broadcast_id: int, recipients: list[dict], html: str, signature: str | None = None,
                         media: str | None = None, require_ack: bool = False, media_kind: str = "photo",
-                        allow_reply: bool = False) -> int:
-        """html must already be sanitized (richtext.sanitize). Every delivery is recorded for read receipts."""
+                        allow_reply: bool = False, ack_deadline_min: int | None = None,
+                        ack_fine_units: int | None = None) -> int:
+        """html must already be sanitized (richtext.sanitize). Every delivery is recorded for read receipts.
+        With ack_deadline_min (19.11) the message tells the deadline and the fine; the absolute deadline is
+        fixed here, when the sending finishes, and the scheduler fines the unread ones when it passes."""
         body = self.broadcast_body(html, signature)
+        deadline = now_local() + timedelta(minutes=ack_deadline_min) if ack_deadline_min else None
+        if deadline is not None:
+            fine = f", иначе штраф ({ack_fine_units} ед.)" if ack_fine_units else ""
+            body += f"\n\n⏳ Отметиться кнопкой до {deadline.strftime('%d.%m %H:%M')} МСК{fine}"
         markup = broadcast_keyboard(broadcast_id, require_ack, allow_reply)
         delivered = 0
         for i, user in enumerate(recipients):
@@ -569,6 +576,9 @@ class Notifier:
                 self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
             await asyncio.sleep(0.05)  # stay well under Telegram's ~30 msg/s limit
         self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
+        if deadline is not None:
+            self.conn.execute("UPDATE broadcasts SET ack_deadline_at = ? WHERE id = ?",
+                              (deadline.isoformat(timespec="seconds"), broadcast_id))
         return delivered
 
     async def broadcast_remind(self, broadcast_id: int, user_ids: list[int] | None = None) -> int:
@@ -580,6 +590,10 @@ class Notifier:
                 if r["read_at"] is None and (user_ids is None or r["user_id"] in user_ids)]
         body = ("⏰ <b>Напоминание:</b> подтвердите, что ознакомились с сообщением.\n\n"
                 + self.broadcast_body(b["html"] or escape(b["text"]), broadcast_signature_of(dict(b))))
+        if b["ack_deadline_at"] and b["ack_deadline_at"] > svc.now_iso():  # the deadline hasn't passed yet
+            fine = f", иначе штраф ({b['ack_fine_units']} ед.)" if b["ack_fine_units"] else ""
+            body += f"\n\n⏳ Отметиться кнопкой до {b['ack_deadline_at'][8:10]}.{b['ack_deadline_at'][5:7]} " \
+                    f"{b['ack_deadline_at'][11:16]} МСК{fine}"
         sent = 0
         for r in rows:
             message_id = await self._deliver(r["telegram_id"], body, b["media_file_id"],

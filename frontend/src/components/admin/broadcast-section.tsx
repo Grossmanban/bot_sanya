@@ -38,6 +38,9 @@ export function BroadcastSection({ me }: { me: User }) {
   const [video, setVideo] = useState<File | null>(null);
   const [mediaId, setMediaId] = useState<{ blob: Blob; id: string } | null>(null);
   const [ack, setAck] = useState(false);
+  // 19.11: the time one has to press «✅ Я ознакомился» (null — no deadline) and the fine in units for missing it
+  const [ackDeadline, setAckDeadline] = useState<number | null>(null);
+  const [fineUnits, setFineUnits] = useState("1");
   const [reply, setReply] = useState(false);
   const [signed, setSigned] = useState(true);
   const [length, setLength] = useState(0);
@@ -96,10 +99,15 @@ export function BroadcastSection({ me }: { me: User }) {
   async function send() {
     const html = message();
     if (!html) return;
+    if (ackDeadline !== null && (!Number(fineUnits) || Number(fineUnits) < 1)) {
+      toast.error("Укажите штраф за просрочку — сколько штрафных единиц");
+      return;
+    }
     try {
       await run("send", async () => api.admin.broadcast({
         audiences: [], html, signed, network_id: null, user_ids: picked, require_ack: ack, media_file_id: await media(),
         only_unmarked_tomorrow: unmarked, media_kind: kind, allow_reply: reply,
+        ack_deadline_min: ackDeadline, ack_fine_units: ackDeadline !== null ? Number(fineUnits) : null,
       }), "Рассылка запущена");
       editor.current?.clear();
       setPhoto(null);
@@ -142,8 +150,35 @@ export function BroadcastSection({ me }: { me: User }) {
                 <span className="block font-medium">Требовать подтверждения прочтения</span>
                 <span className="block text-sm text-muted-foreground">Кнопка «✅ Я ознакомился» и список, кто не прочитал</span>
               </span>
-              <Switch checked={ack} onCheckedChange={setAck} />
+              <Switch checked={ack} onCheckedChange={(v) => { setAck(v); if (!v) setAckDeadline(null); }} />
             </label>
+            {ack && (
+              <div className="space-y-3 px-5 pb-4 md:px-6">
+                <div className="flex flex-wrap gap-2">
+                  {([[null, "Без срока"], [30, "30 мин"], [60, "1 час"], [180, "3 часа"], [360, "6 часов"],
+                    [1440, "Сутки"]] as const).map(([v, label]) => (
+                    <button key={label} type="button" onClick={() => setAckDeadline(v)}
+                            className={cn("press rounded-full px-3.5 py-1.5 text-sm font-semibold",
+                                          ackDeadline === v ? "bg-primary text-primary-foreground" : "bg-muted")}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {ackDeadline !== null && (
+                  <div className="space-y-1">
+                    <label className="flex flex-wrap items-center gap-2 text-sm">
+                      <span className="text-muted-foreground">Не отметился в срок — штраф,</span>
+                      <input inputMode="numeric" className="h-10 w-20 rounded-xl border-0 bg-muted px-3 text-center font-semibold outline-none focus:ring-2 focus:ring-ring/25"
+                             value={fineUnits} onChange={(e) => setFineUnits(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+                      <span className="text-muted-foreground">штрафн. ед.</span>
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Штраф придёт автоматически, сколько прошло — по ставке человека на момент начисления.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </li>
           <li>
             <label className="flex cursor-pointer items-center gap-4 px-5 py-3.5 md:px-6">
@@ -366,6 +401,17 @@ function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Reco
               <CheckCheck className="size-3.5" /> прочитали {b.read} из {b.delivered}
             </span>
           )}
+          {!!b.ack_deadline_at && (
+            <span className="inline-flex h-8 items-center gap-1.5 rounded-full bg-muted px-3 text-muted-foreground">
+              до {b.ack_deadline_at.slice(8, 10)}.{b.ack_deadline_at.slice(5, 7)} {b.ack_deadline_at.slice(11, 16)}
+              {!!b.ack_fine_units && ` · штраф ${b.ack_fine_units} ед.`}
+            </span>
+          )}
+          {!!b.fined && (
+            <span className="inline-flex h-8 items-center gap-1.5 rounded-full bg-cancel-soft px-3 text-cancel">
+              оштрафовано {b.fined}
+            </span>
+          )}
           {!!b.allow_reply && (
             <span className={cn("inline-flex h-8 items-center gap-1.5 rounded-full px-3",
               (b.replied ?? 0) > 0 ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>
@@ -477,6 +523,7 @@ function Receipts({ id, ack, replies }: { id: number; ack: boolean; replies: boo
                 <span className="min-w-0 truncate">
                   {r.name}
                   {!r.delivered && <span className="text-cancel"> · не доставлено</span>}
+                  {r.fined_at && <span className="text-cancel"> · оштрафован(а)</span>}
                   {r.reminders > 0 && <span className="text-muted-foreground"> · напоминали {r.reminders}×</span>}
                 </span>
                 <Button size="sm" variant="ghost" className="h-8 shrink-0 rounded-lg" disabled={!!busy} onClick={() => remind([r.user_id], `one-${r.user_id}`)}>

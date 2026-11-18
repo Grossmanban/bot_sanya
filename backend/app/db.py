@@ -1315,18 +1315,22 @@ ALTER TABLE alice_tasks ADD COLUMN send_claimed_at TEXT;
 
 def _widen_check(conn: sqlite3.Connection, table: str, old: str, new: str) -> None:
     """Rebuild a table whose CHECK must allow more values: its own SQL with the list widened, the rows copied,
-    the indexes recreated (SQLite can't change a CHECK in place). Foreign keys are off during migrations."""
+    the indexes recreated (SQLite can't change a CHECK in place). Foreign keys are off during migrations.
+    The AUTOINCREMENT counter is carried over, so a gap in ids survives the rebuild."""
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()[0]
     if old not in sql:
         raise RuntimeError(f"{table}: CHECK {old} not found")
     indexes = [r[0] for r in conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", (table,))]
     columns = ", ".join(r[1] for r in conn.execute(f"PRAGMA table_info({table})"))
+    seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = ?", (table,)).fetchone()
     conn.execute(sql.replace(old, new, 1).replace(f"CREATE TABLE {table}", f"CREATE TABLE {table}__new", 1)
                  .replace(f'CREATE TABLE "{table}"', f"CREATE TABLE {table}__new", 1))
     conn.execute(f"INSERT INTO {table}__new ({columns}) SELECT {columns} FROM {table}")
     conn.execute(f"DROP TABLE {table}")
     conn.execute(f"ALTER TABLE {table}__new RENAME TO {table}")
+    if seq is not None:
+        conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = ?", (seq[0], table))
     for index in indexes:
         conn.execute(index)
 
@@ -1509,6 +1513,23 @@ def _internship_paid_units(conn: sqlite3.Connection) -> None:
 
 
 MIGRATIONS.append(_internship_paid_units)
+
+
+def _broadcast_ack_fine(conn: sqlite3.Connection) -> None:
+    """Migration 46 — 19.11: a read deadline for broadcasts («✅ Я ознакомился» до ДД.ММ ЧЧ:ММ) and the automatic
+    fine in units for missing it (ack_deadline_*; fined_at marks the deliveries already fined, ack_fines_done
+    makes the pass once per broadcast). The ledger's source CHECK is widened: the auto-fine carries
+    source = 'broadcast' (SQLite can't change a CHECK in place)."""
+    _widen_check(conn, "financial_transactions",
+                 "IN ('manual','final_cancel','report','no_show','payout','attendance')",
+                 "IN ('manual','final_cancel','report','no_show','payout','attendance','broadcast')")
+    for column in ("ack_deadline_min INTEGER", "ack_fine_units INTEGER", "ack_deadline_at TEXT",
+                   "ack_fines_done INTEGER NOT NULL DEFAULT 0"):
+        conn.execute(f"ALTER TABLE broadcasts ADD COLUMN {column}")
+    conn.execute("ALTER TABLE broadcast_deliveries ADD COLUMN fined_at TEXT")
+
+
+MIGRATIONS.append(_broadcast_ack_fine)
 
 
 def migrate(conn: sqlite3.Connection) -> None:

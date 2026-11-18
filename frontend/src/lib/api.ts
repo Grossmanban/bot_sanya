@@ -868,7 +868,7 @@ export interface Tx {
   amount: number | null;
   status: TxStatus;
   reason: string;
-  source: "manual" | "final_cancel" | "report" | "no_show" | "payout" | "attendance";
+  source: "manual" | "final_cancel" | "report" | "no_show" | "payout" | "attendance" | "broadcast";
   shift_id: number | null;
   event_date: string;
   created_at: string;
@@ -1292,6 +1292,11 @@ export interface Broadcast {
   media_url?: string | null;
   /** ТЗ 28.10 §13: the header the message carried («Сообщение от тренера» + name), as plain text */
   signature_text?: string | null;
+  /** 19.11: the read deadline — minutes given, the absolute moment it passed and how many were auto-fined */
+  ack_deadline_min?: number | null;
+  ack_fine_units?: number | null;
+  ack_deadline_at?: string | null;
+  fined?: number;
 }
 
 export interface BroadcastTemplate {
@@ -1332,6 +1337,8 @@ export interface Receipt {
   read_at: string | null;
   reminders: number;
   reminded_at: string | null;
+  /** 19.11: the auto-fine for missing the read deadline took this delivery already */
+  fined_at: string | null;
   replies: BroadcastReply[];
 }
 
@@ -1347,6 +1354,9 @@ export interface BroadcastDraft {
   only_unmarked_tomorrow?: boolean;
   media_kind?: "photo" | "video";
   allow_reply?: boolean;
+  /** 19.11: the read deadline and the fine in units for missing it (null — no deadline; units null — tracking only) */
+  ack_deadline_min?: number | null;
+  ack_fine_units?: number | null;
 }
 
 export type AdminAction = "force_cancel" | "force_restore" | "approve_urgent" | "reject_urgent";

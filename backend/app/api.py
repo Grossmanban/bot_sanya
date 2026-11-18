@@ -576,6 +576,9 @@ class BroadcastBody(BaseModel):
     only_unmarked_tomorrow: bool = False
     media_kind: str = "photo"
     allow_reply: bool = False
+    # 19.11: the time one has to press «✅ Я ознакомился» and the fine in units for missing it (None — no deadline)
+    ack_deadline_min: int | None = None
+    ack_fine_units: int | None = None
 
 
 class BroadcastTest(BaseModel):
@@ -1621,9 +1624,11 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         row, recipients = svc.create_broadcast(conn, admin, body.audiences, body.html, body.signed, body.network_id,
                                                body.user_ids, body.require_ack, body.media_file_id,
                                                today_local() + timedelta(days=1) if body.only_unmarked_tomorrow else None,
-                                               body.media_kind, body.allow_reply, signature)
+                                               body.media_kind, body.allow_reply, signature,
+                                               body.ack_deadline_min, body.ack_fine_units)
         notifier.spawn(notifier.broadcast(row["id"], recipients, row["html"], row["signature"], row["media_file_id"],
-                                          bool(row["require_ack"]), row["media_kind"], bool(row["allow_reply"])))
+                                          bool(row["require_ack"]), row["media_kind"], bool(row["allow_reply"]),
+                                          row["ack_deadline_min"], row["ack_fine_units"]))
         return {"broadcast": row}
 
     @api.get("/admin/broadcasts/{broadcast_id}")
@@ -1634,7 +1639,7 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         replies = broadcasts.replies_by_user(conn, broadcast_id)
         items = [{"user_id": d["user_id"], "name": d["name"], "username": d["username"], "telegram_id": d["telegram_id"],
                   "delivered": bool(d["delivered"]), "read_at": d["read_at"], "reminders": d["reminders"],
-                  "reminded_at": d["reminded_at"], "replies": replies.get(d["user_id"], [])}
+                  "reminded_at": d["reminded_at"], "fined_at": d["fined_at"], "replies": replies.get(d["user_id"], [])}
                  for d in svc.broadcast_deliveries(conn, broadcast_id)]
         return {"broadcast": dict(row), "items": items}
 

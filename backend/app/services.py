@@ -1534,10 +1534,23 @@ def prepare_message(html: str) -> tuple[str, str]:
 def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, signed: bool = True,
                      network_id: int | None = None, user_ids: list[int] | None = None, require_ack: bool = False,
                      media: str | None = None, only_unmarked: date | None = None, media_kind: str = "photo",
-                     allow_reply: bool = False, signature: str | None = None) -> tuple[dict, list[dict]]:
-    """signature: the header decided by the author's role (notify.broadcast_signature); kept as sent."""
+                     allow_reply: bool = False, signature: str | None = None, ack_deadline_min: int | None = None,
+                     ack_fine_units: int | None = None) -> tuple[dict, list[dict]]:
+    """signature: the header decided by the author's role (notify.broadcast_signature); kept as sent.
+    ack_deadline_min (19.11): how long one may press «✅ Я ознакомился» — the deadline turns the ack on by itself
+    and, with ack_fine_units, everyone unread after it gets the fine automatically (jobs → broadcasts)."""
     if media_kind not in ("photo", "video"):
         raise ServiceError("Вложение — фото или видео", 422, "bad_media")
+    if ack_deadline_min is not None:
+        require_ack = True  # a deadline without the ack button makes no sense
+        if isinstance(ack_deadline_min, bool) or not isinstance(ack_deadline_min, int) \
+                or not 5 <= ack_deadline_min <= 60 * 24 * 30:
+            raise ServiceError("Срок отметки — от 5 минут до 30 дней", 422, "bad_ack_deadline")
+    if ack_fine_units is not None:
+        if isinstance(ack_fine_units, bool) or not isinstance(ack_fine_units, int) or not 1 <= ack_fine_units <= 1000:
+            raise ServiceError("Штраф за просрочку — целое число единиц от 1 до 1000", 422, "bad_units")
+    else:
+        ack_fine_units = None  # a deadline without a fine is allowed: the count stays, nobody is fined
     clean, text = prepare_message(html)
     if media and len(clean) > 4000:
         raise ServiceError("Слишком длинный текст", 422, "too_long")
@@ -1551,11 +1564,12 @@ def create_broadcast(conn, admin: dict, audiences: list[str] | str, html: str, s
     with transaction(conn):
         cur = conn.execute(
             """INSERT INTO broadcasts (author_id, audience, text, html, signed, recipients, created_at, media_file_id,
-                                       require_ack, network_id, people, media_kind, allow_reply, signature)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       require_ack, network_id, people, media_kind, allow_reply, signature,
+                                       ack_deadline_min, ack_fine_units)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (admin["telegram_id"], audience, text, clean, int(signed or signature is not None), len(recipients), now_iso(),
              media, int(require_ack), network_id, json.dumps(user_ids) if user_ids else None,
-             media_kind if media else "photo", int(allow_reply), signature),
+             media_kind if media else "photo", int(allow_reply), signature, ack_deadline_min, ack_fine_units),
         )
     return dict(conn.execute("SELECT * FROM broadcasts WHERE id = ?", (cur.lastrowid,)).fetchone()), recipients
 
@@ -1565,7 +1579,8 @@ def list_broadcasts(conn, limit: int = 20, author_tg: int | None = None) -> list
     rows = conn.execute(
         """SELECT b.*, u.first_name, u.last_name,
                   (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id = b.id AND d.read_at IS NOT NULL) AS read,
-                  (SELECT COUNT(DISTINCT r.user_id) FROM broadcast_replies r WHERE r.broadcast_id = b.id) AS replied
+                  (SELECT COUNT(DISTINCT r.user_id) FROM broadcast_replies r WHERE r.broadcast_id = b.id) AS replied,
+                  (SELECT COUNT(*) FROM broadcast_deliveries d WHERE d.broadcast_id = b.id AND d.fined_at IS NOT NULL) AS fined
            FROM broadcasts b LEFT JOIN users u ON u.telegram_id = b.author_id
            WHERE (? IS NULL OR b.author_id = ?) ORDER BY b.id DESC LIMIT ?""",
         (author_tg, author_tg, limit),
