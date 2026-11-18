@@ -1457,6 +1457,9 @@ AUDIENCES = {
     "working": "Работают",
     "not_working": "Не работают",
     "admins": "Администраторы",
+    # 18.11: whoever stands in the schedule that day — an active shift, the same rule the «Распред» uses
+    "shift_today": "На смене сегодня",
+    "shift_tomorrow": "Выходят завтра",
 }
 # a filter on top of the chosen people, not a group: only those who haven't marked tomorrow
 UNMARKED = "unmarked_tomorrow"
@@ -1487,6 +1490,10 @@ def broadcast_recipients(conn, audiences: list[str] | str, network_id: int | Non
         "working": "work_status = 'working'",
         "not_working": "work_status = 'not_working'",
         "admins": "role = 'admin'",
+        # «На смене сегодня» / «Выходят завтра»: an active shift on the day (active_shifts_on's rule);
+        # the dates are the server's own — interpolated, never user input
+        "shift_today": f"id IN (SELECT user_id FROM shifts WHERE shift_date = '{today_local().isoformat()}' AND status IN {ACTIVE})",
+        "shift_tomorrow": f"id IN (SELECT user_id FROM shifts WHERE shift_date = '{(today_local() + timedelta(days=1)).isoformat()}' AND status IN {ACTIVE})",
     }
     parts = [f"({rules[a]})" for a in dict.fromkeys(audiences)]
     params: list = []

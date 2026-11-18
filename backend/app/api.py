@@ -1556,12 +1556,19 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_broadcasts(admin: dict = Depends(staff("broadcast_network"))):
         nets = networks.names(conn)
         marked = svc.marked_on(conn, today_local() + timedelta(days=1))
+        # 18.11: quick-tick «На смене сегодня» / «Выходят завтра» — an active shift on the day (raspred's rule)
+        on_shift = {
+            day: {r["user_id"] for r in conn.execute(
+                f"SELECT user_id FROM shifts WHERE shift_date = ? AND status IN {svc.ACTIVE}", (day.isoformat(),))}
+            for day in (today_local(), today_local() + timedelta(days=1))
+        }
         everyone = perms.can(admin, "broadcast_all")
         # 18.11: whoever may write to everyone picks from the whole team; network names without the members tree
         pool = svc.list_users(conn) if everyone else visible(admin, svc.list_users(conn))
         people = [
             {"id": u["id"], "name": svc.full_name(u), "working": u["work_status"] == "working", "admin": u["role"] == "admin",
-             "network_id": u["network_id"], "network": nets.get(u["network_id"]), "marked_tomorrow": u["id"] in marked}
+             "network_id": u["network_id"], "network": nets.get(u["network_id"]), "marked_tomorrow": u["id"] in marked,
+             "shift_today": u["id"] in on_shift[today_local()], "shift_tomorrow": u["id"] in on_shift[today_local() + timedelta(days=1)]}
             for u in pool if u["account_state"] != "blocked"
         ]
         role = perms.role_of(admin)

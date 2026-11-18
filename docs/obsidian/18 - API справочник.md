@@ -87,7 +87,8 @@
 Алиса: `GET /api/admin/alice(/queue|/qr|/queries|/stats)` · `POST /api/admin/alice/{task}/decide|retry|delete` ·
 `POST /api/admin/alice/qr`, `PUT/PATCH /api/admin/alice/qr/{id}`, `POST …/assign`, `GET …/history`, `PUT /api/admin/alice/queries`.
 Методички: `GET/POST /api/admin/manuals`, `GET/PATCH/POST /api/admin/manuals/{id}(/delete|/sections|/upload|/document)`.
-Рассылки: `GET/POST /api/admin/broadcasts`, `GET /api/admin/broadcasts/{id}`, `GET /api/media/broadcast/{id}`,
+Рассылки: `GET/POST /api/admin/broadcasts` (18.11: в `people` — флаги `shift_today`/`shift_tomorrow`, активная смена дня;
+аудитории `shift_today`/`shift_tomorrow` валидны и в `POST`), `GET /api/admin/broadcasts/{id}`, `GET /api/media/broadcast/{id}`,
 `POST …/{id}/remind`, `POST /api/admin/broadcasts/test`, шаблоны `/api/admin/broadcast-templates`.
 Настройки: `GET/PATCH /api/admin/settings` · `GET/POST/PATCH /api/admin/reasons(/{id})` · `GET/PUT /api/admin/texts/{key}` ·
 `GET/PUT/DELETE /api/admin/header-title` · `GET/PUT/DELETE /api/admin/global-link` · `GET /api/reasons` · `POST /api/admin/media(/video)`.
@@ -104,3 +105,4 @@
 - 2026-11-18 — `GET /api/admin/team`: держателю `money` приходит `lazy_pool` (копилка налога на лень, шт.).
 - 2026-11-18 — `POST /api/admin/team/{uid}/work-status`: «Работаю» переключают только начальники; `PATCH /api/me/work-status`
   самим сотрудником — 403.
+- 2026-11-18 — `GET /api/admin/broadcasts`: в `people` флаги `shift_today`/`shift_tomorrow`; аудитории `shift_today`/`shift_tomorrow` в `POST`.

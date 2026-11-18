@@ -1309,6 +1309,9 @@ export interface BroadcastPerson {
   network: string | null;
   /** has a shift or a day off tomorrow */
   marked_tomorrow: boolean;
+  /** 18.11: stands in the schedule today / tomorrow (an active shift, like the «Распред») */
+  shift_today: boolean;
+  shift_tomorrow: boolean;
 }
 
 export interface Receipt {

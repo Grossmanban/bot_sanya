@@ -240,6 +240,9 @@ function Recipients({ people, networks, trainerNetwork, value, onChange, unmarke
     { key: "all", label: trainerNetwork ? `Вся сеть «${trainerNetwork}»` : "Все", ids: people.map((p) => p.id) },
     { key: "working", label: "Работают", ids: people.filter((p) => p.working).map((p) => p.id) },
     { key: "not_working", label: "Не работают", ids: people.filter((p) => !p.working).map((p) => p.id) },
+    // 18.11: whoever stands in the schedule that day (an active shift, like the «Распред»)
+    { key: "shift_today", label: "На смене сегодня", ids: people.filter((p) => p.shift_today).map((p) => p.id) },
+    { key: "shift_tomorrow", label: "Выходят завтра", ids: people.filter((p) => p.shift_tomorrow).map((p) => p.id) },
     ...(trainerNetwork ? [] : [{ key: "admins", label: "Админы", ids: people.filter((p) => p.admin).map((p) => p.id) }]),
     ...networks.map((n) => ({ key: `n${n.id}`, label: `Сеть «${n.name}»`, ids: people.filter((p) => p.network_id === n.id).map((p) => p.id) })),
   ].filter((g) => g.ids.length > 0);
@@ -290,7 +293,8 @@ function Recipients({ people, networks, trainerNetwork, value, onChange, unmarke
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{p.name}</span>
                   <span className="block truncate text-xs text-muted-foreground">
-                    {[p.working ? "работает" : "не работает", p.network, p.marked_tomorrow ? null : "не отметил завтра"].filter(Boolean).join(" · ")}
+                    {[p.working ? "работает" : "не работает", p.shift_today && "смена сегодня", p.shift_tomorrow && "смена завтра",
+                      p.network, p.marked_tomorrow ? null : "не отметил завтра"].filter(Boolean).join(" · ")}
                   </span>
                 </span>
               </label>

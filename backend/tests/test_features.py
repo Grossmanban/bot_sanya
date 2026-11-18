@@ -406,6 +406,32 @@ def test_broadcast_audience_toggles_union(conn, make_user):
     assert row["signed"] == 0 and len(rec) == 3
 
 
+def test_broadcast_to_the_day_shifts(conn, make_user):
+    """18.11: «На смене сегодня» / «Выходят завтра» — whoever stands in the schedule that day (an active
+    shift, the same rule the «Распред» uses); days off and cancelled shifts don't count."""
+    from app.timeutil import today_local
+
+    def _shift(user, day, status="active"):
+        conn.execute("""INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status,
+                        created_at, updated_at) VALUES (?, ?, '10:00', '18:00', 20, 'Европа', ?, 't', 't')""",
+                     (user["id"], day.isoformat(), status))
+
+    admin = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    today, tomorrow = today_local(), today_local() + timedelta(days=1)
+    day, next_day, off, gone = (make_user(first=n) for n in ("Сегодня", "Завтра", "Выходной", "Отменил"))
+    _shift(day, today)
+    _shift(next_day, tomorrow)
+    _shift(off, today, "pre_declared_off")  # a day off in the schedule — not on shift
+    _shift(gone, today, "cancelled")        # cancelled — not on shift
+    ids = lambda groups: {u["id"] for u in svc.broadcast_recipients(conn, groups)}
+    assert ids(["shift_today"]) == {day["id"]}
+    assert ids(["shift_tomorrow"]) == {next_day["id"]}
+    assert ids(["shift_today", "shift_tomorrow"]) == {day["id"], next_day["id"]}
+    # the audience reaches the same people the Mini App's quick-tick does
+    row, rec = svc.create_broadcast(conn, admin, ["shift_tomorrow"], "Завтра собираемся пораньше")
+    assert {u["id"] for u in rec} == {next_day["id"]}
+
+
 def test_sanitizer_keeps_telegram_tags_and_drops_the_rest():
     from app.richtext import sanitize
 
