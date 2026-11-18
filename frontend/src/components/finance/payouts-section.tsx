@@ -133,13 +133,15 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
   const [include, setInclude] = useState<Record<number, boolean>>({});
   // 18.11: the owner's hand-entered amount per person (the accountant's report rules), "" — not entered yet
   const [amounts, setAmounts] = useState<Record<number, string>>({});
-  const [photo, setPhoto] = useState<ParsedReport | null>(null);
+  // the parsed report survives closing the dialog — an accidental tap must not re-run the recognition
+  const [report, setReport] = useState<ParsedReport | null>(null);
+  const [photoOpen, setPhotoOpen] = useState(false);
   const photoInput = useRef<HTMLInputElement>(null);
   const [proof, setProof] = useState<string[]>([]);
   const [dedProof, setDedProof] = useState<string[]>([]);
   const { busy, run } = useAction();
 
-  const parsed = useMemo(() => Object.fromEntries(
+  const entered = useMemo(() => Object.fromEntries(
     Object.entries(amounts).filter(([, v]) => v !== "").map(([id, v]) => [Number(id), Number(v)])) as Record<number, number>,
     [amounts]);
 
@@ -164,7 +166,7 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
   async function recalc(keepTicks = true) {
     try {
       const res = await api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates,
-        manual: true, amounts: parsed, included: rows.filter((r) => include[r.user_id]).map((r) => r.user_id) });
+        manual: true, amounts: entered, included: rows.filter((r) => include[r.user_id]).map((r) => r.user_id) });
       setRows(res.rows);
       setSummary(res.summary);
       if (!keepTicks) {
@@ -177,7 +179,7 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
   }
 
   // the server recalculates on commit; here the row is shown as amount + commission + bonuses − fines − deductions
-  const shown = (r: PayoutRow) => Math.max(0, (parsed[r.user_id] ?? 0) + r.commission + r.bonuses - r.fines - r.deductions);
+  const shown = (r: PayoutRow) => Math.max(0, (entered[r.user_id] ?? 0) + r.commission + r.bonuses - r.fines - r.deductions);
   const picked = rows.filter((r) => include[r.user_id]);
   const total = picked.reduce((s, r) => s + shown(r), 0);
   const needsDedProof = picked.some((r) => r.deductions > 0);
@@ -201,7 +203,10 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
     try {
       const blob = await compressImage(file);
       const res = await run("photo", () => api.admin.parsePayoutPhoto(blob, network));
-      if (res) setPhoto(res);
+      if (res) {
+        setReport(res);
+        setPhotoOpen(true);
+      }
     } catch {
       /* toast shown */
     }
@@ -210,7 +215,7 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
   function applyPhoto(picked: { user_id: number; amount: number }[]) {
     setAmounts((cur) => ({ ...cur, ...Object.fromEntries(picked.map((r) => [r.user_id, String(r.amount)])) }));
     setInclude((cur) => ({ ...cur, ...Object.fromEntries(picked.map((r) => [r.user_id, true])) }));
-    setPhoto(null);
+    setPhotoOpen(false); // the report stays — it can be reopened without paying for a new recognition
     toast.success(`Подставлено ${picked.length} — проверьте суммы и «Пересчитайте»`);
   }
 
@@ -289,8 +294,10 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
                 {ocr && (
                   <>
                     <button className="flex items-center gap-1.5 text-sm font-semibold text-primary underline-offset-2 hover:underline"
-                            disabled={!!busy} onClick={() => photoInput.current?.click()}>
-                      {busy === "photo" ? <LoaderCircle className="size-4 animate-spin" /> : <ScanLine className="size-4" />} Заполнить по фото
+                            disabled={!!busy}
+                            onClick={() => (report ? setPhotoOpen(true) : photoInput.current?.click())}>
+                      {busy === "photo" ? <LoaderCircle className="size-4 animate-spin" /> : <ScanLine className="size-4" />}
+                      {report ? "Показать распознанное" : "Заполнить по фото"}
                     </button>
                     <input ref={photoInput} type="file" accept="image/*" className="hidden"
                            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void parsePhoto(f); }} />
@@ -329,8 +336,9 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
         </>
       )}
 
-      {photo && (
-        <PhotoDialog report={photo} people={rows} busy={!!busy} onApply={applyPhoto} onClose={() => setPhoto(null)} />
+      {photoOpen && report && (
+        <PhotoDialog report={report} people={rows} busy={!!busy} onApply={applyPhoto} onClose={() => setPhotoOpen(false)}
+                     onNewPhoto={() => { setPhotoOpen(false); photoInput.current?.click(); }} />
       )}
 
       {step === 3 && (
@@ -358,9 +366,9 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
 }
 
 /** 18.11: «Заполнить по фото» — the recognized rows against our people; the owner fixes matches and applies. */
-function PhotoDialog({ report, people, busy, onApply, onClose }: {
+function PhotoDialog({ report, people, busy, onApply, onClose, onNewPhoto }: {
   report: ParsedReport; people: PayoutRow[]; busy: boolean;
-  onApply: (picked: { user_id: number; amount: number }[]) => void; onClose: () => void;
+  onApply: (picked: { user_id: number; amount: number }[]) => void; onClose: () => void; onNewPhoto: () => void;
 }) {
   const [pick, setPick] = useState<Record<number, number | null>>(
     () => Object.fromEntries(report.rows.map((r, i) => [i, r.user_id])));
@@ -368,20 +376,26 @@ function PhotoDialog({ report, people, busy, onApply, onClose }: {
     .map((r, i) => ({ amount: r.amount, uid: pick[i] ?? null }))
     .filter((r): r is { amount: number; uid: number } => r.uid != null);
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose}>
-      <section className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-card p-5 shadow-lift sm:rounded-3xl"
+    <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 sm:items-center sm:p-4" onClick={onClose}>
+      <section className="max-h-[88dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-card p-5 pb-24 shadow-lift sm:rounded-3xl"
                onClick={(e) => e.stopPropagation()}>
-        <h3 className="font-display text-lg font-semibold">Распознано с фото</h3>
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="font-display text-lg font-semibold">Распознано с фото</h3>
+          <button aria-label="Закрыть" onClick={onClose} className="press grid size-9 shrink-0 place-items-center rounded-full bg-muted">
+            <X className="size-4" />
+          </button>
+        </div>
         <p className="mt-1 text-sm text-muted-foreground">
-          Проверьте, кто есть кто (несопоставленные подсвечены — выберите человека), поправьте суммы при желании
-          можно потом в списке. Подставятся только строки с выбранным человеком.
+          Проверьте, кто есть кто (несопоставленные подсвечены — выберите человека). Подставятся только строки
+          с выбранным человеком; суммы можно поправить потом в списке.
         </p>
         <ul className="mt-3 space-y-2">
           {report.rows.map((r, i) => {
+            // Map entries: [user_id, name] pairs, the match and the candidates first, then the whole team
             const options = [...new Map(([] as [number, string][])
               .concat(r.user_id != null && r.name ? [[r.user_id, r.name] as [number, string]] : [])
               .concat(r.alternatives.map((a) => [a.user_id, a.name] as [number, string]))
-              .concat(people.map((p) => [p.user_id, p.name] as [number, string]))).values()];
+              .concat(people.map((p) => [p.user_id, p.name] as [number, string]))).entries()];
             return (
               <li key={i} className={cn("flex items-center gap-2 rounded-2xl px-3 py-2", pick[i] != null ? "bg-muted/60" : "bg-wait-soft")}>
                 <span className="min-w-0 flex-1">
@@ -402,12 +416,15 @@ function PhotoDialog({ report, people, busy, onApply, onClose }: {
         {report.dropped.length > 0 && (
           <p className="mt-2 text-xs text-muted-foreground">Отброшено: {report.dropped.join("; ")}</p>
         )}
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           <Button className="press h-11 flex-1 rounded-xl font-semibold" disabled={!chosen.length || busy}
                   onClick={() => onApply(chosen.map((r) => ({ user_id: r.uid, amount: r.amount })))}>
             <Check /> Подставить{chosen.length ? ` (${chosen.length})` : ""}
           </Button>
-          <Button variant="ghost" className="h-11 rounded-xl" onClick={onClose}>Отмена</Button>
+          <Button variant="secondary" className="press h-11 rounded-xl" onClick={onNewPhoto}>
+            <ImagePlus /> Другое фото
+          </Button>
+          <Button variant="ghost" className="h-11 rounded-xl" onClick={onClose}>Закрыть</Button>
         </div>
       </section>
     </div>

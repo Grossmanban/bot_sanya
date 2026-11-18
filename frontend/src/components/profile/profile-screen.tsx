@@ -162,7 +162,10 @@ export function ProfileScreen({
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <MenuRow icon={IdCard} label="Мои данные" value={person.data ? STATUS_TEXT[person.data.state.status].label : undefined}
                    onClick={() => setView("person")} />
-          <MenuRow icon={History} label="История выходов" onClick={() => setView("history")} />
+          <MenuRow icon={CreditCard} label="Реквизиты для выплат"
+                   value={profile.data ? (profile.data.pending ? "на рассмотрении" : profile.data.rejected ? "отклонены" : profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
+                   onClick={() => setView("requisites")} />
+          <MenuRow icon={Gift} label="Мои рефералы" onClick={() => setView("referrals")} />
           <MenuRow
             icon={Wallet}
             label="Штрафы и бонусы"
@@ -170,10 +173,10 @@ export function ProfileScreen({
             onClick={() => setView("penalties")}
           />
           <MenuRow icon={Archive} label="Архив целей и событий" onClick={() => setView("archive")} />
-          <MenuRow icon={Gift} label="Мои рефералы" onClick={() => setView("referrals")} />
-          <MenuRow icon={CreditCard} label="Реквизиты для выплат"
-                   value={profile.data ? (profile.data.pending ? "на рассмотрении" : profile.data.rejected ? "отклонены" : profile.data.profile ? profile.data.profile.bank : "не указаны") : undefined}
-                   onClick={() => setView("requisites")} />
+        </section>
+        {/* заказчик 18.11: история выходов — отдельным блоком, последним */}
+        <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
+          <MenuRow icon={History} label="История выходов" onClick={() => setView("history")} />
         </section>
 
         <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
