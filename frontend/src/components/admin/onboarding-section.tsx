@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, ShieldCheck, Star, Timer, UserCog, UserX, Users } from "lucide-react";
+import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Search, Send, ShieldCheck, Star, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type Role, type StageProgress, type TrainingRequest, type User } from "@/lib/api";
@@ -46,6 +46,8 @@ export function OnboardingSection({ me }: { me: User }) {
   const [days, setDays] = useState<number[]>([]);
   const [metro, setMetro] = useState("");
   const [minDays, setMinDays] = useState("");
+  // 19.11: search by the person's name (or @username) — the first thing to reach for on a long list
+  const [q, setQ] = useState("");
   // 19.11: quick chips — «конкретный вид людей»: the ⭐ ones, or without cancelled trainings and no-shows
   const [prioOnly, setPrioOnly] = useState(false);
   const [respOnly, setRespOnly] = useState(false);
@@ -61,8 +63,10 @@ export function OnboardingSection({ me }: { me: User }) {
 
   const items = useMemo(() => {
     const metroQ = metro.trim().toLowerCase();
+    const qQ = q.trim().toLowerCase();
     const list = (data?.items ?? []).filter((a) =>
-      (!age[0] || a.age >= Number(age[0])) && (!age[1] || a.age <= Number(age[1]))
+      (!qQ || a.full_name.toLowerCase().includes(qQ) || `@${a.username ?? ""}`.includes(qQ))
+      && (!age[0] || a.age >= Number(age[0])) && (!age[1] || a.age <= Number(age[1]))
       && a.communication >= skill[0] && a.communication <= skill[1]
       && days.every((d) => a.training_days.includes(d))
       && (!metroQ || a.metro.toLowerCase().includes(metroQ))
@@ -78,9 +82,9 @@ export function OnboardingSection({ me }: { me: User }) {
     // 19.11: the priority questionnaires (⭐) come right after the agreement (§4) — before the chosen sort, on every tab
     const prio = (a: Application) => Number(!!a.priority);
     return list.sort((a, b) => agreement(a) - agreement(b) || prio(b) - prio(a) || chosen(a, b) || byNewest(a, b));
-  }, [data, age, skill, days, metro, minDays, prioOnly, respOnly, sort, dir, tab]);
+  }, [data, age, skill, days, metro, minDays, prioOnly, respOnly, q, sort, dir, tab]);
   const filtered = !!(age[0] || age[1]) || skill[0] > 1 || skill[1] < 10 || days.length > 0
-    || !!metro.trim() || !!minDays || prioOnly || respOnly;
+    || !!metro.trim() || !!minDays || prioOnly || respOnly || !!q.trim();
   // the chip counts the ⭐ ones in the current tab (before the other filters)
   const prioCount = (data?.items ?? []).filter((a) => a.priority).length;
   // 18.11: in all the pickers the owners and the trainers/instructors come first (the inviter tops it on the card)
@@ -104,7 +108,19 @@ export function OnboardingSection({ me }: { me: User }) {
       </div>
 
       {/* 19.11: quick kind-of-person chips, always in sight; combined with the filters below */}
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <label className="relative min-w-full flex-1 sm:min-w-0">
+          <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <input aria-label="Поиск по имени" placeholder="Поиск по имени или @username" value={q}
+                 onChange={(e) => setQ(e.target.value.slice(0, 40))}
+                 className={cn(field, "pl-9 pr-8")} />
+          {q && (
+            <button type="button" aria-label="Очистить поиск" onClick={() => setQ("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-1 text-muted-foreground hover:text-foreground">
+              <RotateCcw className="size-3.5" />
+            </button>
+          )}
+        </label>
         <button type="button" aria-pressed={prioOnly} onClick={() => setPrioOnly(!prioOnly)}
                 title="Только приоритетные анкеты — обучение в первую очередь"
                 className={cn("press inline-flex h-9 items-center gap-1.5 rounded-xl px-3.5 text-sm font-semibold", prioOnly ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
@@ -179,7 +195,7 @@ export function OnboardingSection({ me }: { me: User }) {
               </div>
             )}
             {filtered && (
-              <Button variant="ghost" size="sm" className="rounded-lg" onClick={() => { setAge(["", ""]); setSkill([1, 10]); setDays([]); setMetro(""); setMinDays(""); setPrioOnly(false); setRespOnly(false); }}>
+              <Button variant="ghost" size="sm" className="rounded-lg" onClick={() => { setAge(["", ""]); setSkill([1, 10]); setDays([]); setMetro(""); setMinDays(""); setPrioOnly(false); setRespOnly(false); setQ(""); }}>
                 Сбросить
               </Button>
             )}
@@ -193,7 +209,7 @@ export function OnboardingSection({ me }: { me: User }) {
 
       {!data ? <Skeleton className="h-48 rounded-3xl" /> : items.length === 0 ? (
         <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">
-          {filtered ? "Под фильтры никто не подходит." : "Здесь пока пусто."}
+          {q.trim() ? `Никого не нашлось по «${q.trim()}».` : filtered ? "Под фильтры никто не подходит." : "Здесь пока пусто."}
         </p>
       ) : (
         <ul className="space-y-3">
