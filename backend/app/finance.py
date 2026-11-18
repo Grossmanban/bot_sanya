@@ -408,9 +408,11 @@ def create(conn: sqlite3.Connection, actor: dict, user_id: int, type: str, amoun
 
 def piece_deduction(conn: sqlite3.Connection, actor: dict, user_id: int, day: date, pieces: int, reason: str, key: str,
                     media: str | None = None) -> list[dict]:
-    """Owner: a deduction in pieces for a day (customer round B). The employee loses pieces × their rate of
-    that day; the trainer of their network loses pieces × the ladder rate paid that day (not recalculated).
-    Both see rubles. Returns [employee's deduction, trainer's deduction?]."""
+    """Owner: a deduction in pieces for a day (customer round B). The employee loses pieces × their own base
+    rate (personal, else the common one — 18.11: the day's «налог на лень» never lowers a deduction); the trainer
+    of their network and the person's instructor each lose pieces × their rate per piece paid that day
+    (the ladder step is not recalculated). Everyone sees rubles.
+    Returns [employee's deduction, trainer's deduction?, instructor's deduction?]."""
     from .rates import Book
 
     if isinstance(pieces, bool) or not isinstance(pieces, int) or not 0 < pieces <= 100_000:
@@ -429,11 +431,8 @@ def piece_deduction(conn: sqlite3.Connection, actor: dict, user_id: int, day: da
             raise ServiceError("Вычеты добавляет только владелец", 403, "owner_only")
         target = _target(conn, user_id)
         book = Book.load(conn)
-        fact = conn.execute(
-            f"""SELECT fact_volume FROM shifts WHERE user_id = ? AND shift_date = ? AND status IN {svc.ACTIVE}
-                AND fact_volume IS NOT NULL""", (user_id, day.isoformat())).fetchone()
-        # the rate of that very day; with no result that day — the full (not lazy) rate
-        rate = book.day_rate(user_id, fact[0]) if fact else book.user_rates(user_id)["rate_base"]
+        # always the person's own base rate (personal, else the common one), never the day's lazy rate
+        rate = book.user_rates(user_id)["rate_base"]
         dd = f"{day.day:02d}.{day.month:02d}"
         own = record(conn, user_id=user_id, type="deduction", amount=pieces * rate,
                      reason=f"{reason} ({pieces} шт. × {rate} ₽ за {dd})", actor_tg=actor["telegram_id"],
@@ -447,6 +446,16 @@ def piece_deduction(conn: sqlite3.Connection, actor: dict, user_id: int, day: da
                                   reason=f"Вычет у {svc.full_name(target)}: {reason} ({pieces} шт. × {t_rate} ₽ за {dd})",
                                   actor_tg=actor["telegram_id"], event_date=day.isoformat(), media=media,
                                   pieces=pieces, rate=t_rate, linked_tx_id=own["id"]))
+        inst_id = target["instructor_id"]
+        me = book.users.get(inst_id) if inst_id else None
+        if inst_id and inst_id != user_id and me and me["role"] == perms.INSTRUCTOR \
+                and me["network_id"] == target["network_id"]:
+            i_rate = book.instructor_rate_on(conn, inst_id, day)
+            if i_rate > 0:
+                out.append(record(conn, user_id=inst_id, type="deduction", amount=pieces * i_rate,
+                                  reason=f"Вычет у {svc.full_name(target)}: {reason} ({pieces} шт. × {i_rate} ₽ за {dd})",
+                                  actor_tg=actor["telegram_id"], event_date=day.isoformat(), media=media,
+                                  pieces=pieces, rate=i_rate, linked_tx_id=own["id"]))
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="DEDUCTION_PIECES", key=key,
                   new={"tx": [t["id"] for t in out], "pieces": pieces, "rate": rate, "amounts": [t["amount"] for t in out]},
                   description=reason)

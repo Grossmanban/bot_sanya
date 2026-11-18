@@ -107,33 +107,52 @@ def test_no_ladder_keeps_the_common_commission(conn, team):
     assert by["Вера"]["commission"] == 40 * 10
 
 
-def test_deduction_in_pieces_hits_the_trainer_at_that_days_rate(conn, team):
+def test_deduction_in_pieces_at_the_own_rate_hits_the_trainer_and_the_instructor(conn, team, make_user):
     owner, north = team["owner"], team["north"]["id"]
     networks.set_rates(conn, owner, north, {"ladder": [{"from": 0, "rate": 10}, {"from": 250, "rate": 20}]}, svc.new_key())
-    did(conn, team["ivan"], WEEK[0], 25)                              # Monday: team 25 → 10 ₽
+    did(conn, team["ivan"], WEEK[0], 25)                              # Monday: team 25 → the 10 ₽ step
     did(conn, team["ivan"], WEEK[1], 150)
-    did(conn, team["petya"], WEEK[1], 100)                            # Tuesday: team 250 → 20 ₽
+    did(conn, team["petya"], WEEK[1], 100)                            # Tuesday: team 250 → the 20 ₽ step
     rates.set_user_rates(conn, owner, team["ivan"]["id"], {"personal_rate": 140}, svc.new_key())
+    olga = make_user(first="Ольга")
+    networks.set_member(conn, owner, olga["id"], north, svc.new_key())
+    svc.set_role(conn, owner, olga["id"], "instructor", svc.new_key())
+    networks.set_instructor(conn, owner, team["ivan"]["id"], olga["id"], svc.new_key())
 
-    own, trainer = finance.piece_deduction(conn, owner, team["ivan"]["id"], WEEK[0], 5, "Брак", svc.new_key())
+    own, trainer, inst = finance.piece_deduction(conn, owner, team["ivan"]["id"], WEEK[0], 5, "Брак", svc.new_key())
     assert (own["amount"], own["rate"], own["pieces"]) == (5 * 140, 140, 5)
     assert (trainer["user_id"], trainer["amount"], trainer["rate"], trainer["linked_tx_id"]) == \
         (team["vera"]["id"], 50, 10, own["id"])
+    assert (inst["user_id"], inst["amount"], inst["rate"], inst["linked_tx_id"]) == (olga["id"], 50, 10, own["id"])
     assert "5 шт. × 140 ₽" in own["reason"] and "Вычет у Иван" in trainer["reason"]
-    # Tuesday was paid at the 20 ₽ step: the deduction takes 20 ₽ a piece and doesn't move the step
-    _, t2 = finance.piece_deduction(conn, owner, team["ivan"]["id"], WEEK[1], 5, "Брак", svc.new_key())
-    assert t2["amount"] == 100
+    # a «lazy» day (fact 10 < threshold) doesn't lower the deduction: always the person's own base rate
+    did(conn, team["ivan"], WEEK[2], 10)
+    own2, t2, i2 = finance.piece_deduction(conn, owner, team["ivan"]["id"], WEEK[2], 5, "Брак", svc.new_key())
+    assert own2["amount"] == 5 * 140 and own2["rate"] == 140
+    assert (t2["amount"], i2["amount"]) == (50, 50)                   # that day's steps: trainer 10 ₽, instructor 10 ₽
     by, _ = calc(conn)
-    assert by["Вера"]["commission"] == 25 * 10 + 250 * 20             # unchanged
-    assert by["Вера"]["deductions"] == 150 and by["Иван"]["deductions"] == 5 * 140 * 2
+    assert by["Вера"]["commission"] == 25 * 10 + 250 * 20 + 10 * 10   # the deductions don't move the ladders
+    assert by["Вера"]["deductions"] == 100 and by["Иван"]["deductions"] == 5 * 140 * 2
+    assert by["Ольга"]["deductions"] == 100
 
-    # annulling the employee's deduction annuls the trainer's part
+    # annulling the employee's deduction annuls the trainer's and the instructor's parts
     finance.cancel(conn, owner, own["id"], "Ошибка", svc.new_key())
     assert finance.get(conn, trainer["id"])["status"] == "cancelled"
-    # never in the future; the trainer's own deduction has no trainer part
+    assert finance.get(conn, inst["id"])["status"] == "cancelled"
+    # never in the future; the trainer's own deduction has no parts of others
     with pytest.raises(svc.ServiceError):
         finance.piece_deduction(conn, owner, team["ivan"]["id"], date.today() + timedelta(days=400), 1, "x", svc.new_key())
     assert len(finance.piece_deduction(conn, owner, team["vera"]["id"], WEEK[0], 2, "Брак", svc.new_key())) == 1
+
+
+def test_weekly_ladder_deduction_takes_the_weeks_step(conn, team):
+    owner, north = team["owner"], team["north"]["id"]
+    networks.set_rates(conn, owner, north, {"ladder": [{"from": 0, "rate": 10}, {"from": 60, "rate": 20}],
+                                            "ladder_period": "week"}, svc.new_key())
+    did(conn, team["ivan"], WEEK[3], 70)                              # Thursday: 70 for the week → the 20 ₽ step
+    # Monday has no approved shifts: the deduction takes the week's step (не первая, и не падает)
+    _, trainer = finance.piece_deduction(conn, owner, team["ivan"]["id"], WEEK[0], 2, "Брак", svc.new_key())
+    assert trainer["amount"] == 2 * 20
 
 
 def test_owner_led_networks_and_owner_earnings(conn, team, make_user):

@@ -63,7 +63,8 @@
 ## Админ: деньги
 
 `GET /api/admin/finances(/summary)` · `POST /api/admin/finances` · `POST /api/admin/finances/{tx}/decide|cancel|forgive|amount` ·
-`POST /api/admin/finances/pay-all` · `POST /api/admin/finances/pieces` (вычет в штуках) ·
+`POST /api/admin/finances/pay-all` · `POST /api/admin/finances/pieces` (вычет в штуках; 18.11 — ставка сотрудника
+личная/общая базовая, части тренера и инструктора) ·
 выплаты `POST /api/admin/payouts/preview` (18.11: `manual: true` + `amounts` + `included` — ручные суммы; без них —
 легаси-авторасчёт), `POST /api/admin/payouts` (choices с `amount`), `GET /api/admin/payouts(/{id})` (в списке — флаг `ocr`),
 `POST /api/admin/payouts/{id}/edit|annul|excel` · `POST /api/admin/lazy-pool/reset` (18.11: обнулить копилки налога на лень) ·
@@ -110,3 +111,5 @@
 - 2026-11-18 — `POST /api/admin/onboarding/{app}/internship-units`; `GET /api/admin/pending`: `no_network`;
   `GET /api/admin/onboarding`: `role` в списке тренеров.
 - 2026-11-18 — `GET /api/admin/broadcasts`: в `people` флаги `shift_today`/`shift_tomorrow`; аудитории `shift_today`/`shift_tomorrow` в `POST`.
+- 2026-11-18 — `POST /api/admin/finances/pieces`: вычет всегда по базовой ставке сотрудника (личная/общая), в долю
+  добавлен инструктор человека.

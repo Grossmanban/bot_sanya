@@ -19,8 +19,9 @@ One delta per piece, shared (agreed with the owner): delta = piece_cap (150 ₽)
 from every piece of the network, the instructor takes min(their rate, delta − the trainer's) from the pieces
 of their people. Trainer 30 ₽ → the instructor gets 0 ₽ for those pieces; trainer 10 ₽ → up to 20 ₽.
 
-Deductions in pieces (finance.piece_deduction) use the rate of that very day for both the employee and
-the trainer — the ladder step is not recalculated afterwards.
+Deductions in pieces (finance.piece_deduction) take pieces × the person's own base rate (personal, else the
+common one — 18.11: the day's «налог на лень» never lowers a deduction); the trainer of the network and the
+person's instructor each lose pieces × their rate per piece paid that day — the ladder step is not recalculated.
 """
 
 import json
@@ -200,11 +201,33 @@ class Book:
         if own is not None:
             return min(own, self.delta())
         if net["ladder_period"] == "week":
-            monday = day - timedelta(days=date.weekday())
+            monday = day - timedelta(days=day.weekday())
             week = self.trainer_share(conn, network_id, monday, monday + timedelta(days=6))
             return min(step_rate(net["steps"], week[0]["step_volume"] if week else 0, self.common["trainer_commission"]),
                        self.delta())
         return min(step_rate(net["steps"], 0, self.common["trainer_commission"]), self.delta())
+
+    def instructor_rate_on(self, conn: sqlite3.Connection, instructor_id: int, day: date) -> int:
+        """The rate the instructor was paid per piece of their person on that day (0 when nothing applies)."""
+        me = self.users.get(instructor_id)
+        if me is None or me["role"] != perms.INSTRUCTOR or me["network_id"] not in self.nets:
+            return 0
+        net = self.nets[me["network_id"]]
+        trainer = self.trainer_rate_on(conn, net["id"], day)  # 0 for an owner-led network
+        days = self.instructor_share(conn, instructor_id, day, day)
+        if days:
+            return days[0]["rate"]
+        # nothing approved that day yet: the step for the volume so far (the first step for a daily ladder)
+        own = me.get("personal_commission")
+        if own is not None:
+            return max(0, min(own, self.delta() - trainer))
+        if net["instructor_ladder_period"] == "week":
+            monday = day - timedelta(days=day.weekday())
+            week = self.instructor_share(conn, instructor_id, monday, monday + timedelta(days=6))
+            step = week[0]["step_volume"] if week else 0
+            return max(0, min(step_rate(net["isteps"], step, self.common["instructor_commission"]),
+                              self.delta() - trainer))
+        return max(0, min(step_rate(net["isteps"], 0, self.common["instructor_commission"]), self.delta() - trainer))
 
     # ------------------------------------------------------------ manual payouts (18.11)
 
