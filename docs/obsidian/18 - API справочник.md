@@ -63,8 +63,9 @@
 `GET /api/admin/finances(/summary)` · `POST /api/admin/finances` · `POST /api/admin/finances/{tx}/decide|cancel|forgive|amount` ·
 `POST /api/admin/finances/pay-all` · `POST /api/admin/finances/pieces` (вычет в штуках) ·
 выплаты `POST /api/admin/payouts/preview` (18.11: `manual: true` + `amounts` + `included` — ручные суммы; без них —
-легаси-авторасчёт), `POST /api/admin/payouts` (choices с `amount`), `GET /api/admin/payouts(/{id})`,
+легаси-авторасчёт), `POST /api/admin/payouts` (choices с `amount`), `GET /api/admin/payouts(/{id})` (в списке — флаг `ocr`),
 `POST /api/admin/payouts/{id}/edit|annul|excel` · `POST /api/admin/lazy-pool/reset` (18.11: обнулить копилки налога на лень) ·
+`POST /api/admin/payouts/parse-photo?network_id=` (18.11: raw-картинка ведомости → строки с сопоставлением; 409 `ocr_not_configured`) ·
 продуктовые выплаты `POST /api/admin/alice/payout/preview|commit`.
 
 ## Админ: цели, события, сети
@@ -97,3 +98,4 @@
 - 2026-11-17 — страница создана по всем маршрутам коммита `78c73da`.
 - 2026-11-18 — добавлен `POST /api/admin/team/{uid}/grants` (личные разрешения), поле `grants` в user.
 - 2026-11-18 — превью/коммит выплат: `manual`/`amounts`/`included`/`amount`; новый `POST /api/admin/lazy-pool/reset`.
+- 2026-11-18 — добавлен `POST /api/admin/payouts/parse-photo` («Заполнить по фото»), флаг `ocr` в списке выплат.

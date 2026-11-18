@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { AlertTriangle, Ban, Check, ChevronLeft, ChevronRight, Copy, FileSpreadsheet, ImagePlus, LoaderCircle, Pencil, Plus, X } from "lucide-react";
+import { AlertTriangle, Ban, Check, ChevronLeft, ChevronRight, Copy, FileSpreadsheet, ImagePlus, LoaderCircle, Pencil, Plus, ScanLine, X } from "lucide-react";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
   AlertDialogHeader, AlertDialogTitle,
@@ -9,7 +9,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, ROLE_TITLES, type PayoutBatch, type PayoutRates, type PayoutRow, type PayoutSummary } from "@/lib/api";
+import { api, ROLE_TITLES, type ParsedReport, type PayoutBatch, type PayoutRates, type PayoutRow, type PayoutSummary } from "@/lib/api";
 import { compressImage } from "@/lib/image";
 import { addDays, dayMonth, plural, rub } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
@@ -29,7 +29,8 @@ export function PayoutsSection() {
   const [archive, setArchive] = useState(false);
 
   if (mode === "new" && list.data) {
-    return <Wizard defaults={list.data.rates} onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
+    return <Wizard defaults={list.data.rates} ocr={list.data.ocr}
+                   onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
   }
   if (mode === "alice" || mode === "plus") {
     return <AlicePayout key={mode} product={mode} onClose={async (id) => { await list.reload(); setMode(id ?? "list"); }} />;
@@ -117,7 +118,7 @@ function periodPresets(today: string) {
     : [{ label: `16–${prevEnd.slice(8)} прошлого`, from: prevMid, to: prevEnd }, { label: "1 – сегодня", from: first, to: today }];
 }
 
-function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: number) => void }) {
+function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolean; onClose: (id?: number) => void }) {
   const today = moscowToday();
   const presets = periodPresets(today);
   const nets = useLoad(() => api.admin.networks(), []);
@@ -132,6 +133,8 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
   const [include, setInclude] = useState<Record<number, boolean>>({});
   // 18.11: the owner's hand-entered amount per person (the accountant's report rules), "" — not entered yet
   const [amounts, setAmounts] = useState<Record<number, string>>({});
+  const [photo, setPhoto] = useState<ParsedReport | null>(null);
+  const photoInput = useRef<HTMLInputElement>(null);
   const [proof, setProof] = useState<string[]>([]);
   const [dedProof, setDedProof] = useState<string[]>([]);
   const { busy, run } = useAction();
@@ -191,6 +194,24 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
     } catch {
       /* toast shown */
     }
+  }
+
+  /** 18.11: the accountant's photo → recognized rows → pre-fill the amounts; the owner confirms */
+  async function parsePhoto(file: File) {
+    try {
+      const blob = await compressImage(file);
+      const res = await run("photo", () => api.admin.parsePayoutPhoto(blob, network));
+      if (res) setPhoto(res);
+    } catch {
+      /* toast shown */
+    }
+  }
+
+  function applyPhoto(picked: { user_id: number; amount: number }[]) {
+    setAmounts((cur) => ({ ...cur, ...Object.fromEntries(picked.map((r) => [r.user_id, String(r.amount)])) }));
+    setInclude((cur) => ({ ...cur, ...Object.fromEntries(picked.map((r) => [r.user_id, true])) }));
+    setPhoto(null);
+    toast.success(`Подставлено ${picked.length} — проверьте суммы и «Пересчитайте»`);
   }
 
   return (
@@ -262,11 +283,23 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
       {step === 2 && (
         <>
           <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
-            <div className="flex items-center justify-between px-5 pt-5 pb-3 md:px-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-5 pb-3 md:px-6">
               <h2 className="font-display text-lg font-semibold">2. Команда и суммы</h2>
-              <button className="text-sm font-semibold text-primary underline-offset-2 hover:underline" onClick={() => recalc()}>
-                {busy === "calc" ? "Считаю…" : "Пересчитать"}
-              </button>
+              <div className="flex items-center gap-4">
+                {ocr && (
+                  <>
+                    <button className="flex items-center gap-1.5 text-sm font-semibold text-primary underline-offset-2 hover:underline"
+                            disabled={!!busy} onClick={() => photoInput.current?.click()}>
+                      {busy === "photo" ? <LoaderCircle className="size-4 animate-spin" /> : <ScanLine className="size-4" />} Заполнить по фото
+                    </button>
+                    <input ref={photoInput} type="file" accept="image/*" className="hidden"
+                           onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void parsePhoto(f); }} />
+                  </>
+                )}
+                <button className="text-sm font-semibold text-primary underline-offset-2 hover:underline" onClick={() => recalc()}>
+                  {busy === "calc" ? "Считаю…" : "Пересчитать"}
+                </button>
+              </div>
             </div>
             <p className="px-5 pb-3 text-xs text-muted-foreground md:px-6">
               {dayMonth(from)} – {dayMonth(to)} · впишите сумму каждому по отчёту бухгалтера — штуки и тренерские посчитаются сами.
@@ -296,6 +329,10 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
         </>
       )}
 
+      {photo && (
+        <PhotoDialog report={photo} people={rows} busy={!!busy} onApply={applyPhoto} onClose={() => setPhoto(null)} />
+      )}
+
       {step === 3 && (
         <section className="space-y-5 rounded-3xl bg-card p-5 shadow-lift md:p-6">
           <h2 className="font-display text-lg font-semibold">3. Документы и фиксация</h2>
@@ -320,8 +357,64 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
   );
 }
 
-function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: {
-  row: PayoutRow; on: boolean; total: number; amount: string; onToggle: () => void; onAmount: (v: string) => void;
+/** 18.11: «Заполнить по фото» — the recognized rows against our people; the owner fixes matches and applies. */
+function PhotoDialog({ report, people, busy, onApply, onClose }: {
+  report: ParsedReport; people: PayoutRow[]; busy: boolean;
+  onApply: (picked: { user_id: number; amount: number }[]) => void; onClose: () => void;
+}) {
+  const [pick, setPick] = useState<Record<number, number | null>>(
+    () => Object.fromEntries(report.rows.map((r, i) => [i, r.user_id])));
+  const chosen = report.rows
+    .map((r, i) => ({ amount: r.amount, uid: pick[i] ?? null }))
+    .filter((r): r is { amount: number; uid: number } => r.uid != null);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onClick={onClose}>
+      <section className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-card p-5 shadow-lift sm:rounded-3xl"
+               onClick={(e) => e.stopPropagation()}>
+        <h3 className="font-display text-lg font-semibold">Распознано с фото</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Проверьте, кто есть кто (несопоставленные подсвечены — выберите человека), поправьте суммы при желании
+          можно потом в списке. Подставятся только строки с выбранным человеком.
+        </p>
+        <ul className="mt-3 space-y-2">
+          {report.rows.map((r, i) => {
+            const options = [...new Map(([] as [number, string][])
+              .concat(r.user_id != null && r.name ? [[r.user_id, r.name] as [number, string]] : [])
+              .concat(r.alternatives.map((a) => [a.user_id, a.name] as [number, string]))
+              .concat(people.map((p) => [p.user_id, p.name] as [number, string]))).values()];
+            return (
+              <li key={i} className={cn("flex items-center gap-2 rounded-2xl px-3 py-2", pick[i] != null ? "bg-muted/60" : "bg-wait-soft")}>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{r.text}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {rub(r.amount)}{r.matched ? ` → ${r.name}` : " — выберите человека или пропустите"}
+                  </span>
+                </span>
+                <select className="h-9 w-40 shrink-0 rounded-lg border-0 bg-card px-2 text-sm outline-none focus:ring-2 focus:ring-ring/25"
+                        value={pick[i] ?? ""} onChange={(e) => setPick({ ...pick, [i]: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">— пропустить —</option>
+                  {options.map(([uid, name]) => <option key={uid} value={uid}>{name}</option>)}
+                </select>
+              </li>
+            );
+          })}
+        </ul>
+        {report.dropped.length > 0 && (
+          <p className="mt-2 text-xs text-muted-foreground">Отброшено: {report.dropped.join("; ")}</p>
+        )}
+        <div className="mt-4 flex gap-2">
+          <Button className="press h-11 flex-1 rounded-xl font-semibold" disabled={!chosen.length || busy}
+                  onClick={() => onApply(chosen.map((r) => ({ user_id: r.uid, amount: r.amount })))}>
+            <Check /> Подставить{chosen.length ? ` (${chosen.length})` : ""}
+          </Button>
+          <Button variant="ghost" className="h-11 rounded-xl" onClick={onClose}>Отмена</Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: {  row: PayoutRow; on: boolean; total: number; amount: string; onToggle: () => void; onAmount: (v: string) => void;
   onMoney: () => void;
 }) {
   const [adding, setAdding] = useState(false);

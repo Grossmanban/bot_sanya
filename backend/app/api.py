@@ -12,7 +12,7 @@ from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
 from . import recruiting
-from . import alice, manuals, notify, pending, products, profiles, reports, templates, training, violations
+from . import alice, manuals, notify, ocr, pending, products, profiles, reports, templates, training, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
 from .config import settings
@@ -2765,7 +2765,15 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/payouts")
     async def admin_payouts(_: dict = Depends(staff("money"))):
-        return {"items": payouts.history(conn), "rates": pricing.current()}
+        return {"items": payouts.history(conn), "rates": pricing.current(), "ocr": ocr.configured()}
+
+    @api.post("/admin/payouts/parse-photo")
+    async def admin_payout_parse_photo(request: Request, network_id: int | None = None,
+                                       owner: dict = Depends(staff("money"))):
+        """18.11: the accountant's photo → rows «name → rubles» matched to the team. Nothing is saved."""
+        data, ext = await read_photo(request, required=True)
+        mime = "image/jpeg" if ext == "jpg" else f"image/{ext}"
+        return await ocr.parse_photo(conn, data, mime, network_id)
 
     @api.get("/admin/payouts/{batch_id}")
     async def admin_payout(batch_id: int, _: dict = Depends(staff("money"))):

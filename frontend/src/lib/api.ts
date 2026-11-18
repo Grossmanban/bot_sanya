@@ -1209,6 +1209,25 @@ export interface PayoutSummary {
   owner: number;
 }
 
+/** 18.11: «Заполнить по фото» — a row of the accountant's report matched to the team. */
+export interface ParsedReportRow {
+  /** the name as written on the photo */
+  text: string;
+  amount: number;
+  matched: boolean;
+  user_id: number | null;
+  name: string | null;
+  role?: Role | null;
+  /** close candidates for the manual picker */
+  alternatives: { user_id: number; name: string }[];
+}
+
+export interface ParsedReport {
+  rows: ParsedReportRow[];
+  /** lines dropped on purpose: «тренерские», «Итого», headers */
+  dropped: string[];
+}
+
 export interface PayoutItem extends Omit<PayoutRow, "has_deductions" | "commission_days" | "rates"> {
   id: number;
   base: number;
@@ -1676,7 +1695,7 @@ export const api = {
     uploadMedia: (file: Blob) => upload<{ file_id: string }>("/api/admin/media", file),
     payouts: () => request<{ items: { id: number; title: string; period_from: string; period_to: string; total: number; people: number;
       created_at: string; product?: Product | null; status?: "processed" | "annulled"; version?: number; annul_reason?: string | null }[];
-      rates: PayoutRates }>("/api/admin/payouts"),
+      rates: PayoutRates; ocr: boolean }>("/api/admin/payouts"),
     editPayout: (id: number, body: { choices?: { user_id: number; include: boolean; base_override?: number | null; amount?: number | null }[];
       confirmed?: Record<number, number>; note?: string | null }, key: string) =>
       post<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}/edit`, { ...body, idempotency_key: key }),
@@ -1692,6 +1711,8 @@ export const api = {
       post<{ rows: PayoutRow[]; rates: PayoutRates; summary: PayoutSummary }>("/api/admin/payouts/preview", body),
     resetLazyPool: (key: string) =>
       post<{ since: string }>("/api/admin/lazy-pool/reset", { idempotency_key: key }),
+    parsePayoutPhoto: (photo: Blob, networkId: number | null) =>
+      upload<ParsedReport>(`/api/admin/payouts/parse-photo${networkId != null ? `?network_id=${networkId}` : ""}`, photo),
     setInstructor: (userId: number, instructorId: number | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/instructor`, { instructor_id: instructorId, idempotency_key: key }),
     setUserRates: (userId: number, body: { personal_rate?: number | null; clear_personal_rate?: boolean; lazy_exempt?: boolean;

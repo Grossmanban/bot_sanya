@@ -36,6 +36,11 @@ class Settings:
     frontend_dist: str = field(default_factory=lambda: os.environ.get("FRONTEND_DIST", str(ROOT / "frontend" / "out")))
     # screenshots live in Telegram (file_id); this folder is only used when the bot is not running (local dev)
     media_dir: str = field(default_factory=lambda: os.environ.get("MEDIA_DIR", str(ROOT / "data" / "media")))
+    # 18.11: «Заполнить по фото» in the payout wizard — a vision model through an OpenAI-compatible
+    # endpoint (e.g. the local opencode server). Empty OCR_BASE_URL — the feature is off.
+    ocr_base_url: str = field(default_factory=lambda: os.environ.get("OCR_BASE_URL", "").rstrip("/"))
+    ocr_model: str = field(default_factory=lambda: os.environ.get("OCR_MODEL", ""))
+    ocr_api_key: str = field(default_factory=lambda: os.environ.get("OCR_API_KEY", ""))
     init_data_max_age: int = 24 * 3600
 
     @property

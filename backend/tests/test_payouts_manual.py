@@ -196,3 +196,6 @@ class Http:
 
     def post(self, path, tg_id):
         return self.inner.post(path, json={"idempotency_key": key()}, headers=headers(tg_id))
+
+    def post_raw(self, path, tg_id, data: bytes, content_type="image/png"):
+        return self.inner.post(path, content=data, headers={**headers(tg_id), "Content-Type": content_type})
