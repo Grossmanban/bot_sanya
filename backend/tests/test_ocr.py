@@ -61,6 +61,31 @@ def test_matching_survives_reorder_initials_and_typos(conn, make_user):
     assert stranger["matched"] is False
 
 
+def test_close_but_wrong_names_never_match(conn, make_user):
+    """The real photo's traps: «Ливанов Александр» is NOT «Александр Иванов», «Лавренова Анастасия» is
+    NOT «Анастасия Дунаева» — the surname leads, from its first letter. A typo'd surname still matches."""
+    ivanov = make_user(first="Александр", last="Иванов")
+    dunaeva = make_user(first="Анастасия", last="Дунаева")
+    ek = make_user(first="Екатерина", last="Бокусова")
+    smirnovs = [make_user(first="Андрей", last="Смирнов"), make_user(first="Кирилл", last="Смирнов")]
+    fake = [dict(u) for u in (ivanov, dunaeva, ek, *smirnovs)]
+    rows = [{"name": "Ливанов Александр", "amount": 1}, {"name": "Лавренова Анастасия", "amount": 1},
+            {"name": "Боксусова Екатерина", "amount": 1}, {"name": "Смирнов Андрей", "amount": 1},
+            {"name": "Смирнов", "amount": 1}]
+    class FakeConn:  # match_rows only needs list_users
+        def execute(self, *a, **k):
+            class R:
+                def fetchall(self):
+                    return fake
+            return R()
+    out = {r["text"]: r for r in ocr.match_rows(FakeConn(), rows, None)}
+    assert out["Ливанов Александр"]["matched"] is False        # not Иванов
+    assert out["Лавренова Анастасия"]["matched"] is False      # not Дунаева
+    assert out["Боксусова Екатерина"]["matched"] and out["Боксусова Екатерина"]["user_id"] == ek["id"]  # typo ok
+    assert out["Смирнов Андрей"]["user_id"] == smirnovs[0]["id"]
+    assert out["Смирнов"]["matched"] is False                  # ambiguous: two Смирновs
+
+
 def test_the_route_requires_configuration_and_parses(conn, make_user, monkeypatch):
     owner, north, vera, ivan, petya = world(conn, make_user)
     did(conn, ivan, WEEK[0], 10)

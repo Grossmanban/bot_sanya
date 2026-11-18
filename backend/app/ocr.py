@@ -195,21 +195,36 @@ def _norm(s: str) -> str:
 
 def _score(text: str, first: str, last: str) -> float:
     """How well the photo's name fits the person. The report writes «Фамилия Имя» or «Фамилия И.»,
-    the system stores «Имя Фамилия» — both orders and the surname-with-initials form count."""
+    the system stores «Имя Фамилия» — both orders and the surname-with-initials form count.
+    The SURNAME is the key: it must match from its first letter (a fuzzy «Ливанов» never becomes «Иванов»)."""
     variants = {_norm(f"{first} {last}"), _norm(f"{last} {first}")}
     if _norm(text) in variants:
         return 1.0
     squeezed = re.sub(r"[^а-яa-z\d]", "", _norm(text))
     surname = re.sub(r"[^а-яa-z\d]", "", _norm(last))
-    first_letters = re.sub(r"[^а-яa-z]", "", _norm(first))
-    if squeezed == surname + first_letters[:1] or squeezed == surname + first_letters:
+    name = re.sub(r"[^а-яa-z]", "", _norm(first))
+    if squeezed == surname + name[:1] or squeezed == surname + name:
         return 0.95  # «Селизнев М» / «Селизнев МА»
     if squeezed and squeezed == surname:
-        return 0.85
-    ratio = max(difflib.SequenceMatcher(None, _norm(text), v).ratio() for v in variants)
-    if surname:
-        ratio = max(ratio, difflib.SequenceMatcher(None, squeezed, surname).ratio())
-    return ratio
+        return 0.85  # the surname alone — the caller decides if it is ambiguous
+    # fuzzy: pick the word that looks most like the surname (from the same first letter), check the name too
+    words = _norm(text).split()
+    if not words or not surname:
+        return 0.0
+
+    def close(a: str, b: str) -> float:
+        return difflib.SequenceMatcher(None, a, b).ratio()
+
+    cand = max(words, key=lambda w: close(w, surname) if w[:1] == surname[:1] else -1.0)
+    if not cand or cand[:1] != surname[:1] or close(cand, surname) < 0.85:
+        return 0.0  # «Ливанов» never matches «Иванов»: wrong surname letter
+    given = re.sub(r"[^а-яa-z]", "", next((w for w in words if w != cand), ""))
+    if given and name:
+        if given[0] != name[0]:
+            return 0.0  # «Смирнов Андрей» is not «Смирнов Кирилл»
+        if len(given) > 1 and close(given, name) < 0.6:
+            return 0.0
+    return 0.8  # close enough — the dialog still shows the pair to the owner
 
 
 def match_rows(conn: sqlite3.Connection, rows: list[dict], network_id: int | None) -> list[dict]:
@@ -223,6 +238,8 @@ def match_rows(conn: sqlite3.Connection, rows: list[dict], network_id: int | Non
                         key=lambda x: x[0], reverse=True)
         best = ranked[0] if ranked else None
         matched = bool(best and best[0] >= 0.75)
+        if matched and best[0] == 0.85 and sum(1 for s, u in ranked[:4] if s == 0.85 and u["last_name"] == best[1]["last_name"]) > 1:
+            matched = False  # «Смирнов» alone with two Смирновs in the team — the owner picks
         alts = [{"user_id": u["id"], "name": svc.full_name(u)} for _, u in ranked[:4]]
         if matched:
             alts = [a for a in alts if a["user_id"] != best[1]["id"]]
