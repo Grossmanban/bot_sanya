@@ -1,16 +1,13 @@
 """SBP payment profile and the payout registry (ТЗ модули 9–10). Owners only, except one's own profile.
 
-Calculation for a period (ТЗ 11.1, decisions for stage 6, flexible rates — see rates.py):
-    pieces     = P, the APPROVED pieces of the period; L — the «налог на лень» pool (ТЗ 27.10 §20–21):
-                 every approved day below the threshold adds its pieces, every payout takes what it paid lazily
-    base       = min(P, L) × lazy rate + the rest × the person's rate (rates as of the payout);
-                 the pool is written off only by a committed payout
-    trainers  += the network's ladder: team volume × the step rate, per day or per week
-    owners who work shifts are paid for their own pieces like anyone (their personal rate); a network
-    they lead pays no trainer share. The owners' earnings: revenue_per_piece × pieces − everything paid out
-    bonuses    = active bonuses dated up to the period end
-    fines      = active fines dated up to the period end
-    deductions = active deductions
+A payout is manual (18.11): the owner enters each person's amount by hand (the accountant's report rules);
+the units for the trainers'/instructors' commission are amount / the person's rate, and only the people ticked
+in the wizard count. The period's plan and approved fact stay as a reference (план/факт), they no longer pay.
+
+    base      = the entered amount + the commission (the trainer's/instructor's share of the included units)
+    trainers  += the included team volume × the step rate (the ladder or the personal one), within the delta
+    the «налог на лень» pool is written off by the payout that pays the person (a reset button starts it anew)
+    bonuses, fines, deductions — everything still active settles at the nearest payout, whatever its date
 Money is settled oldest first while it fits: deductions, then fines. What doesn't fit stays active —
 the debt is kept and the payout never goes below zero. Settled entries become 'offset' with the payout id.
 """
@@ -27,7 +24,7 @@ from . import permissions as perms
 from . import services as svc
 from .db import transaction
 from .services import ACTIVE, ServiceError, _check_key, _fresh_actor, _seen, log_event
-from .timeutil import now_iso
+from .timeutil import now_iso, now_local
 
 BANKS = ["Сбербанк", "Т-Банк", "ВТБ", "Альфа-Банк", "Газпромбанк", "Райффайзенбанк", "Совкомбанк", "Озон Банк",
          "Яндекс Банк", "Почта Банк", "МТС Банк", "Промсвязьбанк", "Россельхозбанк", "Другой банк"]
@@ -159,10 +156,47 @@ def _approved(conn, user_ids: list[int], date_from: date, date_to: date) -> list
         (date_from.isoformat(), date_to.isoformat(), *user_ids))]
 
 
+def _planned(conn, user_ids: list[int], date_from: date, date_to: date) -> dict[int, int]:
+    """18.11: what the team PLANNED for the period — a reference next to the fact, for the owner's eye."""
+    if not user_ids:
+        return {}
+    return {r["user_id"]: r["v"] for r in conn.execute(
+        f"""SELECT user_id, COALESCE(SUM(volume), 0) AS v FROM shifts WHERE status IN {ACTIVE} AND training = 0
+            AND shift_date BETWEEN ? AND ? AND user_id IN ({','.join('?' * len(user_ids))}) GROUP BY user_id""",
+        (date_from.isoformat(), date_to.isoformat(), *user_ids))}
+
+
 def _open_money(conn, user_id: int, date_to: date) -> list[dict]:
+    """18.11: everything still open settles at the nearest payout — bonuses and fines of any date, like deductions."""
     return [dict(r) for r in conn.execute(
         """SELECT * FROM financial_transactions WHERE user_id = ? AND status = 'active'
-           AND (type = 'deduction' OR event_date <= ?) ORDER BY event_date, id""", (user_id, date_to.isoformat()))]
+           ORDER BY event_date, id""", (user_id,))]
+
+
+def _pool_since(conn: sqlite3.Connection) -> str:
+    """18.11: the day the lazy pools were reset for everyone ('' — count from the very beginning). A threshold
+    change then never recalculates the past: the pool only accrues from this day on."""
+    return app_settings.get_raw(conn, "lazy_pool_since") or ""
+
+
+def reset_lazy_pools(conn: sqlite3.Connection, actor: dict, key: str) -> str:
+    """«Сбросить копилки налога на лень» (18.11): the accumulated pools are wiped for everyone and count from
+    today on — set a new threshold first, then reset, and it applies going forward only."""
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return _pool_since(conn)
+        actor = _fresh_actor(conn, actor)
+        if not perms.can(actor, "money"):
+            raise ServiceError("Копилки сбрасывает только владелец", 403, "owner_only")
+        today = now_local().date().isoformat()
+        # app_settings.set_raw opens its own transaction — we are inside one already, so write directly
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('raw:lazy_pool_since', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (today,))
+        log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="LAZY_POOL_RESET", key=key,
+                  new={"since": today})
+    return today
 
 
 def _lazy_since(conn, user_id: int) -> str | None:
@@ -175,10 +209,11 @@ def _lazy_since(conn, user_id: int) -> str | None:
 
 def lazy_pool(conn: sqlite3.Connection, user_id: int, threshold: int, upto: date) -> int:
     """L: pieces of approved days below the threshold up to `upto`, minus what payouts took at the lazy rate.
-    Kept across weeks and months; a person with «не применять налог на лень» (threshold 0) has none."""
+    Kept across weeks and months; a person with «не применять налог на лень» (threshold 0) has none.
+    18.11: days before the owner's pool reset never count (a changed threshold must not rewrite the past)."""
     if threshold <= 0:
         return 0
-    since = _lazy_since(conn, user_id) or ""
+    since = max(_lazy_since(conn, user_id) or "", _pool_since(conn))
     accrued = conn.execute(
         f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND status IN {ACTIVE}
             AND report_state = 'approved' AND training = 0 AND fact_volume IS NOT NULL AND fact_volume < ?
@@ -215,36 +250,69 @@ def employee_view(conn: sqlite3.Connection, user_id: int, today: date) -> dict:
 
 
 def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: Rates,
-              network_id: int | None = None) -> list[dict]:
-    """The auto-calculator grid (ТЗ 11.2, step 2). Nothing is saved. `rates` are the common rates
-    (the wizard may change them for one payout); personal and network rates still apply over them."""
+              network_id: int | None = None, amounts: dict[int, int] | None = None,
+              included: set[int] | None = None) -> list[dict]:
+    """The wizard grid (18.11: the owner enters each person's amount by hand; the accountant's report rules).
+    `amounts is None` — the legacy auto mode (pieces × the rates of the day); with `amounts` the manual one:
+    entered rubles are the pay, the units for the trainers'/instructors' commission are amount / the person's rate,
+    and only the checkbox-`included` people's units count. The period's plan/fact stay as a reference.
+    `rates` are the common rates (the wizard may change them for one payout); personal rates still apply over them."""
     if date_to < date_from or (date_to - date_from).days > 92:
         raise ServiceError("Период от 1 дня до 3 месяцев", 422, "bad_range")
+    manual = amounts is not None
     book = Book.load(conn, rates.as_dict())
     people = [u for u in svc.list_users(conn) if u["account_state"] != "blocked"]
     if network_id is not None:
         people = [u for u in people if u["network_id"] == network_id]
+    # first pass — everyone's units at once: a trainer's row may come before his people's (name order)
+    units_of = {}
+    if manual:
+        for u in people:
+            own = book.user_rates(u["id"])
+            amount = int(amounts.get(u["id"]) or 0)
+            units_of[u["id"]] = round(amount / own["rate_base"], 2) if amount and own["rate_base"] else 0.0
     nets = networks.names(conn)
     led = {n["trainer_id"]: nid for nid, n in book.nets.items() if n["trainer_id"] and not n["owner_led"]}
     rows = []
     approved = _approved(conn, [u["id"] for u in svc.list_users(conn)], date_from, date_to)
+    planned = _planned(conn, [u["id"] for u in svc.list_users(conn)], date_from, date_to) if manual else {}
     for u in people:
         mine = [a for a in approved if a["user_id"] == u["id"]]
         personal = sum(a["fact_volume"] for a in mine)
         own = book.user_rates(u["id"])
-        lazy = split_lazy(personal, lazy_pool(conn, u["id"], own["lazy_threshold"], date_to), own)
-        pieces_pay = lazy["pieces_pay"]
-        team, commission, share, kind = 0, 0, [], None
-        if u["id"] in led:
-            share, kind = book.trainer_share(conn, led[u["id"]], date_from, date_to), "trainer"
-        elif perms.role_of(u) == perms.INSTRUCTOR:
-            share, kind = book.instructor_share(conn, u["id"], date_from, date_to), "instructor"
-        if share:
-            team = sum(d["volume"] for d in share)
-            commission = sum(d["amount"] for d in share)
+        pool = lazy_pool(conn, u["id"], own["lazy_threshold"], date_to)
+        amount = int(amounts.get(u["id"]) or 0) if manual else 0
+        units = units_of.get(u["id"], 0.0)
+        if manual:
+            pieces_pay, lazy_units = amount, (pool if units else 0)
+            lazy = {"lazy_units": lazy_units, "full_units": units, "lazy_before": pool, "lazy_after": pool - lazy_units,
+                    "rate_base": own["rate_base"], "rate_lazy": own["rate_lazy"]}
+            # what the shifts alone would have paid — the reference under the amount field
+            lazy["auto_pay"] = split_lazy(personal, pool, own)["pieces_pay"]
+        else:
+            lazy = split_lazy(personal, pool, own)
+            pieces_pay = lazy["pieces_pay"]
+        team, commission, share, detail = 0, 0, [], None
+        kind = None
+        if manual:
+            if u["id"] in led:
+                detail, kind = book.trainer_share_manual(led[u["id"]], units_of, included or set()), "trainer"
+            elif perms.role_of(u) == perms.INSTRUCTOR:
+                detail, kind = book.instructor_share_manual(u["id"], units_of, included or set()), "instructor"
+            if detail:
+                team, commission = detail["volume"], detail["amount"]
+        else:
+            if u["id"] in led:
+                share, kind = book.trainer_share(conn, led[u["id"]], date_from, date_to), "trainer"
+            elif perms.role_of(u) == perms.INSTRUCTOR:
+                share, kind = book.instructor_share(conn, u["id"], date_from, date_to), "instructor"
+            if share:
+                team = sum(d["volume"] for d in share)
+                commission = sum(d["amount"] for d in share)
         base = pieces_pay + commission
         money = _open_money(conn, u["id"], date_to)
-        if not (personal or team or money):
+        staffish = perms.role_of(u) in (perms.TRAINER, perms.INSTRUCTOR)
+        if not (personal or planned.get(u["id"]) or amount or team or money or staffish):
             continue
         profile = get_profile(conn, u["id"])
         rows.append({
@@ -255,11 +323,15 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             "phone": pretty_phone(profile["phone"]) if profile else None,
             "bank": profile["bank"] if profile else None,
             "recipient": profile["recipient"] if profile else None,
+            "plan_volume": planned.get(u["id"], 0),
             "personal_volume": personal,
             "team_volume": team,
+            "entered_amount": amount if manual else None,
+            "entered_units": units if manual else None,
             "pieces_pay": pieces_pay,
             "commission": commission,
-            "commission_days": share,
+            "commission_days": share,          # legacy: the per-day ladder (shift-based payouts)
+            "commission_detail": detail,        # 18.11: the manual aggregate {volume, rate, amount}
             "commission_kind": kind,  # trainer / instructor: whose ladder and which people
             "delta": book.delta(),
             "rates": own,
@@ -272,10 +344,14 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
 
 def summary(conn: sqlite3.Connection, rows: list[dict], date_from: date, date_to: date,
             network_id: int | None = None) -> dict:
-    """The owner's side (customer round B): revenue for every approved piece minus what people get."""
+    """The owner's side (customer round B): revenue for every piece minus what people get.
+    18.11: in a manual payout the pieces are the units derived from the entered amounts."""
     revenue_rate = app_settings.get_all(conn)["revenue_per_piece"]
-    scope = [u["id"] for u in svc.list_users(conn) if network_id is None or u["network_id"] == network_id]
-    pieces = sum(a["fact_volume"] for a in _approved(conn, scope, date_from, date_to))
+    if any(r.get("entered_units") is not None for r in rows):
+        pieces = round(sum(r.get("entered_units") or 0 for r in rows))
+    else:
+        scope = [u["id"] for u in svc.list_users(conn) if network_id is None or u["network_id"] == network_id]
+        pieces = sum(a["fact_volume"] for a in _approved(conn, scope, date_from, date_to))
     paid = sum(r["total"] for r in rows)
     return {
         "pieces": pieces,
@@ -291,22 +367,32 @@ def summary(conn: sqlite3.Connection, rows: list[dict], date_from: date, date_to
 
 
 def settle(base: int, money: list[dict]) -> dict:
-    """What a payout takes: bonuses add up; deductions, then fines (oldest first) are taken while they fit."""
+    """What a payout takes: bonuses add up; deductions, then fines (oldest first) are taken while they fit.
+    18.11: a fine or a deduction that doesn't fit eats everything the payout still has — the remainder of that
+    entry stays active (`partial`: settle_txs writes the smaller amount back), so nothing is counted twice."""
     bonuses = [t for t in money if t["type"] == "bonus"]
     available = base + sum(t["amount"] for t in bonuses)
-    used, carried = [t["id"] for t in bonuses], 0
+    used = [t["id"] for t in bonuses]
     taken = {"deduction": 0, "fine": 0}
+    partial: dict[int, int] = {}
+    carried = 0
     for kind in ("deduction", "fine"):
         for t in (x for x in money if x["type"] == kind):
-            if t["amount"] <= available:
+            if t["amount"] <= available and available > 0:
                 available -= t["amount"]
                 taken[kind] += t["amount"]
                 used.append(t["id"])
+            elif available > 0:
+                taken[kind] += available
+                partial[t["id"]] = t["amount"] - available
+                carried += t["amount"] - available
+                available = 0
             else:
+                partial[t["id"]] = t["amount"]
                 carried += t["amount"]
     fine_units = sum(t.get("pieces") or 0 for t in money if t["type"] == "fine" and t["id"] in used)
     return {"bonuses": sum(t["amount"] for t in bonuses), "fines": taken["fine"], "fine_units": fine_units,
-            "deductions": taken["deduction"],
+            "deductions": taken["deduction"], "partial": partial,
             "total": available, "carried_debt": carried, "tx_ids": used,
             "has_deductions": any(t["type"] == "deduction" for t in money)}
 
@@ -344,39 +430,69 @@ def _write_regular(conn, actor: dict, batch_id: int, rows: list[dict], picked: d
         conn.execute(
             """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
                    team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
-                   lazy_units, lazy_before, rate_base, rate_lazy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   lazy_units, lazy_before, rate_base, rate_lazy, entered_amount, entered_units)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (batch_id, r["user_id"], r["role"], r["network"], r["phone"], r["bank"], r["recipient"], r["personal_volume"],
              r["team_volume"], r["base_calc"], base, r["bonuses"], r["fines"], r["deductions"], r["total"],
              r["carried_debt"], r["pieces_pay"], r["commission"],
              # the pool is written off here, inside the payout's transaction — never by a preview
-             r["lazy_units"], r["lazy_before"], r["rate_base"], r["rate_lazy"]),
+             r["lazy_units"], r["lazy_before"], r["rate_base"], r["rate_lazy"],
+             r.get("entered_amount"), r.get("entered_units")),
         )
-        settle_txs(conn, batch_id, r["tx_ids"], actor)
+        settle_txs(conn, batch_id, r["tx_ids"], actor, r.get("partial") or {})
         grand += r["total"]
     return grand
 
 
-def settle_txs(conn, batch_id: int, tx_ids: list[int], actor: dict) -> None:
-    """Fines, deductions and bonuses taken by a payout: «учтён в выплате». Who approved a fine stays (§25)."""
+def settle_txs(conn, batch_id: int, tx_ids: list[int], actor: dict, partial: dict[int, int] | None = None) -> None:
+    """Fines, deductions and bonuses taken by a payout: «учтён в выплате». Who approved a fine stays (§25).
+    18.11: a partly eaten entry keeps what's left active with the smaller amount — the next payout takes the rest."""
     if tx_ids:
         conn.execute(
             f"""UPDATE financial_transactions SET status = 'offset', payout_id = ?, settled_by = ?, settled_at = ?
                 WHERE id IN ({','.join('?' * len(tx_ids))}) AND status = 'active'""",
             (batch_id, actor["telegram_id"], now_iso(), *tx_ids))
+    for tx_id, leftover in (partial or {}).items():
+        conn.execute("UPDATE financial_transactions SET amount = ? WHERE id = ? AND status = 'active'", (leftover, tx_id))
 
 
 def _check_rows(rows: list[dict], picked: dict) -> None:
     no_details = [r["name"] for r in rows if r["phone"] is None
-                  and (picked[r["user_id"]].get("base_override") or r["total"]) > 0]
+                  and (r.get("entered_amount") or picked[r["user_id"]].get("base_override") or r["total"]) > 0]
     if no_details:  # ТЗ 28.10 §7 (В21): money goes only to approved payment details
         raise ServiceError("Нет одобренных реквизитов: " + ", ".join(no_details) +
                            ". Одобрите их или уберите людей из выплаты", 409, "no_requisites")
 
 
+def _amounts_of(choices: list[dict]) -> tuple[dict[int, int] | None, set[int]]:
+    """18.11: the checkbox-included people and their hand-entered amounts. None — no choice carries the «amount»
+    key at all: the legacy auto count from the shifts (the API before 18.11; the wizard always sends amounts)."""
+    picked = {c["user_id"]: c for c in choices if c.get("include", True)}
+    if not any("amount" in c for c in choices):
+        return None, set(picked)
+    amounts: dict[int, int] = {}
+    for uid, c in picked.items():
+        v = c.get("amount")
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 10_000_000:
+            raise ServiceError("Сумма — целое число рублей", 422, "bad_amount")
+        amounts[uid] = v
+    return amounts, set(picked)
+
+
+def _require_amounts(conn: sqlite3.Connection, rows: list[dict], picked: dict[int, dict]) -> None:
+    """18.11: a ticked person with no amount, no commission and no open money would silently drop out — say so."""
+    seen = {r["user_id"] for r in rows}
+    missing = [svc.full_name(svc.get_user(conn, uid)) for uid in picked if uid not in seen]
+    if missing:
+        raise ServiceError("Укажите сумму (или снимите галочку): " + ", ".join(missing), 422, "amount_required")
+
+
 def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, date_to: date, rates: Rates,
            network_id: int | None, choices: list[dict], proof: list[str], deduction_proof: list[str], key: str) -> dict:
-    """«Зафиксировать выплату» (ТЗ 11.3): recalculated on the server; chosen people only; base may be overridden."""
+    """«Зафиксировать выплату» (ТЗ 11.3): recalculated on the server; the checkbox-chosen people with their
+    hand-entered amounts (18.11); bonuses, fines and deductions of any date settle here."""
     title = " ".join((title or "").split())[:100]
     if not title:
         raise ServiceError("Назовите выплату, например «Зарплата, октябрь 1–15»", 422, "title_required")
@@ -384,6 +500,7 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
     picked = {c["user_id"]: c for c in choices if c.get("include", True)}
     if not picked:
         raise ServiceError("Выберите хотя бы одного человека", 422, "nobody")
+    amounts, included = _amounts_of(choices)
     with transaction(conn):
         if _seen(conn, key):
             done = batch_by_key(conn, key)
@@ -393,7 +510,10 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
         actor = _fresh_actor(conn, actor)
         if not perms.can(actor, "money"):
             raise ServiceError("Выплаты фиксирует только владелец", 403, "owner_only")
-        rows = [r for r in calculate(conn, date_from, date_to, rates, network_id) if r["user_id"] in picked]
+        rows = [r for r in calculate(conn, date_from, date_to, rates, network_id, amounts, included)
+                if r["user_id"] in picked]
+        if amounts is not None:
+            _require_amounts(conn, rows, picked)
         if not rows:
             raise ServiceError("Нечего выплачивать за этот период", 409, "nothing")
         _check_rows(rows, picked)
@@ -466,12 +586,13 @@ def snapshot(conn, b: dict, actor: dict, note: str | None) -> None:
 
 
 def edit(conn: sqlite3.Connection, actor: dict, batch_id: int, choices: list[dict], key: str, note: str | None = None) -> dict:
-    """§25: the same payout, recalculated — who is in it and the base; the money taken is redone (only the current
-    deductions, each once); the previous version is kept."""
+    """§25: the same payout, recalculated — who is in it and the amounts (18.11); the money taken is redone
+    (only the current deductions, each once); the previous version is kept."""
     _check_key(key)
     picked = {c["user_id"]: c for c in choices if c.get("include", True)}
     if not picked:
         raise ServiceError("Выберите хотя бы одного человека", 422, "nobody")
+    amounts, included = _amounts_of(choices)
     with transaction(conn):
         if _seen(conn, key):
             return batch(conn, batch_id)
@@ -487,8 +608,11 @@ def edit(conn: sqlite3.Connection, actor: dict, batch_id: int, choices: list[dic
         snapshot(conn, b, actor, note)
         revert(conn, b, 1)
         date_from, date_to = date.fromisoformat(b["period_from"]), date.fromisoformat(b["period_to"])
-        rows = [r for r in calculate(conn, date_from, date_to, Rates.from_dict(json.loads(b["rates"])), b["network_id"])
+        rows = [r for r in calculate(conn, date_from, date_to, Rates.from_dict(json.loads(b["rates"])), b["network_id"],
+                                     amounts, included)
                 if r["user_id"] in picked]
+        if amounts is not None:
+            _require_amounts(conn, rows, picked)
         if not rows:
             raise ServiceError("Нечего выплачивать за этот период", 409, "nothing")
         _check_rows(rows, picked)
@@ -575,16 +699,17 @@ def history(conn: sqlite3.Connection, limit: int = 60) -> list[dict]:
 
 
 def bank_text(b: dict) -> str:
-    """Copy-paste list for the bank, grouped by bank (ТЗ 11.3 step 4)."""
+    """Copy-paste list for the bank, grouped by bank (ТЗ 11.3 step 4). 18.11: every field on its own line —
+    a long tap in Telegram copies just the phone or just the amount, never «phone — сумма» glued with a dash."""
     groups: dict[str, list[dict]] = {}
     for it in b["items"]:
         if it["total"] > 0:
             groups.setdefault(it["bank"] or "Реквизиты не указаны", []).append(it)
-    out = [f"{b['title']} ({b['period_from'][8:10]}.{b['period_from'][5:7]}–{b['period_to'][8:10]}.{b['period_to'][5:7]})"]
+    out = [f"💵 {b['title']} ({b['period_from'][8:10]}.{b['period_from'][5:7]}–{b['period_to'][8:10]}.{b['period_to'][5:7]})"]
     for bank in sorted(groups, key=lambda x: (x == "Реквизиты не указаны", x)):
         items = groups[bank]
-        out.append(f"\n{bank}:")
-        out += [f"{it['recipient'] or it['name']} — {it['phone'] or 'нет телефона'} — {it['total']} ₽" for it in items]
-        out.append(f"Итого {bank}: {sum(it['total'] for it in items)} ₽")
-    out.append(f"\nВсего к выплате: {b['total']} ₽")
+        out += ["", f"🏦 {bank} — {len(items)} чел. — {sum(it['total'] for it in items)} ₽"]
+        for it in items:
+            out += ["", it["recipient"] or it["name"], it["phone"] or "нет телефона", f"{it['total']} ₽"]
+    out += ["", f"Всего к выплате: {b['total']} ₽"]
     return "\n".join(out)

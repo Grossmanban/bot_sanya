@@ -1185,6 +1185,15 @@ export interface PayoutRow {
   rate_lazy: number | null;
   /** fine units taken by this payout (their rubles are in `fines`) */
   fine_units?: number;
+  /** 18.11: what the team PLANNED for the period — a reference next to the fact */
+  plan_volume?: number;
+  /** 18.11: the owner's hand-entered amount and the units derived from it (amount / the person's rate) */
+  entered_amount?: number | null;
+  entered_units?: number | null;
+  /** 18.11: what the shifts alone would have paid — the reference under the amount field */
+  auto_pay?: number;
+  /** 18.11: the manual commission aggregate {volume, step_rate, rate, amount} of the included people's units */
+  commission_detail?: { volume: number; step_rate: number; rate: number; amount: number } | null;
 }
 
 /** The owner's side of a payout (customer round B). */
@@ -1668,7 +1677,7 @@ export const api = {
     payouts: () => request<{ items: { id: number; title: string; period_from: string; period_to: string; total: number; people: number;
       created_at: string; product?: Product | null; status?: "processed" | "annulled"; version?: number; annul_reason?: string | null }[];
       rates: PayoutRates }>("/api/admin/payouts"),
-    editPayout: (id: number, body: { choices?: { user_id: number; include: boolean; base_override?: number | null }[];
+    editPayout: (id: number, body: { choices?: { user_id: number; include: boolean; base_override?: number | null; amount?: number | null }[];
       confirmed?: Record<number, number>; note?: string | null }, key: string) =>
       post<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}/edit`, { ...body, idempotency_key: key }),
     annulPayout: (id: number, reason: string, moneySent: boolean, key: string) =>
@@ -1677,8 +1686,12 @@ export const api = {
       post<{ task: AliceTask }>(`/api/admin/alice/${id}/delete`, { reason, idempotency_key: key }),
     payout: (id: number) => request<{ batch: PayoutBatch; bank_text: string }>(`/api/admin/payouts/${id}`),
     payoutExcel: (id: number) => post<{ ok: boolean }>(`/api/admin/payouts/${id}/excel`, {}),
-    previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates }) =>
+    previewPayout: (body: { date_from: string; date_to: string; network_id: number | null; rates: PayoutRates;
+      /** 18.11: the manual wizard — the entered amounts (user_id → ₽) and the checkbox-included people */
+      manual?: boolean; amounts?: Record<number, number>; included?: number[] }) =>
       post<{ rows: PayoutRow[]; rates: PayoutRates; summary: PayoutSummary }>("/api/admin/payouts/preview", body),
+    resetLazyPool: (key: string) =>
+      post<{ since: string }>("/api/admin/lazy-pool/reset", { idempotency_key: key }),
     setInstructor: (userId: number, instructorId: number | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/instructor`, { instructor_id: instructorId, idempotency_key: key }),
     setUserRates: (userId: number, body: { personal_rate?: number | null; clear_personal_rate?: boolean; lazy_exempt?: boolean;
@@ -1693,7 +1706,7 @@ export const api = {
         date_to: string;
         network_id: number | null;
         rates: PayoutRates;
-        choices: { user_id: number; include: boolean; base_override: number | null }[];
+        choices: { user_id: number; include: boolean; base_override: number | null; amount?: number | null }[];
         proof: string[];
         deduction_proof: string[];
       },

@@ -1837,7 +1837,13 @@ class Notifier:
                  f"1️⃣ Подтверждение перевода денег: {len(batch['proof_media'])} файл(ов)",
                  f"2️⃣ Документы по вычетам: {len(batch['deduction_media'])} файл(ов)", "", "<b>ДЕТАЛИЗАЦИЯ ПО СОТРУДНИКАМ:</b>"]
         for it in batch["items"]:
-            parts = [f"База {it['base']}"]
+            parts = []
+            if it.get("entered_units"):  # 18.11: «свои 10 шт.» / «свои 5 шт. + команда 150 шт.»
+                mine = f"свои {it['entered_units']:g} шт."
+                if it["team_volume"]:
+                    mine += f" + команда {it['team_volume']:g} шт."
+                parts.append(mine)
+            parts.append(f"База {it['base']}")
             if it["bonuses"]:
                 parts.append(f"Бонус +{it['bonuses']}")
             if it["fines"]:
@@ -1862,7 +1868,8 @@ class Notifier:
                 await self._photo_or_text(int(chat), fid, f"#выплата #вычет 2️⃣ Документы по вычетам — {escape(batch['title'])} ({i + 1})")
         await self.send_document(actor["telegram_id"], export.payout_xlsx(batch), f"vyplata_{batch['id']}.xlsx",
                                  f"Реестр выплаты «{escape(batch['title'])}»")
-        await self.send(actor["telegram_id"], f"<pre>{escape(payouts.bank_text(batch))}</pre>")
+        # 18.11: plain text, every field on its own line — a long tap copies just the phone or just the amount
+        await self.send(actor["telegram_id"], escape(payouts.bank_text(batch)))
         for it in batch["items"]:
             user = svc.get_user(self.conn, it["user_id"])
             if it["total"] > 0:

@@ -1482,6 +1482,12 @@ ALTER TABLE users ADD COLUMN can_broadcast_all INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN can_onboard INTEGER NOT NULL DEFAULT 0
 """)
 
+# 18.11, выплаты: ручная сумма от бухгалтера и штуки, пересчитанные из неё (NULL — считалось из смен, как раньше)
+MIGRATIONS.append("""
+ALTER TABLE payout_items ADD COLUMN entered_amount INTEGER;
+ALTER TABLE payout_items ADD COLUMN entered_units REAL
+""")
+
 
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]

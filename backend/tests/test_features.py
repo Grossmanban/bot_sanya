@@ -869,7 +869,10 @@ def test_payout_calculation_and_commit(conn, make_user):
     assert [t["status"] for t in finance.journal(conn, user_id=a["id"])] == ["offset", "offset", "offset"]
     assert finance.balance(conn, b["id"])["fines"] == 2040  # the debt stays for the next payout
     text = payouts.bank_text(batch)
-    assert "Сбербанк:" in text and "Анна Аня — +7 900 111-22-33 — 4420 ₽" in text and "Всего к выплате: 5420 ₽" in text
+    # 18.11: every field on its own line — the phone and the amount copy separately
+    lines = text.splitlines()
+    assert "🏦 Сбербанк — 1 чел. — 4420 ₽" in lines and "+7 900 111-22-33" in lines and "4420 ₽" in lines
+    assert "Анна Аня —" not in text and "Всего к выплате: 5420 ₽" in text
 
     from app import export
     wb = load_workbook(io.BytesIO(export.payout_xlsx(batch)))

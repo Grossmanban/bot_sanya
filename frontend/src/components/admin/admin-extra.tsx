@@ -1,8 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Archive, FileSpreadsheet, LoaderCircle, Plus, Send } from "lucide-react";
+import { Archive, FileSpreadsheet, LoaderCircle, Plus, RotateCcw, Send } from "lucide-react";
 import { toast } from "sonner";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -468,6 +472,8 @@ const RATES: { key: RateKey; label: string; unit: string }[] = [
 
 /** Piece rates (ТЗ 11.1): used by cards, stats, Excel and as defaults in the payout wizard. */
 function RatesCard({ cfg, set }: { cfg: ScheduleSettings; set: (p: Partial<ScheduleSettings>) => void }) {
+  const [resetting, setResetting] = useState(false);
+  const { busy, run } = useAction();
   return (
     <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <h2 className="font-semibold">Ставки</h2>
@@ -485,6 +491,36 @@ function RatesCard({ cfg, set }: { cfg: ScheduleSettings; set: (p: Partial<Sched
           </label>
         ))}
       </div>
+      {/* 18.11: a threshold change must not rewrite the past — wipe the pools and count from today on */}
+      <Button variant="ghost" size="sm" className="press mt-4 h-9 rounded-xl px-3 text-wait hover:bg-wait-soft hover:text-wait"
+              disabled={!!busy} onClick={() => setResetting(true)}>
+        {busy === "lazy-reset" ? <LoaderCircle className="animate-spin" /> : <RotateCcw />} Сбросить копилки налога на лень всем
+      </Button>
+      <AlertDialog open={resetting} onOpenChange={setResetting}>
+        <AlertDialogContent className="rounded-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-display">Сбросить копилки всем?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Накопленные штуки налога на лень обнулятся у всех, считать будет с сегодняшнего дня по текущему порогу.
+              Нужно после смены порога, чтобы прошлое не пересчитывалось. Действие необратимо.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="rounded-xl">Отмена</AlertDialogCancel>
+            <AlertDialogAction className="rounded-xl"
+                               onClick={async (e) => {
+                                 e.preventDefault();
+                                 try {
+                                   if (await run("lazy-reset", (k) => api.admin.resetLazyPool(k), "Копилки обнулены — считаем с сегодняшнего дня")) {
+                                     setResetting(false);
+                                   }
+                                 } catch { /* toast shown */ }
+                               }}>
+              Сбросить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

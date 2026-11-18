@@ -42,8 +42,9 @@ export function PayoutsSection() {
       <section className="rounded-3xl bg-hero p-5 text-hero-foreground shadow-lift-strong md:p-6">
         <h2 className="font-display text-xl font-semibold">Реестр выплат</h2>
         <p className="mt-1.5 text-[15px] text-hero-muted">
-          База считается по принятым отчётам с налогом на лень, тренерам — комиссия с объёма сети. Бонусы плюсуются,
-          штрафы и вычеты зачитываются, долг сверх выплаты переносится.
+          Сумму каждому указываете вы (по отчёту бухгалтера); штуки и тренерские считаются сами. План и факт за период —
+          справкой под именем. Бонусы плюсуются, штрафы и вычеты зачитываются полностью при ближайшей выплате,
+          долг сверх выплаты переносится.
         </p>
         <Button className="press mt-4 h-12 rounded-2xl bg-white px-5 text-[15px] font-semibold text-hero hover:bg-white/90"
                 disabled={!list.data} onClick={() => { tapHaptic(); setMode("new"); }}>
@@ -129,43 +130,51 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
   const [rows, setRows] = useState<PayoutRow[]>([]);
   const [summary, setSummary] = useState<PayoutSummary | null>(null);
   const [include, setInclude] = useState<Record<number, boolean>>({});
-  const [override, setOverride] = useState<Record<number, string>>({});
+  // 18.11: the owner's hand-entered amount per person (the accountant's report rules), "" — not entered yet
+  const [amounts, setAmounts] = useState<Record<number, string>>({});
   const [proof, setProof] = useState<string[]>([]);
   const [dedProof, setDedProof] = useState<string[]>([]);
   const { busy, run } = useAction();
 
+  const parsed = useMemo(() => Object.fromEntries(
+    Object.entries(amounts).filter(([, v]) => v !== "").map(([id, v]) => [Number(id), Number(v)])) as Record<number, number>,
+    [amounts]);
+
   async function calc() {
     try {
-      const res = await run("calc", () => api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates }));
+      const res = await run("calc", () => api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates,
+        manual: true, amounts: {}, included: [] }));
       if (!res) return;
       setRows(res.rows);
       setSummary(res.summary);
-      setInclude(Object.fromEntries(res.rows.map((r) => [r.user_id, r.total > 0 || r.base_calc > 0])));
-      setOverride({});
+      // «не работавшие в период — галочка снята»: only people with work or open money start ticked
+      setInclude(Object.fromEntries(res.rows.map((r) => [r.user_id,
+        !!(r.personal_volume || r.plan_volume || r.bonuses || r.fines || r.deductions || r.commission)])));
+      setAmounts({});
       setStep(2);
     } catch {
       /* toast shown */
     }
   }
 
-  // a bonus, fine or deduction added right in the grid: recalculate, keep the ticks and overrides
-  async function refresh() {
+  /** recalculate with what is entered now: the commissions and the settling come back from the server */
+  async function recalc(keepTicks = true) {
     try {
-      const res = await api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates });
+      const res = await api.admin.previewPayout({ date_from: from, date_to: to, network_id: network, rates,
+        manual: true, amounts: parsed, included: rows.filter((r) => include[r.user_id]).map((r) => r.user_id) });
       setRows(res.rows);
       setSummary(res.summary);
-      setInclude((cur) => ({ ...Object.fromEntries(res.rows.map((r) => [r.user_id, r.total > 0 || r.base_calc > 0])), ...cur }));
+      if (!keepTicks) {
+        setInclude(Object.fromEntries(res.rows.map((r) => [r.user_id,
+          !!(r.personal_volume || r.plan_volume || r.bonuses || r.fines || r.deductions || r.commission)])));
+      }
     } catch {
       /* the grid stays as it was */
     }
   }
 
-  // the server recalculates on commit; here an override is shown as base + bonuses − fines − deductions
-  const shown = (r: PayoutRow) => {
-    const o = override[r.user_id];
-    if (o === undefined || o === "") return r.total;
-    return Math.max(0, Number(o) + r.bonuses - r.fines - r.deductions);
-  };
+  // the server recalculates on commit; here the row is shown as amount + commission + bonuses − fines − deductions
+  const shown = (r: PayoutRow) => Math.max(0, (parsed[r.user_id] ?? 0) + r.commission + r.bonuses - r.fines - r.deductions);
   const picked = rows.filter((r) => include[r.user_id]);
   const total = picked.reduce((s, r) => s + shown(r), 0);
   const needsDedProof = picked.some((r) => r.deductions > 0);
@@ -175,7 +184,7 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
       const res = await run("commit", (k) => api.admin.commitPayout({
         title, date_from: from, date_to: to, network_id: network, rates,
         choices: rows.map((r) => ({ user_id: r.user_id, include: !!include[r.user_id],
-          base_override: override[r.user_id] ? Number(override[r.user_id]) : null })),
+          base_override: null, amount: amounts[r.user_id] ? Number(amounts[r.user_id]) : null })),
         proof, deduction_proof: dedProof,
       }, k), "Выплата зафиксирована");
       if (res) onClose(res.batch.id);
@@ -254,17 +263,23 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
         <>
           <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
             <div className="flex items-center justify-between px-5 pt-5 pb-3 md:px-6">
-              <h2 className="font-display text-lg font-semibold">2. Расчёт</h2>
-              <span className="text-sm text-muted-foreground">{dayMonth(from)} – {dayMonth(to)}</span>
+              <h2 className="font-display text-lg font-semibold">2. Команда и суммы</h2>
+              <button className="text-sm font-semibold text-primary underline-offset-2 hover:underline" onClick={() => recalc()}>
+                {busy === "calc" ? "Считаю…" : "Пересчитать"}
+              </button>
             </div>
+            <p className="px-5 pb-3 text-xs text-muted-foreground md:px-6">
+              {dayMonth(from)} – {dayMonth(to)} · впишите сумму каждому по отчёту бухгалтера — штуки и тренерские посчитаются сами.
+              Галочка — человек в выплате, без галочки — мимо. {summary ? `План/факт за период — справка под именем.` : ""}
+            </p>
             {rows.length === 0 ? (
-              <p className="px-5 pb-5 text-sm text-muted-foreground md:px-6">За период нет принятых отчётов и начислений.</p>
+              <p className="px-5 pb-5 text-sm text-muted-foreground md:px-6">За период нет людей: ни планов, ни начислений.</p>
             ) : (
               <ul className="divide-y border-t">{rows.map((r) => (
                 <PayoutRowCard key={r.user_id} row={r} on={!!include[r.user_id]} total={shown(r)}
-                               override={override[r.user_id] ?? ""}
+                               amount={amounts[r.user_id] ?? ""}
                                onToggle={() => setInclude({ ...include, [r.user_id]: !include[r.user_id] })}
-                               onOverride={(v) => setOverride({ ...override, [r.user_id]: v })} onMoney={refresh} />
+                               onAmount={(v) => setAmounts({ ...amounts, [r.user_id]: v })} onMoney={() => recalc()} />
               ))}</ul>
             )}
           </section>
@@ -305,44 +320,40 @@ function Wizard({ defaults, onClose }: { defaults: PayoutRates; onClose: (id?: n
   );
 }
 
-function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney }: {
-  row: PayoutRow; on: boolean; total: number; override: string; onToggle: () => void; onOverride: (v: string) => void;
+function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: {
+  row: PayoutRow; on: boolean; total: number; amount: string; onToggle: () => void; onAmount: (v: string) => void;
   onMoney: () => void;
 }) {
   const [adding, setAdding] = useState(false);
-  const steps = [...new Set((row.commission_days ?? []).map((d) => d.rate))];
+  // the units live as the owner types: amount / the person's rate (personal over the common one)
+  const rate = row.rate_base ?? 0;
+  const units = amount && rate > 0 ? Number((Number(amount) / rate).toFixed(2)) : 0;
+  const detail = row.commission_detail;
   return (
-    <li className={cn("px-5 py-4 md:px-6", !on && "opacity-50")}>
+    <li className={cn("px-5 py-4 md:px-6", on ? "bg-primary/5" : "opacity-50")}>
       <div className="flex items-start gap-3">
-        <button onClick={onToggle} aria-label={on ? "Убрать из реестра" : "Включить в реестр"}
-                className={cn("press mt-0.5 grid size-6 shrink-0 place-items-center rounded-md border-2", on ? "border-primary bg-primary text-primary-foreground" : "border-border")}>
+        <button onClick={onToggle} aria-label={on ? "Исключить из выплаты" : "Включить в выплату"}
+                className={cn("press mt-1 grid size-6 shrink-0 place-items-center rounded-md border-2", on ? "border-primary bg-primary text-primary-foreground" : "border-border")}>
           {on && <Check className="size-4" />}
         </button>
         <div className="min-w-0 flex-1">
           <p className="truncate font-semibold">{row.name}</p>
           <p className="text-xs text-muted-foreground">
-            {ROLE_TITLES[row.role]}{row.network ? ` · ${row.network}` : ""} · {row.personal_volume} шт.
-            {row.team_volume ? ` · ${row.commission_kind === "instructor" ? "его люди" : "сеть"} ${row.team_volume} шт.` : ""}
+            {ROLE_TITLES[row.role]}{row.network ? ` · ${row.network}` : ""}
+            {(row.plan_volume || row.personal_volume) ? ` · за период: план ${row.plan_volume ?? 0} / факт ${row.personal_volume} шт.` : ""}
           </p>
           <p className={cn("text-xs", row.bank ? "text-muted-foreground" : "font-semibold text-wait")}>
             {row.bank ? `${row.bank}, ${row.phone}` : "Реквизиты не заполнены"}
           </p>
-          {(row.pieces_pay > 0 || row.commission > 0) && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {row.pieces_pay > 0 && (
-                <>
-                  За штуки {rub(row.pieces_pay)}
-                  {row.rate_base != null && ` (${row.full_units ?? row.personal_volume - row.lazy_units} × ${row.rate_base} ₽`}
-                  {row.rate_base != null && row.lazy_units > 0 && ` + ${row.lazy_units} × ${row.rate_lazy} ₽ налог на лень`}
-                  {row.rate_base != null && ")"}
-                </>
-              )}
-              {row.pieces_pay > 0 && row.commission > 0 && " · "}
-              {row.commission > 0 && (
-                <span className="font-semibold text-foreground">
-                  {row.commission_kind === "instructor" ? "инструкторские" : "тренерские"} {rub(row.commission)} ({row.team_volume} шт. по {steps.join("/")} ₽)
-                </span>
-              )}
+          {!!row.auto_pay && (
+            <p className="text-xs text-muted-foreground">Расчёт по отчётам за период: {rub(row.auto_pay)} — справка, платит ваша сумма.</p>
+          )}
+          {detail && detail.volume > 0 && (
+            <p className="mt-0.5 text-xs">
+              <span className="font-semibold text-foreground">
+                {row.commission_kind === "instructor" ? "Его люди" : "Команда"}: {detail.volume} шт. × {detail.rate} ₽ = {rub(detail.amount)}
+              </span>{" "}
+              <span className="text-muted-foreground">(лестница {detail.step_rate} ₽, платим в пределах {row.delta} ₽ за шт.)</span>
             </p>
           )}
           {!!row.commission_days?.length && <CommissionDays row={row} />}
@@ -350,20 +361,21 @@ function PayoutRowCard({ row, on, total, override, onToggle, onOverride, onMoney
         <span className="font-display text-lg font-semibold tabular">{rub(total)}</span>
       </div>
       <div className="mt-3 grid grid-cols-4 gap-2 pl-9 text-xs">
-        <label className="space-y-1">
-          <span className="text-muted-foreground">База</span>
-          <input inputMode="numeric" placeholder={String(row.base_calc)} value={override}
-                 onChange={(e) => onOverride(e.target.value.replace(/\D/g, "").slice(0, 8))}
-                 className="h-9 w-full rounded-lg border-0 bg-muted px-2 text-sm tabular outline-none focus:ring-2 focus:ring-ring/25" />
+        <label className="col-span-2 space-y-1">
+          <span className="text-muted-foreground">Сумма ему, ₽</span>
+          <input inputMode="numeric" placeholder="впишите" value={amount}
+                 onChange={(e) => onAmount(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                 className="h-9 w-full rounded-lg border-0 bg-card px-2 text-sm font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
         </label>
         <Money label="Бонусы" value={row.bonuses} sign="+" tone="text-go" />
         <Money label="Штрафы" value={row.fines} sign="−" tone="text-cancel" />
         <Money label="Вычеты" value={row.deductions} sign="−" tone="text-final" />
+        {!!units && <p className="col-span-4 text-muted-foreground">≈ {units} шт. по {rate} ₽ — уйдёт в «команду» тренера.</p>}
       </div>
       {!!row.lazy_before && (
         <p className="mt-2 pl-9 text-xs text-muted-foreground">
-          Копилка налога на лень: <span className="font-semibold text-foreground tabular">{row.lazy_before} → {row.lazy_after ?? row.lazy_before - row.lazy_units} шт.</span>
-          {" "}— спишется только при фиксации выплаты.
+          Копилка налога на лень: <span className="font-semibold text-foreground tabular">{row.lazy_before} шт.</span>
+          {" "}— спишется при фиксации выплаты{units ? ` (вместе с этими ${units} шт.)` : ""}.
         </p>
       )}
       {!!row.fine_units && (
@@ -584,9 +596,10 @@ function BatchView({ id, onBack }: { id: number; onBack: () => void }) {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{it.recipient ?? it.name}</span>
                   <span className="block text-xs text-muted-foreground">
-                    {it.phone ?? "нет телефона"} · база {rub(it.base)}{it.bonuses ? ` +${rub(it.bonuses)}` : ""}
-                    {it.fines ? ` −${rub(it.fines)}` : ""}{it.deductions ? ` −${rub(it.deductions)} вычет` : ""}
-                    {it.lazy_units ? ` · налог на лень ${it.lazy_units} шт. по ${it.rate_lazy} ₽` : ""}
+                    {it.phone ?? "нет телефона"}{it.entered_units ? ` · свои ${it.entered_units} шт.` : ""}
+                    {it.team_volume ? ` + команда ${it.team_volume} шт.` : ""}
+                    {it.bonuses ? ` · +${rub(it.bonuses)}` : ""}{it.fines ? ` · −${rub(it.fines)}` : ""}
+                    {it.deductions ? ` · −${rub(it.deductions)} вычет` : ""}
                   </span>
                 </span>
                 <span className="font-display font-semibold tabular">{rub(it.total)}</span>
@@ -610,14 +623,16 @@ function groupByBank(b: PayoutBatch | undefined) {
 }
 
 
-/** ТЗ 28.10 §25: the same payout recalculated — who is in it and their base; money is taken again once. */
+/** ТЗ 28.10 §25 + 18.11: the same payout recalculated — who is in it and their amounts; money is taken again once. */
 function EditPeople({ b, onDone }: { b: PayoutBatch; onDone: (res?: { batch: PayoutBatch; bank_text: string }) => void }) {
-  const rows = useLoad(() => api.admin.previewPayout({ date_from: b.period_from, date_to: b.period_to, network_id: b.network_id ?? null,
-    rates: b.rates }), [b.id]);
   const inBatch = new Map(b.items.map((i) => [i.user_id, i]));
+  const included = b.items.map((i) => i.user_id);
+  const rows = useLoad(() => api.admin.previewPayout({ date_from: b.period_from, date_to: b.period_to, network_id: b.network_id ?? null,
+    rates: b.rates, manual: true, amounts: Object.fromEntries(b.items.filter((i) => i.entered_amount != null)
+      .map((i) => [i.user_id, i.entered_amount as number])), included }), [b.id]);
   const [picked, setPicked] = useState<Record<number, boolean>>(() => Object.fromEntries(b.items.map((i) => [i.user_id, true])));
-  const [base, setBase] = useState<Record<number, string>>(
-    () => Object.fromEntries(b.items.filter((i) => i.base !== i.base_calc).map((i) => [i.user_id, String(i.base)])));
+  const [amounts, setAmounts] = useState<Record<number, string>>(
+    () => Object.fromEntries(b.items.map((i) => [i.user_id, i.entered_amount != null ? String(i.entered_amount) : ""])));
   const [note, setNote] = useState("");
   const { busy, run } = useAction();
   if (!rows.data) return <Skeleton className="h-40 rounded-3xl" />;
@@ -627,7 +642,8 @@ function EditPeople({ b, onDone }: { b: PayoutBatch; onDone: (res?: { batch: Pay
     <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
       <h3 className="font-semibold">Изменить выплату</h3>
       <p className="text-sm text-muted-foreground">
-        Пересчёт той же выплаты: дубликата не будет, прежняя версия сохранится. Штрафы и вычеты удерживаются заново — по одному разу.
+        Пересчёт той же выплаты: дубликата не будет, прежняя версия сохранится. Суммы предзаполнены как в зафиксированной версии —
+        правьте что нужно. Штрафы и вычеты удерживаются заново — по одному разу.
       </p>
       <ul className="divide-y">
         {people.map((p) => (
@@ -635,8 +651,8 @@ function EditPeople({ b, onDone }: { b: PayoutBatch; onDone: (res?: { batch: Pay
             <input type="checkbox" className="size-5" checked={!!picked[p.user_id]}
                    onChange={(e) => setPicked({ ...picked, [p.user_id]: e.target.checked })} />
             <span className="min-w-0 flex-1 text-sm">{p.name}{inBatch.has(p.user_id) ? "" : " · нет в выплате"}</span>
-            <input inputMode="numeric" placeholder="база авто" className="h-9 w-28 rounded-lg border-0 bg-muted px-2 text-right text-sm tabular outline-none"
-                   value={base[p.user_id] ?? ""} onChange={(e) => setBase({ ...base, [p.user_id]: e.target.value.replace(/\D/g, "").slice(0, 8) })} />
+            <input inputMode="numeric" placeholder="сумма, ₽" className="h-9 w-28 rounded-lg border-0 bg-muted px-2 text-right text-sm tabular outline-none"
+                   value={amounts[p.user_id] ?? ""} onChange={(e) => setAmounts({ ...amounts, [p.user_id]: e.target.value.replace(/\D/g, "").slice(0, 8) })} />
           </li>
         ))}
       </ul>
@@ -646,7 +662,10 @@ function EditPeople({ b, onDone }: { b: PayoutBatch; onDone: (res?: { batch: Pay
                 try {
                   const res = await run("edit", (k) => api.admin.editPayout(b.id, {
                     choices: people.map((p) => ({ user_id: p.user_id, include: !!picked[p.user_id],
-                      base_override: base[p.user_id] ? Number(base[p.user_id]) : null })), note: note.trim() || null }, k),
+                      base_override: null,
+                      // the amount key only when entered: an edit without sums recalculates the old (auto) way
+                      ...(amounts[p.user_id] ? { amount: Number(amounts[p.user_id]) } : {}) })),
+                    note: note.trim() || null }, k),
                   "Выплата пересчитана — новая версия");
                   onDone(res);
                 } catch { /* toast shown */ }

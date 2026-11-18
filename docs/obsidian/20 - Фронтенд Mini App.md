@@ -36,7 +36,8 @@ goals, events) · **Связь и настройки** (broadcast, points, netwo
 Крупные компоненты: `team-section.tsx` (карточка человека: роли, состояние, ставки, доступ, продукты, методички, профиль,
 «Личные разрешения» — тумблеры «Рассылка всем» и «Онбординг без админа» для employee/trainer/instructor, capability `grants`, 18.11),
 `onboarding-section.tsx`, `broadcast-section.tsx` (+ `rich-editor.tsx` — виз. редактор HTML), `alice-admin.tsx`,
-`payouts-section.tsx` (мастер выплат), `money.tsx`/`finance-section.tsx` (журнал, решения), `reports.tsx`, `events-admin.tsx`,
+`payouts-section.tsx` (мастер выплат; шаг 2 «Команда и суммы» (18.11): галочки-подсветка, пустые поля сумм,
+«≈ N шт.» и справка план/факт, строка «Команда: N шт. × R ₽», «Пересчитать»), `money.tsx`/`finance-section.tsx` (журнал, решения), `reports.tsx`, `events-admin.tsx`,
 `groups-section.tsx`, `access-section.tsx` (инвайты, попытки), `networks-section.tsx`, `templates-section.tsx` (причины/тексты),
 `day-actual-section.tsx`, `admin-shift-sheet.tsx` (правка смены), `shortfall.tsx`, `admin-extra.tsx` (точки, настройки), `violations-section.tsx`.
 
@@ -56,3 +57,4 @@ goals, events) · **Связь и настройки** (broadcast, points, netwo
 
 - 2026-11-18 — страница создана (коммит `78c73da`).
 - 2026-11-18 — «Команда»: блок «Личные разрешения» (рассылка всем / онбординг без админа); вкладка «Админ» открывается и держателю гранта (`isStaff`).
+- 2026-11-18 — мастер выплат: шаг «Команда и суммы» (ручные суммы, галочки, справки, «Пересчитать»); «Настройки → Ставки»: сброс копилок налога на лень.

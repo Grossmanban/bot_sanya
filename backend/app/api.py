@@ -209,12 +209,18 @@ class PayoutPreview(BaseModel):
     date_to: str
     network_id: int | None = None
     rates: PayoutRates = PayoutRates()
+    # 18.11: the manual wizard — the entered amounts (user_id → ₽) and the checkbox-included people.
+    # manual=False (the API before 18.11): the auto count from the shifts.
+    manual: bool = False
+    amounts: dict[str, int] = {}
+    included: list[int] = []
 
 
 class PayoutChoice(BaseModel):
     user_id: int
     include: bool = True
     base_override: int | None = None
+    amount: int | None = None
 
 
 class PayoutCommit(PayoutPreview):
@@ -649,6 +655,10 @@ class DecideBody(BaseModel):
 
 class AllowBody(BaseModel):
     allow: bool
+    idempotency_key: str
+
+
+class ResetBody(BaseModel):
     idempotency_key: str
 
 
@@ -2703,9 +2713,18 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     async def admin_payout_preview(body: PayoutPreview, _: dict = Depends(staff("money"))):
         rates = payouts.Rates.from_dict(body.rates.model_dump())
         d_from, d_to = svc.parse_date(body.date_from), svc.parse_date(body.date_to)
-        rows = payouts.calculate(conn, d_from, d_to, rates, body.network_id)
+        # 18.11: the wizard's hand-entered amounts; JSON keys are strings → int user ids
+        amounts = {int(uid): rub for uid, rub in body.amounts.items()} if body.manual else None
+        included = set(body.included) if body.manual else None
+        rows = payouts.calculate(conn, d_from, d_to, rates, body.network_id, amounts, included)
         return {"rows": [{k: v for k, v in r.items() if k != "tx_ids"} for r in rows], "rates": rates.as_dict(),
                 "summary": payouts.summary(conn, rows, d_from, d_to, body.network_id)}
+
+    @api.post("/admin/lazy-pool/reset")
+    async def admin_lazy_pool_reset(body: ResetBody, owner: dict = Depends(staff("money"))):
+        """18.11: wipe everyone's accumulated «налог на лень» pools and count from today on."""
+        since = payouts.reset_lazy_pools(conn, owner, body.idempotency_key)
+        return {"since": since}
 
     @api.post("/admin/payouts")
     async def admin_payout_commit(body: PayoutCommit, owner: dict = Depends(staff("money"))):

@@ -200,11 +200,45 @@ class Book:
         if own is not None:
             return min(own, self.delta())
         if net["ladder_period"] == "week":
-            monday = day - timedelta(days=day.weekday())
+            monday = day - timedelta(days=date.weekday())
             week = self.trainer_share(conn, network_id, monday, monday + timedelta(days=6))
             return min(step_rate(net["steps"], week[0]["step_volume"] if week else 0, self.common["trainer_commission"]),
                        self.delta())
         return min(step_rate(net["steps"], 0, self.common["trainer_commission"]), self.delta())
+
+    # ------------------------------------------------------------ manual payouts (18.11)
+
+    def trainer_share_manual(self, network_id: int, units_of: dict[int, float], included: set[int]) -> dict | None:
+        """The trainer's share of the hand-entered units (a manual payout has no days — one aggregate row).
+        units_of: user_id → the units derived from the owner's amount; only the checkbox-included people count."""
+        net = self.nets.get(network_id)
+        if net is None or not net["trainer_id"] or net["owner_led"]:
+            return None
+        team = [uid for uid, u in self.users.items() if u["network_id"] == network_id and uid in included
+                and (uid != net["trainer_id"] or net["ladder_counts_trainer"])]
+        volume = sum(units_of.get(uid, 0) for uid in team)
+        if volume <= 0:
+            return None
+        own = (self.users.get(net["trainer_id"]) or {}).get("personal_commission")
+        step = own if own is not None else step_rate(net["steps"], volume, self.common["trainer_commission"])
+        rate = min(step, self.delta())
+        return {"volume": volume, "step_rate": step, "rate": rate, "amount": int(round(volume * rate))}
+
+    def instructor_share_manual(self, instructor_id: int, units_of: dict[int, float], included: set[int]) -> dict | None:
+        """The instructor's share of the hand-entered units of their included people — the same aggregate,
+        what is left of the delta after the trainer's rate for the same volume."""
+        me = self.users.get(instructor_id)
+        if me is None or me["role"] != perms.INSTRUCTOR or me["network_id"] not in self.nets:
+            return None
+        net = self.nets[me["network_id"]]
+        volume = sum(units_of.get(uid, 0) for uid in self.instructor_people(instructor_id) if uid in included)
+        if volume <= 0:
+            return None
+        own = me.get("personal_commission")
+        trainer = self.trainer_share_manual(net["id"], units_of, included)
+        step = own if own is not None else step_rate(net["isteps"], volume, self.common["instructor_commission"])
+        rate = max(0, min(step, self.delta() - (trainer["rate"] if trainer else 0)))
+        return {"volume": volume, "step_rate": step, "rate": rate, "amount": int(round(volume * rate))}
 
 
 def for_user(conn: sqlite3.Connection, user_id: int) -> dict:
