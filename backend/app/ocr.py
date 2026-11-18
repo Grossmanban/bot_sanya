@@ -103,27 +103,26 @@ async def _oc_request(method: str, path: str, body: dict | None = None) -> tuple
 
 
 def _assistant_text(messages: list) -> str:
-    """The last assistant reply's text parts of the session's message list."""
+    """The assistant replies' text parts of the session's message list (flat: {type, content[]})."""
     texts = []
     for msg in messages or []:
-        info = msg.get("info") or {}
-        if info.get("type") != "assistant" and info.get("role") != "assistant":
+        if msg.get("type") != "assistant":
             continue
-        texts += [p.get("text", "") for p in (msg.get("parts") or []) if p.get("type") == "text"]
+        texts += [p.get("text", "") for p in (msg.get("content") or []) if p.get("type") == "text"]
     return "\n".join(t for t in texts if t)
 
 
 async def _ask_opencode(data: bytes, mime: str) -> str:
     """A throw-away session: attach the photo, ask, poll for the answer, delete the session."""
     status, made = await _oc_request("POST", "/api/session", {})
-    if status != 200 or not isinstance(made, dict) or "id" not in made:
+    session_id = (made or {}).get("data", {}).get("id") if isinstance(made, dict) else None
+    if status != 200 or not session_id:
         raise ServiceError(f"opencode не создал сессию (HTTP {status})", 502, "ocr_error")
-    session_id = made["id"]
     try:
         provider, _, model = settings.ocr_model.partition("/")
         if provider and model:
             await _oc_request("POST", f"/api/session/{session_id}/model",
-                              {"model": {"providerID": provider, "modelID": model}})
+                              {"model": {"providerID": provider, "id": model}})
         status, _ = await _oc_request("POST", f"/api/session/{session_id}/prompt", {
             "text": PROMPT,
             "files": [{"uri": f"data:{mime};base64,{base64.b64encode(data).decode()}"}],

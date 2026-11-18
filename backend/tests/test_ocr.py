@@ -94,7 +94,7 @@ def test_opencode_transport_makes_a_session_polls_and_cleans_up(monkeypatch):
     async def fake_oc_request(method, path, body=None):
         calls.append((method, path))
         if (method, path) == ("POST", "/api/session"):
-            return 200, {"id": "ses_1"}
+            return 200, {"data": {"id": "ses_1"}}
         if path.endswith("/model"):
             return 200, {}
         if path.endswith("/prompt"):
@@ -103,9 +103,13 @@ def test_opencode_transport_makes_a_session_polls_and_cleans_up(monkeypatch):
             return 200, {"data": {"id": "msg_1"}}
         if path.endswith("/message"):
             if len([c for c in calls if c[1].endswith("/message")]) == 1:  # the first poll: nothing yet
-                return 200, {"data": [{"info": {"type": "user"}, "parts": [{"type": "text", "text": "вопрос"}]}]}
-            return 200, {"data": [{"info": {"type": "assistant"},
-                                   "parts": [{"type": "text", "text": fake_reply([{"name": "X Y", "amount": 1}])}]}]}
+                return 200, {"data": [{"type": "user", "text": "вопрос",
+                                       "files": [{"data": "…", "mime": "image/png", "source": {"type": "inline"}}]}]}
+            return 200, {"data": [
+                {"type": "model-switched", "model": {"id": "nemotron-vl", "providerID": "opencode"}},
+                {"type": "assistant", "content": [
+                    {"type": "reasoning", "text": "думает…"},
+                    {"type": "text", "text": fake_reply([{"name": "X Y", "amount": 1}])}]}]}
         return 200, {}
 
     monkeypatch.setattr(ocr, "_oc_request", fake_oc_request)
