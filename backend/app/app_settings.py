@@ -9,6 +9,9 @@ from .services import ServiceError
 
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
+# 19.11: how often the grouped staff notifications («Сводка») may flush
+DIGEST_EVERY = (15, 30, 60, 120, 180, 360, 720, 1440)
+
 # key -> (default, kind); kind is "bool", "time", "weekday" (0 = Monday), "minutes" (0–240), "days" (0–7),
 # "lead" (minutes before a deadline, 0–720) or "choice:<option>|<option>"
 SCHEMA: dict[str, tuple[str, str]] = {
@@ -72,6 +75,15 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "show_colleague_names": ("1", "bool"),
     # ТЗ №22: finished goals and events leave the feed for «Архив» after this many days (0 — at once)
     "feed_hide_after_days": ("7", "count"),
+    # 19.11: service notices to managers («встал в график», «взял выходной»…) may be grouped into one digest
+    # per chat instead of pinging every time; «без звука» sends them silently; «тихие часы» hold the digest
+    # overnight and it comes when they end
+    "staff_digest_enabled": ("0", "bool"),
+    "staff_digest_every_min": ("60", "digest_every"),
+    "staff_digest_silent": ("0", "bool"),
+    "staff_digest_quiet": ("1", "bool"),
+    "staff_digest_quiet_from": ("22:00", "time"),
+    "staff_digest_quiet_to": ("09:00", "time"),
     "weekly_report_enabled": ("1", "bool"),
     "weekly_report_time": ("10:00", "time"),
     "backup_enabled": ("1", "bool"),
@@ -82,7 +94,7 @@ SCHEMA: dict[str, tuple[str, str]] = {
 def _parse(kind: str, raw: str):
     if kind == "bool":
         return raw == "1"
-    if kind in ("weekday", "minutes", "lead", "rub", "count", "days", "ttl"):
+    if kind in ("weekday", "minutes", "lead", "rub", "count", "days", "ttl", "digest_every"):
         return int(raw)
     return raw
 
@@ -122,6 +134,10 @@ def update(conn: sqlite3.Connection, changes: dict) -> dict:
         elif kind == "ttl":
             if isinstance(value, bool) or not isinstance(value, int) or not 5 <= value <= 10_080:
                 raise ServiceError("Срок ссылки — от 5 минут до 7 дней", 422, "bad_setting")
+            raw = str(value)
+        elif kind == "digest_every":
+            if isinstance(value, bool) or not isinstance(value, int) or value not in DIGEST_EVERY:
+                raise ServiceError("Выберите период из списка", 422, "bad_setting")
             raw = str(value)
         elif kind.startswith("choice:"):
             if value not in kind[7:].split("|"):

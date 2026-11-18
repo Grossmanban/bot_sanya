@@ -262,6 +262,23 @@ def edited_text(user: dict, shift: dict, old: dict) -> str:
     )
 
 
+def schedule_line(event: str, user: dict, shift: dict, old: dict | None = None) -> str:
+    """One compact line about a schedule change — for the grouped digest (19.11): the full versions above
+    are four lines each, ten of them would bury the chat."""
+    day = ddmm_wd(_day(shift))
+    place = f"«{escape(shift['location'] or '')}»"
+    if event == "SHIFT_CREATED":
+        return f"🆕 {who(user)} встал(а) в график {day}: {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт., {place}"
+    if event == "SHIFT_CANCELLED":
+        return f"❌ {who(user)} взял(а) выходной {day} (было {shift['start_time']}–{shift['end_time']}, {place})"
+    if event == "SHIFT_RESTORED":
+        return f"♻️ {who(user)} вернулся в график {day}: {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт., {place}"
+    if event == "SHIFT_EDITED_BY_USER" and old:
+        return (f"✏️ {handle(user)} изменил смену {day}: было {old['start_time']}–{old['end_time']}, {old['volume']} шт. — "
+                f"стало {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт.")
+    return ""
+
+
 def admin_edited_text(admin: dict, user: dict, shift: dict, reason: str) -> str:
     if shift.get("status") == "removed":
         what = "удалил запись"
@@ -487,7 +504,7 @@ class Notifier:
 
     async def send(
         self, chat_id: int, text: str, markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
-        force: bool = False,
+        force: bool = False, silent: bool = False,
     ) -> bool:
         if not force and self.muted(chat_id):
             log.info("[muted → %s] blocked person", chat_id)
@@ -495,9 +512,11 @@ class Notifier:
         if self.bot is None:
             log.info("[notify → %s] %s", chat_id, text)
             return False
+        # the silent flag is passed only when set: keep the plain call for the usual path
+        quiet = {"disable_notification": True} if silent else {}
         try:
             await self._retry(lambda: self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML",
-                                                            disable_web_page_preview=True))
+                                                            disable_web_page_preview=True, **quiet))
             return True
         except TelegramAPIError as exc:
             # user blocked the bot, chat not found, etc. — keep going for the other recipients
@@ -1058,13 +1077,17 @@ class Notifier:
     # ------------------------------------------------------------ profiles and payment details (ТЗ 28.10 §7)
 
     async def profile_requested(self, req: dict) -> None:
+        from . import digest
+
         what = "профиля" if req["kind"] == "profile" else "реквизитов для выплат"
         user = svc.get_user(self.conn, req["user_id"])
-        text = (f"📝 <b>Заявка на изменение {what}</b>\n{who(user)}\n"
-                "Проверьте и одобрите или отклоните с причиной — «Команда» → «Изменения профилей».")
+        name, place = who(user), "«Команда» → «Изменения профилей»"
         chats = svc.owner_telegram_ids() if req["kind"] == "payment" else svc.admin_telegram_ids(self.conn)
-        for chat in chats:  # payment details — owners only (В20)
-            await self.send(chat, text, _open_app())
+        if digest.on(self.conn):  # the digest carries the line without the button (19.11)
+            await self.staff_notice(chats, f"📝 {name}: заявка на изменение {what} — {place}", "staff")
+            return
+        await self.staff_notice(chats, f"📝 <b>Заявка на изменение {what}</b>\n{name}\n"
+                                       f"Проверьте и одобрите или отклоните с причиной — {place}.", "staff", _open_app())
 
     async def profile_decided(self, req: dict) -> None:
         what = "Профиль" if req["kind"] == "profile" else "Реквизиты для выплат"
@@ -1086,8 +1109,16 @@ class Notifier:
         return sent
 
     async def finish_requested(self, app: dict) -> None:
-        await self.to_onboarding(f"🎯 <b>{escape(app['full_name'])}</b>: тренер отметил, что стажировка завершена. "
-                                 "Ожидает проверки администратора — «Онбординг» → «Принять в команду».", _open_admin())
+        from . import digest
+
+        name = escape(app["full_name"])
+        if digest.on(self.conn):
+            await self.to_onboarding(f"🎯 {name}: тренер отметил стажировку завершённой — "
+                                     "ждёт проверки («Онбординг» → «Принять в команду»)", category="onboarding")
+            return
+        await self.to_onboarding(f"🎯 <b>{name}</b>: тренер отметил, что стажировка завершена. "
+                                 "Ожидает проверки администратора — «Онбординг» → «Принять в команду».",
+                                 _open_admin(), category="onboarding")
 
     async def group_invite_button(self, user: dict, kind: str, inv: dict, text: str) -> bool:
         """§6: a personal invitation with a button (the link only sends a join request — the bot approves it for
@@ -1154,9 +1185,15 @@ class Notifier:
                         "как все сотрудники — прогресс виден на главном экране.", _open_schedule())
 
     async def stage_reached(self, app: dict) -> None:
+        from . import digest
+
         what = "набрал(а) стажировку" if app["stage"] == 1 else "отработал(а) второй этап"
-        await self.to_admins(f"🎯 <b>{escape(app['full_name'])}</b> {what}: {app['units']} из {app['target']} шт. "
-                             "Проверьте и подтвердите в «Онбординг».", _open_admin())
+        name, units = escape(app["full_name"]), f"{app['units']} из {app['target']} шт."
+        if digest.on(self.conn):
+            await self.to_admins(f"🎯 {name} {what}: {units} — подтвердите в «Онбординг»", category="onboarding")
+            return
+        await self.to_admins(f"🎯 <b>{name}</b> {what}: {units} Проверьте и подтвердите в «Онбординг».",
+                             _open_admin(), category="onboarding")
 
     async def stage_confirmed(self, app: dict, stage: int, tx: dict | None, reached: int | None = None) -> None:
         """`reached` — what the person had when staff checked; a different `counted` is explained to them."""
@@ -1196,51 +1233,100 @@ class Notifier:
                           (int(ok), None if ok else "send failed", cur.lastrowid))
         return ok
 
-    async def to_admins(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None):
-        for admin_id in svc.admin_telegram_ids(self.conn):
-            if admin_id != exclude:
-                await self.send(admin_id, text, markup)
+    async def staff_notice(self, chats: list[int], text: str, category: str,
+                           markup: InlineKeyboardMarkup | None = None) -> None:
+        """A service notice to managers (informational — cards with decision buttons never come here):
+        when «Группировать в сводку» is on it is queued for the digest (19.11), otherwise it goes right
+        away — without sound if «Без звука» is set."""
+        from . import digest
 
-    async def to_onboarding(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None):
-        """Owners, admins and the personal onboarding grants (18.11) — they decide questionnaires and training."""
-        for chat in svc.onboarding_telegram_ids(self.conn):
-            if chat != exclude:
+        chats = list(dict.fromkeys(chats))
+        if markup is None and digest.on(self.conn):
+            for chat in chats:
+                digest.queue(self.conn, chat, category, text)
+            return
+        quiet = markup is None and digest.silent(self.conn)
+        for chat in chats:
+            if quiet:
+                await self.send(chat, text, markup, silent=True)
+            else:
                 await self.send(chat, text, markup)
 
+    async def to_admins(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None,
+                        category: str | None = None):
+        """With `category` (informational notices only) the digest settings are honoured (19.11)."""
+        chats = [c for c in svc.admin_telegram_ids(self.conn) if c != exclude]
+        if category:
+            await self.staff_notice(chats, text, category, markup)
+            return
+        for chat in chats:
+            await self.send(chat, text, markup)
+
+    async def to_onboarding(self, text: str, markup: InlineKeyboardMarkup | None = None, exclude: int | None = None,
+                            category: str | None = None):
+        """Owners, admins and the personal onboarding grants (18.11) — they decide questionnaires and training."""
+        chats = [c for c in svc.onboarding_telegram_ids(self.conn) if c != exclude]
+        if category:
+            await self.staff_notice(chats, text, category, markup)
+            return
+        for chat in chats:
+            await self.send(chat, text, markup)
+
     async def to_managers(self, user: dict, text: str, markup: InlineKeyboardMarkup | None = None,
-                          exclude: int | None = None, trainer_buttons: bool = True) -> None:
-        """Owners, admins, the trainer of the person's network (ТЗ модуль 8) and their instructor (ТЗ 27.10 §23)."""
+                          exclude: int | None = None, trainer_buttons: bool = True, category: str | None = None) -> None:
+        """Owners, admins, the trainer of the person's network (ТЗ модуль 8) and their instructor (ТЗ 27.10 §23).
+        Informational notices (`category`, never with buttons) honour the digest settings (19.11)."""
         from . import networks
 
-        await self.to_admins(text, markup, exclude)
         admins = svc.admin_telegram_ids(self.conn)
-        for lead in (networks.trainer_of(self.conn, user), networks.instructor_of(self.conn, user)):
-            if lead and lead["telegram_id"] != exclude and lead["telegram_id"] not in admins:
-                await self.send(lead["telegram_id"], text, markup if trainer_buttons else None)
+        leads = [l["telegram_id"] for l in (networks.trainer_of(self.conn, user), networks.instructor_of(self.conn, user))
+                 if l and l["telegram_id"] != exclude and l["telegram_id"] not in admins]
+        if category and markup is None:
+            await self.staff_notice([c for c in admins if c != exclude] + leads, text, category)
+            return
+        for chat in admins:
+            if chat != exclude:
+                await self.send(chat, text, markup)
+        for chat in leads:
+            await self.send(chat, text, markup if trainer_buttons else None)
 
     async def shift_event(self, event: str, shift_id: int, old: dict | None = None) -> None:
+        from . import digest
+
         shift = svc.get_shift(self.conn, shift_id)
         if shift is None:
             return
         user = svc.get_user(self.conn, shift["user_id"])
+        # 19.11: informational schedule changes honour the digest settings (a compact line in the digest, the
+        # full card as before otherwise); the urgent request and the final cancellation carry decision buttons
+        # — they always go straight away
         if event == "SHIFT_CREATED":
-            await self.to_managers(user, shift_created_text(self.conn, user, shift))
+            await self.to_managers(user, digest.text(self.conn, shift_created_text(self.conn, user, shift),
+                                                     schedule_line(event, user, shift)), category="schedule")
         elif event == "SHIFT_URGENT_REQUESTED":
             await self.to_managers(user, urgent_text(user, shift), urgent_keyboard(shift_id))
         elif event == "SHIFT_CANCELLED":
-            await self.to_managers(user, cancelled_text(self.conn, user, shift))
+            await self.to_managers(user, digest.text(self.conn, cancelled_text(self.conn, user, shift),
+                                                     schedule_line(event, user, shift)), category="schedule")
         elif event == "SHIFT_RESTORED":
-            await self.to_managers(user, restored_text(self.conn, user, shift))
+            await self.to_managers(user, digest.text(self.conn, restored_text(self.conn, user, shift),
+                                                     schedule_line(event, user, shift)), category="schedule")
         elif event == "SHIFT_FINAL_CANCELLED":
             # trainers can't fine directly: no penalty buttons for them
             await self.to_managers(user, final_cancel_text(self.conn, user, shift), penalty_keyboard(shift_id),
                                    trainer_buttons=False)
         elif event == "SHIFT_EDITED_BY_USER" and old:
-            await self.to_managers(user, edited_text(user, shift, old))
+            await self.to_managers(user, digest.text(self.conn, edited_text(user, shift, old),
+                                                     schedule_line(event, user, shift, old)), category="schedule")
 
     async def admin_edit(self, admin: dict, shift: dict, reason: str) -> None:
+        from . import digest
+
         user = svc.get_user(self.conn, shift["user_id"])
-        await self.to_managers(user, admin_edited_text(admin, user, shift, reason), exclude=admin["telegram_id"])
+        what = "удалил запись" if shift.get("status") == "removed" else f"изменил смену ({svc_status_ru(shift['status'])})"
+        compact = f"⚙️ {role_title(admin)} {handle(admin)} {what}: {who(user)}, {ddmm_wd(_day(shift))} — {escape(reason)}"
+        await self.to_managers(user, digest.text(self.conn, admin_edited_text(admin, user, shift, reason), compact),
+                               exclude=admin["telegram_id"], category="schedule")
 
     async def network_changed(self, user: dict, network_name: str | None, actor: dict, trainer: bool = False) -> None:
         if trainer:
@@ -1413,14 +1499,18 @@ class Notifier:
 
     async def admin_contacted(self, shift: dict, text: str) -> None:
         """«Связаться с администратором» after the deadline: who, which shift and why, with a link to answer."""
+        from . import digest
+
         user = svc.get_user(self.conn, shift["user_id"])
         if shift["status"] in svc.DAY_OFF:
             plan = "выходной"
         else:
             plan = f"{shift['start_time']}–{shift['end_time']}, {escape(shift['location'] or '')}, {shift['volume']} шт."
-        await self.to_managers(user, f"📨 <b>Сотрудник просит изменить смену</b>\n{who(user)}\n"
-                                     f"Смена {ddmm_wd(_day(shift))}: {plan}\n💬 {escape(text)}\n"
-                                     "Смена не изменена — если согласны, поправьте её в приложении, раздел «День».")
+        full = (f"📨 <b>Сотрудник просит изменить смену</b>\n{who(user)}\n"
+                f"Смена {ddmm_wd(_day(shift))}: {plan}\n💬 {escape(text)}\n"
+                "Смена не изменена — если согласны, поправьте её в приложении, раздел «День».")
+        compact = f"📨 {who(user)} просит изменить смену {ddmm_wd(_day(shift))}: {plan} — «{escape(text)}»"
+        await self.to_managers(user, digest.text(self.conn, full, compact), category="schedule")
 
     async def urgent_expired(self, shift: dict) -> None:
         user = svc.get_user(self.conn, shift["user_id"])
@@ -1582,9 +1672,9 @@ class Notifier:
                 tags, line = ["отчёт", "штраф"], f"❌ ОТЧЁТ ОТКЛОНЁН | ШТРАФ {finance.staff_text(fine) if fine else report['penalty_amount']}"
         await self._archive_report(tags, f"{line} — {who(user)}\n{place}\n{plan_fact}{note}\nПроверил: {who(actor)}",
                                    user, report)
-        for chat in reports.reviewers(self.conn, user):
-            if chat != actor["telegram_id"]:
-                await self.send(chat, f"{line}: {who(user)}, {ddmm(_day(shift))} — {who(actor)}")
+        others = [c for c in reports.reviewers(self.conn, user) if c != actor["telegram_id"]]
+        if others:  # 19.11: the other reviewers learn the verdict with the digest settings
+            await self.staff_notice(others, f"{line}: {who(user)}, {ddmm(_day(shift))} — {who(actor)}", "reports")
 
     async def no_show(self, shift: dict) -> None:
         from . import reports
@@ -2142,15 +2232,18 @@ class Notifier:
             f"План {shift['volume']}, факт {shift['fact_volume']} шт.", user, report)
 
     async def global_actual_set(self, day: date, result, actor: dict) -> None:
+        from . import digest
+
         row = result.row
         verdict = "✅ команда выполнила план" if row["met"] else "⚠️ план не выполнен — недоборы на ручной проверке"
         was = f" (было {result.old_value})" if result.old_value is not None else ""
-        text = (f"📊 Общий факт за {ddmm_wd(day)}: <b>{row['actual']}</b>{was} из плана {row['plan']} шт.\n{verdict}"
-                + (f"\nПринято автоматически: {len(result.approved)}" if result.approved else ""))
+        auto = f"\nПринято автоматически: {len(result.approved)}" if result.approved else ""
+        text = (f"📊 Общий факт за {ddmm_wd(day)}: <b>{row['actual']}</b>{was} из плана {row['plan']} шт.\n{verdict}{auto}")
         await self.archive(["общий_факт"], f"{text}\nВвёл: {who(actor)}")
-        for chat in svc.owner_telegram_ids():
-            if chat != actor["telegram_id"]:
-                await self.send(chat, f"{text}\nВвёл: {who(actor)}")
+        chats = [c for c in svc.owner_telegram_ids() if c != actor["telegram_id"]]
+        await self.staff_notice(chats, digest.text(self.conn, f"{text}\nВвёл: {who(actor)}",
+                                                   f"📊 Общий факт за {ddmm_wd(day)}: <b>{row['actual']}</b>{was} из плана "
+                                                   f"{row['plan']} шт. — {verdict} (ввёл {who(actor)})"), "fact")
         for shift in result.approved:
             await self.team_approved(shift, reports_latest(self.conn, shift["id"]))
 

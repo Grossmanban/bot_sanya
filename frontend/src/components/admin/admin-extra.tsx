@@ -320,6 +320,61 @@ export function SettingsSection() {
           })}
         </ul>
       </section>
+      {/* 19.11: service notices may be grouped into one digest instead of pinging every time */}
+      <section className="space-y-3 rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <div>
+          <span className="block font-medium">Служебные уведомления</span>
+          <span className="block text-sm text-muted-foreground">
+            «Встал в график», «взял выходной», заявки на изменение профиля и другие служебные — руководителям и
+            тренерам. Карточки, где нужно решение (срочная заявка, финальная отмена, штраф, заявка на регистрацию),
+            всегда приходят сразу.
+          </span>
+        </div>
+        <label className="flex cursor-pointer items-center gap-3">
+          <span className="min-w-0 flex-1 text-sm">Группировать в сводку</span>
+          <Switch checked={cfg.staff_digest_enabled} onCheckedChange={(v) => set({ staff_digest_enabled: v })} />
+        </label>
+        {cfg.staff_digest_enabled && (
+          <label className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            сводка не чаще, чем
+            <select className="h-10 rounded-xl border-0 bg-muted px-3 text-foreground outline-none"
+                    aria-label="Как часто присылать сводку" value={cfg.staff_digest_every_min}
+                    onChange={(e) => set({ staff_digest_every_min: Number(e.target.value) })}>
+              {[[15, "раз в 15 мин"], [30, "раз в 30 мин"], [60, "раз в час"], [120, "раз в 2 часа"],
+                [180, "раз в 3 часа"], [360, "раз в 6 часов"], [720, "раз в 12 часов"], [1440, "раз в сутки"]]
+                .map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>
+        )}
+        <label className="flex cursor-pointer items-center gap-3">
+          <span className="min-w-0 flex-1 text-sm">
+            Без звука
+            <span className="block text-sm text-muted-foreground">Служебные уведомления приходят без звука и вибрации.</span>
+          </span>
+          <Switch checked={cfg.staff_digest_silent} onCheckedChange={(v) => set({ staff_digest_silent: v })} />
+        </label>
+        <label className="flex cursor-pointer items-center gap-3">
+          <span className="min-w-0 flex-1 text-sm">
+            Тихие часы
+            <span className="block text-sm text-muted-foreground">
+              Ночью сводка только копится — всё придёт одним сообщением утром.
+            </span>
+          </span>
+          <Switch checked={cfg.staff_digest_quiet} onCheckedChange={(v) => set({ staff_digest_quiet: v })} />
+        </label>
+        {cfg.staff_digest_quiet && (
+          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            с
+            <input type="time" aria-label="Начало тихих часов" className="h-10 rounded-xl border-0 bg-muted px-3 text-foreground tabular outline-none"
+                   value={cfg.staff_digest_quiet_from}
+                   onChange={(e) => e.target.value && set({ staff_digest_quiet_from: e.target.value })} />
+            до
+            <input type="time" aria-label="Конец тихих часов" className="h-10 rounded-xl border-0 bg-muted px-3 text-foreground tabular outline-none"
+                   value={cfg.staff_digest_quiet_to}
+                   onChange={(e) => e.target.value && set({ staff_digest_quiet_to: e.target.value })} />
+          </div>
+        )}
+      </section>
       <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
         <label className="flex cursor-pointer items-start gap-4">
           <span className="flex-1">

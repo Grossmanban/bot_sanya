@@ -1532,6 +1532,25 @@ def _broadcast_ack_fine(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_broadcast_ack_fine)
 
 
+def _notify_queue(conn: sqlite3.Connection) -> None:
+    """Migration 47 — 19.11: the queue behind the grouped staff notifications («Сводка»). Service notices
+    («встал в график», «взял выходной»…) may be collected here instead of pinging managers at once; the
+    scheduler flushes each chat's notices as one digest by its interval, outside the quiet hours."""
+    _run_script(conn, """
+    CREATE TABLE notify_queue (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id    INTEGER NOT NULL,
+        category   TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_notify_queue_chat ON notify_queue (chat_id, id);
+    """)
+
+
+MIGRATIONS.append(_notify_queue)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

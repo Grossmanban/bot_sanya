@@ -1089,6 +1089,16 @@ export interface ScheduleSettings {
   plus_rate?: number;
   /** owners only: what the business gets per piece (the owner's earnings in payouts) */
   revenue_per_piece?: number;
+  /** 19.11: service notices to managers are grouped into one digest instead of pinging every time */
+  staff_digest_enabled: boolean;
+  /** how often the digest flushes: 15|30|60|120|180|360|720|1440 minutes */
+  staff_digest_every_min: number;
+  /** the notices come without sound and vibration, in both modes */
+  staff_digest_silent: boolean;
+  /** during the night window the digest only accumulates and comes when they end */
+  staff_digest_quiet: boolean;
+  staff_digest_quiet_from: string;
+  staff_digest_quiet_to: string;
 }
 
 export interface PaymentProfile {

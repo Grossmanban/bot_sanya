@@ -20,12 +20,14 @@ class FakeNotifier(Notifier):
     def __init__(self, conn):
         super().__init__(None, conn)
         self.sent: list[tuple[int, str]] = []
+        self.silents: list[bool] = []
         self.docs: list[tuple[int, str]] = []
         self.photos: list[tuple[int, str]] = []
         self.markups: list = []
 
-    async def send(self, chat_id, text, markup=None, force=False):
+    async def send(self, chat_id, text, markup=None, force=False, silent=False):
         self.sent.append((chat_id, text))
+        self.silents.append(bool(silent))
         return True
 
     async def send_document(self, chat_id, data, filename, caption=None):
