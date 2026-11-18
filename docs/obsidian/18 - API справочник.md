@@ -82,10 +82,12 @@
 
 ## Админ: онбординг и обучение
 
-`GET /api/admin/onboarding` (18.11: у тренеров в `trainers` — `role` для приоритета в списке) ·
+`GET /api/admin/onboarding` (18.11: у тренеров в `trainers` — `role` для приоритета в списке; 19.11: в анкетах
+`priority` и `waiting {hours, text}` — «сколько ждёт» в «Ожидают рассмотрения») ·
 `GET /api/admin/onboarding/{app}/trainer-preview` ·
-`POST /api/admin/onboarding/{app}/trainer|trainer-message|timer-reset|remind-referrer|training|reject|cancel-training|start-training|cancel-ack|return|contact|internship|stage|internship-units`
-(`internship-units`, 18.11: `{units}` — правка зачёта стажировки владельцем; цель закрывает стажировку) ·
+`POST /api/admin/onboarding/{app}/trainer|trainer-message|timer-reset|priority|remind-referrer|training|reject|cancel-training|start-training|cancel-ack|return|contact|internship|stage|internship-units`
+(`internship-units`, 18.11: `{units}` — правка зачёта стажировки владельцем; цель закрывает стажировку;
+`priority`, 19.11: `{on}` — приоритетное обучение на любой анкете) ·
 `POST /api/admin/training-requests/{id}/decide` · тренер: `GET /api/training`, `POST /api/training/{app}/request|confirm|schedule|cancel|finish`.
 
 ## Админ: Алиса/Плюс, методички, рассылки, настройки
@@ -123,3 +125,5 @@
   `products_enabled`.
 - 2026-11-19 — `POST /api/admin/broadcasts`: `ack_deadline_min`/`ack_fine_units` (срок отметки + автноштраф);
   `GET /api/admin/broadcasts(/​{id})`: `ack_deadline_at`, `fined`, `fined_at`.
+- 2026-11-19 — `POST /api/register`: `priority`; `POST /api/admin/onboarding/{app}/priority` (`{on}`);
+  в анкетах `priority` и `waiting`, `GET /api/me`: `application.priority`.

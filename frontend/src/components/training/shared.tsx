@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, Clock3, LoaderCircle, Send } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Clock3, Hourglass, LoaderCircle, Send, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Application, TrainingStage } from "@/lib/api";
 import { dayMonth } from "@/lib/format";
@@ -24,6 +24,30 @@ export function StageBadge({ a }: { a: Application }) {
   return (
     <span className={cn("inline-flex max-w-full items-center rounded-full px-2.5 py-1 text-xs font-semibold break-words",
       TONE_CHIP[TONE[a.stage ?? "new"] ?? "wait"])}>{a.stage_title}</span>
+  );
+}
+
+/** 19.11: «приоритетное обучение» — the candidate's own mark or the staff's switch; the trainer, the instructor
+ * and the admins see it on the card and in the bot's messages. */
+export function PriorityBadge({ a }: { a: Application }) {
+  if (!a.priority) return null;
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground">
+      <Star className="size-3.5 fill-current" /> Приоритет обучения
+    </span>
+  );
+}
+
+/** 19.11: how long the questionnaire has been waiting in «Ожидают рассмотрения» — the server's text
+ * («1 день 12 часов», «ровно 7 дней»); red after 3 days, yellow after a day. */
+export function WaitingBadge({ a }: { a: Application }) {
+  const w = a.waiting;
+  if (!w) return null;
+  const tone: Tone = w.hours >= 72 ? "bad" : w.hours >= 24 ? "wait" : "archive";
+  return (
+    <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold", TONE_CHIP[tone])}>
+      <Hourglass className="size-3.5" /> ждёт {w.text}
+    </span>
   );
 }
 

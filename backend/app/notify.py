@@ -768,6 +768,8 @@ class Notifier:
         return (f"👤 {person_link(user, app['full_name'])}, {app['age']} лет, м. {escape(app['metro'])}\n"
                 f"Дней в неделю: от {app['min_days']}, обучение: {recruiting.days_text(app)}, общение: {app['communication']}/10"
                 + (f"\nПригласил(а): {escape(svc.full_name(ref))}" if ref else "")
+                # 19.11: the questionnaire's priority mark — «в первую очередь на обучение»
+                + ("\n⭐ <b>Приоритетная анкета</b> — назначить обучение в первую очередь" if app.get("priority") else "")
                 + (f"\nАнкета отправлена: {sent}" if sent else ""))
 
     async def application_submitted(self, app: dict) -> None:

@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, Timer, UserCog, UserX, Users } from "lucide-react";
+import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, Star, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type Role, type StageProgress, type TrainingRequest, type User } from "@/lib/api";
@@ -9,7 +9,7 @@ import { ddmm, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
-import { AgreementMark, AttemptsHistory, CancelCounter, CancelWarning, ContactTimer, ReasonForm, StageBadge, Submitted, TrainingLine, agreedCard,
+import { AgreementMark, AttemptsHistory, CancelCounter, CancelWarning, ContactTimer, PriorityBadge, ReasonForm, StageBadge, Submitted, TrainingLine, WaitingBadge, agreedCard,
   requestLines } from "../training/shared";
 
 type Tab = "new" | "scheduled" | "internship" | "done" | "rejected";
@@ -64,7 +64,9 @@ export function OnboardingSection({ me }: { me: User }) {
       : sort === "days" ? byDays(dir) : () => 0;
     // «На обучении» (§4): both confirmed first, then the rest by their progress; inside — the chosen sort, then the questionnaire
     const agreement = (a: Application) => (tab === "scheduled" ? a.agreement_rank ?? 9 : 0);
-    return list.sort((a, b) => agreement(a) - agreement(b) || chosen(a, b) || byNewest(a, b));
+    // 19.11: in «Ожидают рассмотрения» the priority questionnaires (⭐) come first — whatever the chosen sort
+    const prio = (a: Application) => (tab === "new" ? Number(!!a.priority) : 0);
+    return list.sort((a, b) => prio(b) - prio(a) || agreement(a) - agreement(b) || chosen(a, b) || byNewest(a, b));
   }, [data, age, skill, days, sort, dir, tab]);
   const filtered = !!(age[0] || age[1]) || skill[0] > 1 || skill[1] < 10 || days.length > 0;
   // 18.11: in all the pickers the owners and the trainers/instructors come first (the inviter tops it on the card)
@@ -237,6 +239,14 @@ function Candidate({ a, me, trainers, points, onDone }: {
             onClick={() => act("ref", (k) => api.admin.remindReferrer(a.id, k), "Пригласивший получил просьбу помочь")}>
       <Users /> Напомнить пригласившему
     </Button>);
+  // 19.11: the training priority — the candidate's own mark or this switch, on any questionnaire
+  add(true, "priority",
+    <Button variant={a.priority ? "secondary" : "ghost"} size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("priority", (k) => api.admin.setPriority(a.id, !a.priority, k),
+              a.priority ? "Приоритет снят" : "Приоритет включён: анкета наверху списка, в сообщениях тренеру — ⭐")}>
+      {busy === "priority" ? <LoaderCircle className="animate-spin" /> : <Star className={cn("size-4", a.priority && "fill-current text-primary")} />}
+      {a.priority ? "Снять приоритет" : "Сделать приоритетной"}
+    </Button>);
   add(open, "contact",
     <Button variant="ghost" size="sm" className="h-9 rounded-xl" onClick={() => toggle("contact")}>
       <MessageCircle /> Контакт вручную
@@ -281,7 +291,9 @@ function Candidate({ a, me, trainers, points, onDone }: {
           </p>
           <Submitted a={a} className="mt-0.5" />
           <div className="mt-2 flex flex-wrap items-center gap-1">
+            <PriorityBadge a={a} />
             <StageBadge a={a} />
+            {a.waiting && <WaitingBadge a={a} />}
             {a.training_days.map((d) => <span key={d} className="rounded-lg bg-muted px-2 py-0.5 text-xs font-semibold">{DAYS[d]}</span>)}
           </div>
         </div>
@@ -498,7 +510,10 @@ function RequestCard({ r, trainers, points, onDone }: { r: TrainingRequest; trai
   const needsDate = r.kind === "change" && !r.payload.date && !r.payload.time && !r.payload.location && !r.payload.trainer_id;
   return (
     <li className="space-y-2 rounded-2xl bg-card p-3">
-      <p className="font-semibold">{r.title} · {r.candidate}</p>
+      <p className="flex items-center gap-1.5 font-semibold">
+        {r.priority && <Star className="size-4 shrink-0 fill-current text-primary" aria-label="Приоритетная анкета" />}
+        {r.title} · {r.candidate}
+      </p>
       <p className="text-xs text-muted-foreground">
         {r.initiator_role === "trainer" ? "Тренер" : "Кандидат"}{" "}
         {r.initiator_tg ? (

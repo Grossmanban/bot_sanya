@@ -89,6 +89,7 @@ def submit(conn: sqlite3.Connection, tg: dict, form: dict, start_param: str | No
     if not isinstance(days, list) or not days or any(isinstance(d, bool) or not isinstance(d, int) or not 0 <= d <= 6 for d in days):
         raise ServiceError("Выберите удобные дни для обучения", 422, "days_required")
     communication = _int(form.get("communication"), 1, 10, "Оценка навыков — от 1 до 10")
+    priority = form.get("priority") is True  # the questionnaire's last toggle: «назначат в первую очередь»
     if form.get("consent") is not True or form.get("truthful") is not True:
         raise ServiceError("Нужны согласие на обработку данных и подтверждение достоверности", 422, "consent_required")
     if start_param:  # startapp=ref_<token> straight into the Mini App: the same server check as /start
@@ -124,9 +125,12 @@ def submit(conn: sqlite3.Connection, tg: dict, form: dict, start_param: str | No
         referrer_id = conn.execute("SELECT referrer_id FROM users WHERE id = ?", (user_id,)).fetchone()[0]
         cur = conn.execute(
             """INSERT INTO applications (user_id, full_name, age, metro, min_days, training_days, communication,
-                                         referrer_id, consent_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                         referrer_id, consent_at, created_at, priority, priority_at, priority_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, full_name, age, metro, min_days, json.dumps(sorted(set(days))), communication, referrer_id,
-             now_iso(), now_iso()))
+             # svc's clock: the waiting indicator compares against it (tests patch both together)
+             svc.now_iso(), svc.now_iso(), int(priority),
+             svc.now_iso() if priority else None, "candidate" if priority else None))
         log_event(conn, user_id=user_id, actor_id=tg["id"], event_type="APPLICATION_SUBMITTED", key=svc.new_key(),
                   new={"application": cur.lastrowid, "referrer": referrer_id})
     return svc.get_user(conn, user_id), get(conn, cur.lastrowid)
@@ -259,17 +263,44 @@ def _days(app: dict) -> list[int]:
     return json.loads(app["training_days"] or "[]")
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def wait_text(hours: float) -> str:
+    """How long the candidate has been waiting: «40 мин», «12 часов», «1 день 12 часов», «7 дней» (exactly
+    days — without the zero hours); the staff card colours it red after 3 days, yellow after a day."""
+    minutes = max(0, int(hours * 60))
+    if minutes < 60:
+        return f"{minutes} мин"
+    days, hr = divmod(minutes // 60, 24)
+    parts = [f"{days} {_plural(days, 'день', 'дня', 'дней')}" if days else "",
+             f"{hr} {_plural(hr, 'час', 'часа', 'часов')}" if hr else ""]
+    return " ".join(p for p in parts if p)
+
+
 def view(conn: sqlite3.Connection, app: dict) -> dict:
     user = svc.get_user(conn, app["user_id"])
     ref = svc.get_user(conn, app["referrer_id"]) if app["referrer_id"] else None
     trainer = svc.get_user(conn, app["trainer_id"]) if app["trainer_id"] else None
     history = conn.execute("SELECT COUNT(*) FROM applications WHERE user_id = ? AND id != ?", (app["user_id"], app["id"])).fetchone()[0]
+    # «Ожидает рассмотрения»: how long the questionnaire has been waiting for the staff (MSK, the server's clock)
+    waiting = None
+    if app["status"] == "new":
+        waited = (svc.now_local() - datetime.fromisoformat(app["created_at"])).total_seconds() / 3600
+        waiting = {"hours": round(max(0.0, waited), 2), "text": wait_text(waited)}
     return {
         **{k: app[k] for k in ("id", "status", "full_name", "age", "metro", "min_days", "communication", "created_at",
                                "reject_reason", "decided_at", "training_date", "training_time", "training_location",
                                "training_confirmed_at", "contact_manager", "contacted_at", "contact_answer",
                                "contact_answer_at", "stage1_counted", "stage1_at", "stage2_counted", "stage2_at")},
         "training_days": _days(app),
+        "priority": bool(app["priority"]),
+        "waiting": waiting,
         # ТЗ 30.10 §7: the moment the candidate sent the questionnaire, in Moscow time
         "submitted_text": msk_datetime(app["created_at"]),
         "user_id": user["id"], "telegram_id": user["telegram_id"], "username": user["username"],
@@ -407,6 +438,25 @@ def reject(conn: sqlite3.Connection, actor: dict, app_id: int, reason: str | Non
                      (now_iso(), actor["telegram_id"], app["user_id"]))
         log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="APPLICATION_REJECTED", key=key,
                   new={"application": app_id}, description=reason)
+    return get(conn, app_id), True
+
+
+def set_priority(conn: sqlite3.Connection, actor: dict, app_id: int, on: bool, key: str) -> tuple[dict, bool]:
+    """The staff's switch of the training priority on any questionnaire (the candidate's own toggle marks
+    `priority_by = "candidate"`). Returns (application, changed)."""
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return get(conn, app_id), False
+        actor, app = _load(conn, actor, app_id)
+        if bool(app["priority"]) == bool(on):
+            return app, False
+        conn.execute("UPDATE applications SET priority = ?, priority_at = ?, priority_by = ? WHERE id = ?",
+                     (int(on), now_iso() if on else None, str(actor["telegram_id"]) if on else None, app_id))
+        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"],
+                  event_type="APPLICATION_PRIORITY_SET" if on else "APPLICATION_PRIORITY_CLEARED", key=key,
+                  new={"application": app_id},
+                  description="приоритет обучения" if on else "приоритет обучения снят")
     return get(conn, app_id), True
 
 

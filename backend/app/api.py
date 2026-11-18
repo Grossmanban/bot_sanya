@@ -600,6 +600,8 @@ class ApplicationBody(BaseModel):
     communication: int
     truthful: bool = False
     consent: bool = False
+    # the last toggle: «приоритетная анкета» — the candidate confirms they will respond promptly
+    priority: bool = False
 
 
 class TrainingBody(BaseModel):
@@ -619,6 +621,12 @@ class TrainerBody(BaseModel):
 class CancelBody(BaseModel):
     reason: str | None = None
     kind: str = "cancel"  # cancel | no_show
+    idempotency_key: str
+
+
+class PriorityBody(BaseModel):
+    """The staff switch of the training priority on any questionnaire."""
+    on: bool
     idempotency_key: str
 
 
@@ -865,7 +873,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         if user["status"] != "approved":
             # a candidate: the questionnaire (none yet / returned to the reserve) or where it stands
             return {"registered": True, "user": public_user(user), "bot_username": app.state.bot_username,
-                    "header": header(), "application": {"status": application["status"], "training": {
+                    "header": header(), "application": {"status": application["status"],
+                    "priority": bool(application["priority"]), "training": {
                         k: application[k] for k in ("training_date", "training_time", "training_location")}}
                     if application else None}
         return {
@@ -2435,6 +2444,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
     @api.post("/admin/onboarding/{app_id}/timer-reset")
     async def admin_timer_reset(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
         training.reset_timer(conn, admin, app_id, body.idempotency_key)
+        return app_out(app_id)
+
+    @api.post("/admin/onboarding/{app_id}/priority")
+    async def admin_application_priority(app_id: int, body: PriorityBody, admin: dict = Depends(staff("registrations"))):
+        """Приоритетное обучение on any questionnaire: the candidate's own toggle or the staff's switch."""
+        recruiting.set_priority(conn, admin, app_id, body.on, body.idempotency_key)
         return app_out(app_id)
 
     @api.post("/admin/onboarding/{app_id}/remind-referrer")

@@ -1551,6 +1551,21 @@ def _notify_queue(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_notify_queue)
 
 
+def _application_priority(conn: sqlite3.Connection) -> None:
+    """Migration 48 — 19.11: the questionnaire's «приоритетное обучение». The candidate may mark their own
+    application (the toggle at the end of the questionnaire, with a warning about the responsibility), or the
+    staff may switch it on any application. `priority_by` — "candidate" or the staff's telegram_id; the mark
+    is shown to staff on the onboarding cards, in «Обучение» and in the bot's messages."""
+    _run_script(conn, """
+    ALTER TABLE applications ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE applications ADD COLUMN priority_by TEXT;
+    ALTER TABLE applications ADD COLUMN priority_at TEXT;
+    """)
+
+
+MIGRATIONS.append(_application_priority)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

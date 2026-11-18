@@ -262,8 +262,8 @@ export interface Me {
   network?: string | null;
   events?: number;
   /** a candidate (status pending): their questionnaire — none yet / returned to the reserve, or where it stands */
-  application?: { status: ApplicationStatus; training: { training_date: string | null; training_time: string | null;
-    training_location: string | null } } | null;
+  application?: { status: ApplicationStatus; priority: boolean; training: { training_date: string | null;
+    training_time: string | null; training_location: string | null } } | null;
   /** a trainee: the internship's progress */
   internship?: StageProgress | null;
   /** ТЗ 27.10 §28: products in «Работа» */
@@ -307,6 +307,8 @@ export interface ApplicationForm {
   communication: number;
   truthful: boolean;
   consent: boolean;
+  /** 19.11: «приоритетная анкета» — the candidate's own mark with the responsibility warning */
+  priority: boolean;
 }
 
 /** The onboarding card (the customer's module 3). */
@@ -343,6 +345,10 @@ export interface Application {
   trainer: { id: number; name: string; username: string | null } | null;
   earlier: number;
   progress: StageProgress | null;
+  /** 19.11: «приоритетное обучение» — the candidate's own mark or the staff's switch */
+  priority?: boolean;
+  /** 19.11: how long the questionnaire has been waiting in «Ожидают рассмотрения» (the server's MSK clock) */
+  waiting?: { hours: number; text: string } | null;
   avatar_url: string;
   // ТЗ 28.10 §2–§6
   trainer_tg?: { telegram_id: number; username: string | null } | null;
@@ -415,6 +421,8 @@ export interface TrainingRequest {
   initiator_role: "trainer" | "candidate";
   initiator_tg: { telegram_id: number; username: string | null } | null;
   candidate: string | null;
+  /** 19.11: the candidate's questionnaire is priority (⭐ on the request card) */
+  priority?: boolean;
   payload: { date?: string; time?: string; location?: string; trainer_id?: number; note?: string };
   old: { training_date?: string | null; training_time?: string | null; training_location?: string | null; trainer_id?: number | null };
   new_trainer: string | null;
@@ -1597,6 +1605,9 @@ export const api = {
       post<{ application: Application }>(`/api/admin/onboarding/${id}/trainer-message`, { idempotency_key: key }),
     timerReset: (id: number, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/timer-reset`, { idempotency_key: key }),
+    /** 19.11: the training priority on any questionnaire (⭐ on the cards and in the bot's messages) */
+    setPriority: (id: number, on: boolean, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/priority`, { on, idempotency_key: key }),
     remindReferrer: (id: number, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/remind-referrer`, { idempotency_key: key }),
     startTraining: (id: number, key: string) =>

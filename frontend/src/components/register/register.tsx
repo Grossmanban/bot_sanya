@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { BellRing, CalendarCheck, Check, ChevronLeft, Clock3, Info, LoaderCircle, MessageCircle, Pencil, UserPlus } from "lucide-react";
+import { BellRing, CalendarCheck, Check, ChevronLeft, Clock3, Info, LoaderCircle, MessageCircle, Pencil, Sparkles, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer";
+import { Switch } from "@/components/ui/switch";
 import { api, ApiError, type ApplicationForm, type Me } from "@/lib/api";
 import { dayMonth, plural } from "@/lib/format";
 import { ensureWriteAccess, haptic, openBotChat, tapHaptic } from "@/lib/telegram";
@@ -29,8 +30,10 @@ export function Registration({ onSent, botUsername }: { onSent: () => void; botU
   const [back, setBack] = useState<number | null>(null); // edit from the draft: «Готово» returns there
   const [form, setForm] = useState<ApplicationForm>({
     full_name: "", age: 0, metro: "", min_days: 0, training_days: [], communication: 0, truthful: false, consent: false,
+    priority: false,
   });
   const [askDays, setAskDays] = useState(false);
+  const [askPriority, setAskPriority] = useState(false);
   const [consentText, setConsentText] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -293,9 +296,46 @@ export function Registration({ onSent, botUsername }: { onSent: () => void; botU
           </span>
         </label>
       </div>
+      {/* 19.11: the priority mark of the questionnaire — a warning about the responsibility before it turns on */}
+      <div className="mt-5 rounded-3xl bg-card p-5 shadow-lift">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 font-semibold">
+              <Sparkles className="size-4 shrink-0 text-primary" /> Приоритетная анкета
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">Обучение вам назначат в первую очередь.</p>
+          </div>
+          <Switch checked={form.priority} aria-label="Приоритетная анкета"
+                  onCheckedChange={(v) => (v ? setAskPriority(true) : set({ priority: false }))} />
+        </div>
+        {form.priority && (
+          <p className="mt-3 rounded-2xl bg-go-soft px-4 py-2.5 text-sm text-go">
+            <b>Приоритет включён.</b> Кураторы рассмотрят анкету первыми — будьте на связи, когда назначат обучение.
+          </p>
+        )}
+      </div>
       <Button size="lg" className="press mt-6 h-14 w-full rounded-2xl text-base font-semibold" disabled={busy || !form.truthful || !form.consent} onClick={send}>
         {busy && <LoaderCircle className="animate-spin" />} Отправить заявку
       </Button>
+      <AlertDialog open={askPriority} onOpenChange={setAskPriority}>
+        <AlertDialogContent className="rounded-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-display">Сделать анкету приоритетной?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Ваша анкета будет помечена как приоритетная для обучения: вас будут назначать на обучение в первую очередь.
+              Включая приоритет, вы подтверждаете, что оперативно свяжетесь с нами для согласования обучения, как только
+              вам его назначат. Если кандидат безответственный — не отвечает или не приходит на обучение без
+              предупреждения — в дальнейшей работе ему будет отказано.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="rounded-xl">Не включать</AlertDialogCancel>
+            <AlertDialogAction className="rounded-xl" onClick={() => { haptic("success"); set({ priority: true }); }}>
+              Включить приоритет
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <Drawer open={consentText} onOpenChange={setConsentText}>
         <DrawerContent className="mx-auto max-h-[85dvh] max-w-2xl rounded-t-[1.75rem] border-0 bg-card">
           <div className="pb-safe overflow-y-auto px-5 pt-2">
@@ -348,6 +388,11 @@ export function ApplicationStatus({ application }: { application: NonNullable<Me
             ? `${dayMonth(t.training_date!)} в ${t.training_time}, ${t.training_location}. Подтвердите запись в сообщении от бота.`
             : "Не выключайте уведомления: бот напишет, когда согласует с тренерами день, время и место обучения."}
         </p>
+        {application.priority && (
+          <p className="mt-3 flex items-center gap-1.5 rounded-2xl bg-go-soft px-4 py-2.5 text-sm font-semibold text-go">
+            <Sparkles className="size-4 shrink-0" /> Анкета приоритетная — рассмотрим в первую очередь
+          </p>
+        )}
       </div>
     </Screen>
   );

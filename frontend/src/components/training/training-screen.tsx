@@ -9,7 +9,7 @@ import { ddmm, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
-import { AgreementMark, AttemptsHistory, CancelCounter, ReasonForm, StageBadge, Submitted, TrainingLine, agreedCard, field,
+import { AgreementMark, AttemptsHistory, CancelCounter, PriorityBadge, ReasonForm, StageBadge, Submitted, TrainingLine, agreedCard, field,
   requestLines } from "./shared";
 import { ManualsReader } from "./manuals";
 
@@ -100,7 +100,10 @@ function Card({ a, trainers, points, onDone }: { a: Application; trainers: { id:
           <p className="font-semibold break-words">{a.full_name}</p>
           <p className="text-sm text-muted-foreground">{a.age} {plural(a.age, "год", "года", "лет")} · м. {a.metro}</p>
           <Submitted a={a} className="mt-0.5" />
-          <div className="mt-2"><StageBadge a={a} /></div>
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            <PriorityBadge a={a} />
+            <StageBadge a={a} />
+          </div>
         </div>
         <Button variant="secondary" size="sm" className="h-9 shrink-0 rounded-xl" onClick={() => openProfile(a.username, a.telegram_id, a.full_name)}>
           <Send /> Профиль
@@ -171,6 +174,8 @@ function Card({ a, trainers, points, onDone }: { a: Application; trainers: { id:
           <div><dt className="text-xs text-muted-foreground">Навыки общения</dt><dd>{a.communication}/10</dd></div>
           <div className="col-span-2"><dt className="text-xs text-muted-foreground">Удобные дни для обучения</dt>
             <dd>{a.training_days.map((d) => DAYS[d]).join(", ")}</dd></div>
+          <div className="col-span-2"><dt className="text-xs text-muted-foreground">Приоритет обучения</dt>
+            <dd>{a.priority ? "⭐ приоритетная анкета — кандидат подтвердил оперативную связь" : "нет"}</dd></div>
           <div className="col-span-2"><dt className="text-xs text-muted-foreground">Анкета отправлена</dt>
             <dd>{a.submitted_text ?? ddmm(a.created_at.slice(0, 10))}</dd></div>
         </dl>
