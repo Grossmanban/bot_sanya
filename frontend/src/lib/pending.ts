@@ -68,6 +68,7 @@ export const SECTION_COUNTS: Record<string, (keyof ReportCounts)[]> = {
   team: ["registrations", "profile_changes", "payment_changes"],
   day: ["urgent", "unmarked"],
   events: ["events_pending"],
+  networks: ["no_network"],
   alice: ["alice_moderation", "alice_failed"],
   plus: ["plus_moderation", "plus_failed"],
 };
@@ -85,6 +86,7 @@ export const PENDING_LABELS: [keyof ReportCounts, string][] = [
   ["training_requests", "⏳ Обучение: ожидает согласования"], ["profile_changes", "🪪 Изменения профилей"],
   ["payment_changes", "💳 Изменения реквизитов"], ["urgent", "⚡ Срочные заявки на сегодня"],
   ["unmarked", "🗓 Не отметили день (сегодня, завтра)"], ["events_pending", "🏁 Заявки в событиях"],
+  ["no_network", "🌐 Не распределены по сети"],
   ["alice_moderation", "📸 «Алиса»: на модерации"], ["alice_failed", "📸 «Алиса»: не отправлено"],
   ["plus_moderation", "📸 «Яндекс Плюс»: на модерации"], ["plus_failed", "📸 «Яндекс Плюс»: не отправлено"],
 ];

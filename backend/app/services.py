@@ -842,8 +842,11 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
         urgent = day == today
         status = "awaiting_approval" if urgent else "active"
         now = now_iso()
-        # a trainee's shifts are training ones: in the schedule as «стажёр», not paid (the customer's module 3)
-        training = bool(user.get("trainee_since") and not user.get("trainee_done_at"))
+        # a trainee's shifts are training ones while the goal is not covered yet (18.11): above the first
+        # `internship_units` pieces the shifts pay as usual (the customer's module 3)
+        from . import recruiting as recruiting_mod
+
+        training = recruiting_mod.shift_is_training(conn, user)
         cur = conn.execute(
             """INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status,
                                    is_urgent, created_at, updated_at, training)
@@ -1012,7 +1015,9 @@ def admin_mark_day(conn, admin: dict, user_id: int, day: date, kind: str, payloa
             event = "ADMIN_DAY_OFF_SET"
         else:
             data["location"] = check_point(conn, day, data["location"])
-            training = bool(user.get("trainee_since") and not user.get("trainee_done_at"))
+            from . import recruiting as recruiting_mod
+
+            training = recruiting_mod.shift_is_training(conn, user)
             cur = conn.execute(
                 """INSERT INTO shifts (user_id, shift_date, start_time, end_time, volume, location, status, is_urgent,
                                        created_at, updated_at, training)

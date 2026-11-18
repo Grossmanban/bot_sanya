@@ -7,13 +7,14 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from app import finance, invites, payouts, recruiting
+from app import finance, invites, payouts, pending, recruiting, training
 from app import services as svc
 from app.api import create_app
 from app.auth import sign_init_data
 from app.config import settings
 from app.timeutil import now_local
 
+from .conftest import requisites
 from .test_features import FakeNotifier, run
 
 def invited(conn, referrer: dict, telegram_id: int) -> None:
@@ -88,7 +89,8 @@ def test_full_path_with_referrer_bonuses(conn, make_user):
     assert "стажёр" in svc.raspred(conn, today + timedelta(days=1))["text"]
     conn.execute("UPDATE shifts SET status = 'active', report_state = 'approved', fact_volume = 21 WHERE id = ?", (s["id"],))
     p = recruiting.progress(conn, app)
-    assert (p["stage"], p["units"], p["review"]) == (1, 21, True)
+    # 18.11: the goal shows the approved fact before the first payout, capped at the target
+    assert (p["stage"], p["units"], p["review"]) == (1, 20, True) and p["fact"] == 21 and p["paid"] == 0
     rows = payouts.calculate(conn, today, today + timedelta(days=3), payouts.Rates.from_dict(None))
     assert all(r["user_id"] != trainee["id"] or r["base_calc"] == 0 for r in rows)  # training units aren't paid
     reached = recruiting.reached(conn)
@@ -201,3 +203,109 @@ def test_cancel_training_tabs_and_a_corrected_stage(conn, make_user):
     n.sent.clear()
     run(n.stage_confirmed(a, 1, None, reached=18))  # the same value — no correction line
     assert not any("скорректировал" in t for _, t in n.sent)
+
+
+def test_the_payout_drives_and_closes_the_internship(conn, make_user):
+    """18.11: the internship's goal counts what was PAID: a manual payout's units advance it at once, reaching
+    the target closes the internship (the trainee becomes a regular employee). Only the first
+    `internship_units` pieces of a trainee are training ones — the excess pays as usual."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = make_user(first="Тренер")
+    invited(conn, make_user(first="Аня"), 8001)
+    user, app = recruiting.submit(conn, {"id": 8001, "username": "stazh"}, {**FORM, "full_name": "Стажёров Стажёр"})
+    app, _ = recruiting.assign_training(conn, owner, app["id"], now_local().date() + timedelta(days=1), "11:00",
+                                        "Европа", trainer["id"], svc.new_key())
+    app, _ = recruiting.start_internship(conn, owner, app["id"], svc.new_key())
+    trainee = svc.get_user(conn, user["id"])
+    requisites(conn, trainee)
+    today = now_local().date()
+
+    def shift(day, volume, approved=True):
+        s = svc.create_shift(conn, trainee, day, {"start_time": "10:00", "end_time": "16:00", "volume": volume,
+                                                  "location": "Европа"}, svc.new_key(), today=today).shift
+        if approved:
+            conn.execute("UPDATE shifts SET report_state = 'approved', fact_volume = ? WHERE id = ?", (volume, s["id"]))
+        return s
+
+    # the first 20 pieces are the internship (training shifts); the third shift is beyond the goal — a regular one
+    first, second = shift(today + timedelta(days=1), 10), shift(today + timedelta(days=2), 10)
+    assert first["training"] == 1 and second["training"] == 1
+    extra = shift(today + timedelta(days=3), 10)
+    assert extra["training"] == 0
+
+    d_from, d_to = today + timedelta(days=1), today + timedelta(days=3)
+    amounts, included = {trainee["id"]: 1200}, {trainee["id"]}  # 1200 ₽ at the common 120 → 10 units
+    rows = {r["user_id"]: r for r in payouts.calculate(conn, d_from, d_to, payouts.Rates.from_dict(None), None,
+                                                       amounts, included)}
+    assert rows[trainee["id"]]["entered_units"] == 10
+    assert rows[trainee["id"]]["internship"] == {"app_id": app["id"], "target": 20, "left": 20, "take": 10}
+    batch = payouts.commit(conn, owner, "Стажёру", d_from, d_to, payouts.Rates.from_dict(None), None,
+                           [{"user_id": trainee["id"], "amount": 1200}], [], [], svc.new_key())
+    assert not batch.get("internship_closed")  # 10 of 20 — the internship goes on
+    # the goal is corrected by the payout at once: it shows what was paid, not the fact
+    assert recruiting.progress(conn, recruiting.get(conn, app["id"]))["units"] == 10
+
+    # the next payout pays the missing 10 — the internship closes itself, the person is in the team
+    batch = payouts.commit(conn, owner, "Стажёру 2", today + timedelta(days=4), today + timedelta(days=4),
+                           payouts.Rates.from_dict(None), None, [{"user_id": trainee["id"], "amount": 1200}],
+                           [], [], svc.new_key())
+    assert len(batch["internship_closed"]) == 1 and batch["internship_closed"][0]["stage1_counted"] == 20
+    assert not recruiting.is_trainee(svc.get_user(conn, user["id"]))
+    assert recruiting.get(conn, app["id"])["status"] == "done"
+
+
+def test_the_owner_corrects_the_internship_by_hand(conn, make_user):
+    """18.11: the owner sets the paid counter by hand — the target closes the internship; an auto-closed one
+    returns to «Стажировка» when the value drops below the target."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = make_user(first="Тренер")
+    invited(conn, make_user(first="Аня"), 8101)
+    user, app = recruiting.submit(conn, {"id": 8101, "username": "stazh2"}, {**FORM, "full_name": "Второй Стажёр"})
+    app, _ = recruiting.assign_training(conn, owner, app["id"], now_local().date() + timedelta(days=1), "11:00",
+                                        "Европа", trainer["id"], svc.new_key())
+    app, _ = recruiting.start_internship(conn, owner, app["id"], svc.new_key())
+
+    a, closed = recruiting.set_internship_units(conn, owner, app["id"], 7, svc.new_key())
+    assert not closed and recruiting.progress(conn, a)["units"] == 7
+    a, closed = recruiting.set_internship_units(conn, owner, app["id"], 20, svc.new_key())
+    assert closed and a["status"] == "done" and a["stage1_counted"] == 20
+    assert not recruiting.is_trainee(svc.get_user(conn, user["id"]))
+    a, closed = recruiting.set_internship_units(conn, owner, app["id"], 5, svc.new_key())
+    assert not closed and a["status"] == "internship" and recruiting.is_trainee(svc.get_user(conn, user["id"]))
+    with pytest.raises(svc.ServiceError) as e:  # beyond the target makes no sense
+        recruiting.set_internship_units(conn, owner, app["id"], 25, svc.new_key())
+    assert e.value.code == "bad_units"
+    with pytest.raises(svc.ServiceError):  # a trainer without the registrations cap can't
+        recruiting.set_internship_units(conn, trainer, app["id"], 10, svc.new_key())
+
+
+def test_app_access_opens_before_the_internship(conn, make_user):
+    """18.11: «Выдать доступ к приложению» approves the candidate's account while the application is still
+    «scheduled» — the Mini App opens, the person is not working yet; the internship then starts the goal."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    trainer = make_user(first="Тренер")
+    invited(conn, make_user(first="Аня"), 8201)
+    user, app = recruiting.submit(conn, {"id": 8201, "username": "stazh3"}, {**FORM, "full_name": "Третий Стажёр"})
+    with pytest.raises(svc.ServiceError):  # no trainer assigned yet
+        training.start(conn, owner, app["id"], svc.new_key())
+    app, _ = recruiting.assign_training(conn, owner, app["id"], now_local().date() + timedelta(days=1), "11:00",
+                                        "Европа", trainer["id"], svc.new_key())
+    app, changed = training.start(conn, owner, app["id"], svc.new_key())
+    assert changed and app["training_started_at"]
+    u = svc.get_user(conn, user["id"])
+    assert u["status"] == "approved" and not recruiting.is_trainee(u) and u["work_status"] == "not_working"
+    app, _ = recruiting.start_internship(conn, owner, app["id"], svc.new_key())
+    assert recruiting.is_trainee(svc.get_user(conn, user["id"]))
+
+
+def test_unnetworked_people_count_as_a_decision(conn, make_user):
+    """18.11: an approved employee of no network is a pending decision for the owner and the admins."""
+    from app import networks
+
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    loose, netted = make_user(first="Гуля"), make_user(first="Всети")
+    north = networks.create(conn, owner, "Север", svc.new_key())
+    networks.set_member(conn, owner, netted["id"], north["id"], svc.new_key())
+    assert pending.counts(conn, owner)["no_network"] == 1  # the owner without a network doesn't count
+    networks.set_member(conn, owner, loose["id"], north["id"], svc.new_key())
+    assert pending.counts(conn, owner)["no_network"] == 0

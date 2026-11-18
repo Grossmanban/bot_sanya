@@ -19,7 +19,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
-from . import app_settings, finance, networks, pricing
+from . import app_settings, finance, networks, pricing, recruiting
 from .rates import Book
 from . import permissions as perms
 from . import services as svc
@@ -297,6 +297,16 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             pieces_pay = lazy["pieces_pay"]
         team, commission, share, detail = 0, 0, [], None
         kind = None
+        # 18.11: a trainee's payout advances the internship's goal — as much of the payout's units as the
+        # goal is still missing; the goal counts what was PAID, so the units are the payout's own
+        application = recruiting.open_internship(conn, u["id"])
+        internship = None
+        if application is not None:
+            goal_units = units if manual else (round(pieces_pay / own["rate_base"], 2) if own["rate_base"] else 0.0)
+            internship = {"app_id": application["id"], "target": recruiting.internship_target(conn),
+                          "left": round(max(0.0, recruiting.internship_target(conn)
+                                            - recruiting.paid_total(conn, application)), 2),
+                          "take": recruiting.internship_take(conn, application, goal_units)}
         if manual:
             if u["id"] in led:
                 detail, kind = book.trainer_share_manual(led[u["id"]], units_of, included or set()), "trainer"
@@ -338,6 +348,7 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             "commission_kind": kind,  # trainer / instructor: whose ladder and which people
             "delta": book.delta(),
             "rates": own,
+            "internship": internship,
             **lazy,
             "base_calc": base,
             **settle(base, money),
@@ -433,14 +444,16 @@ def _write_regular(conn, actor: dict, batch_id: int, rows: list[dict], picked: d
         conn.execute(
             """INSERT INTO payout_items (batch_id, user_id, role, network, phone, bank, recipient, personal_volume,
                    team_volume, base_calc, base, bonuses, fines, deductions, total, carried_debt, pieces_pay, commission,
-                   lazy_units, lazy_before, rate_base, rate_lazy, entered_amount, entered_units)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   lazy_units, lazy_before, rate_base, rate_lazy, entered_amount, entered_units, internship_units)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (batch_id, r["user_id"], r["role"], r["network"], r["phone"], r["bank"], r["recipient"], r["personal_volume"],
              r["team_volume"], r["base_calc"], base, r["bonuses"], r["fines"], r["deductions"], r["total"],
              r["carried_debt"], r["pieces_pay"], r["commission"],
              # the pool is written off here, inside the payout's transaction — never by a preview
              r["lazy_units"], r["lazy_before"], r["rate_base"], r["rate_lazy"],
-             r.get("entered_amount"), r.get("entered_units")),
+             r.get("entered_amount"), r.get("entered_units"),
+             # 18.11: how much of this payout goes to the trainee's internship goal
+             (r.get("internship") or {}).get("take")),
         )
         settle_txs(conn, batch_id, r["tx_ids"], actor, r.get("partial") or {})
         grand += r["total"]
@@ -492,6 +505,22 @@ def _require_amounts(conn: sqlite3.Connection, rows: list[dict], picked: dict[in
         raise ServiceError("Укажите сумму (или снимите галочку): " + ", ".join(missing), 422, "amount_required")
 
 
+def _close_internships(conn, actor: dict, rows: list[dict], batch_id: int) -> list[dict]:
+    """18.11: a trainee whose goal is paid up by this payout is accepted into the team by itself —
+    the same writes «Принять в команду» does, minus the referrer's bonus (that stays staff's decision)."""
+    closed = []
+    for r in rows:
+        internship = r.get("internship")
+        if not internship or not internship["take"]:
+            continue
+        app = recruiting.get(conn, internship["app_id"])
+        if app is None or app["status"] != "internship":
+            continue
+        if recruiting.paid_total(conn, app) >= recruiting.internship_target(conn):
+            closed.append(recruiting.close_internship(conn, actor, app["id"], batch_id))
+    return closed
+
+
 def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, date_to: date, rates: Rates,
            network_id: int | None, choices: list[dict], proof: list[str], deduction_proof: list[str], key: str) -> dict:
     """«Зафиксировать выплату» (ТЗ 11.3): recalculated on the server; the checkbox-chosen people with their
@@ -531,12 +560,16 @@ def commit(conn: sqlite3.Connection, actor: dict, title: str, date_from: date, d
         )
         batch_id = cur.lastrowid
         grand = _write_regular(conn, actor, batch_id, rows, picked, date_from, date_to)
+        closed = _close_internships(conn, actor, rows, batch_id)
         committed = [dict(i) for i in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = 0", (batch_id,))]
         conn.execute("UPDATE payout_batches SET total = ?, summary = ? WHERE id = ?",
                      (grand, json.dumps(summary(conn, committed, date_from, date_to, network_id)), batch_id))
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="PAYOUT_COMMITTED", key=key,
                   new={"batch": batch_id, "total": grand, "people": len(rows)}, description=title)
-    return batch(conn, batch_id)
+    result = batch(conn, batch_id)
+    if closed:
+        result["internship_closed"] = closed
+    return result
 
 
 # ---------------------------------------------------------------- edit and annul (ТЗ 28.10 §25)
@@ -623,6 +656,7 @@ def edit(conn: sqlite3.Connection, actor: dict, batch_id: int, choices: list[dic
         if clash:
             raise ServiceError("Период пересекается с действующей выплатой: " + "; ".join(clash[:5]), 409, "overlap")
         grand = _write_regular(conn, actor, batch_id, rows, picked, date_from, date_to)
+        closed = _close_internships(conn, actor, rows, batch_id)
         committed = [dict(i) for i in conn.execute("SELECT * FROM payout_items WHERE batch_id = ? AND voided = 0", (batch_id,))]
         conn.execute("""UPDATE payout_batches SET total = ?, summary = ?, version = version + 1, updated_at = ?, updated_by = ?
                         WHERE id = ?""",
@@ -630,7 +664,10 @@ def edit(conn: sqlite3.Connection, actor: dict, batch_id: int, choices: list[dic
                       actor["telegram_id"], batch_id))
         log_event(conn, user_id=actor["id"], actor_id=actor["telegram_id"], event_type="PAYOUT_EDITED", key=key,
                   old={"total": b["total"], "version": b["version"]}, new={"batch": batch_id, "total": grand}, description=note)
-    return batch(conn, batch_id)
+    result = batch(conn, batch_id)
+    if closed:
+        result["internship_closed"] = closed
+    return result
 
 
 def annul(conn: sqlite3.Connection, actor: dict, batch_id: int, reason: str | None, money_sent: bool, key: str) -> tuple[dict, list[dict]]:

@@ -508,6 +508,14 @@ function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: 
           )}
         </p>
       )}
+      {!!row.internship && (
+        <p className="mt-2 pl-9 text-xs text-muted-foreground">
+          Стажировка: осталось <span className="font-semibold text-foreground tabular">{row.internship.left} из {row.internship.target} шт.</span>
+          {row.internship.take > 0
+            ? <> — из этой выплаты в зачёт пойдут <span className="font-semibold text-foreground">{+row.internship.take.toFixed(2)} шт.</span>, при цели стажировка закроется сама.</>
+            : " — зачёт по выплатам уже полный."}
+        </p>
+      )}
       {!!row.fine_units && (
         <p className="mt-1 pl-9 text-xs text-muted-foreground">Штрафы: {row.fine_units} ед. = {rub(row.fines)}</p>
       )}

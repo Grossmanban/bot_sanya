@@ -17,7 +17,7 @@ from .timeutil import today_local
 
 KEYS = ("review", "no_show", "actual_missing", "actual_overdue", "fines_pending", "fines_draft", "violations",
         "registrations", "onboarding_new", "internship_review", "training_requests", "profile_changes", "payment_changes",
-        "urgent", "unmarked", "events_pending",
+        "urgent", "unmarked", "events_pending", "no_network",
         "alice_moderation", "alice_failed", "plus_moderation", "plus_failed")
 ALICE_GIVE_UP = 20  # alice.deliver stops retrying after this many attempts
 
@@ -85,6 +85,11 @@ def counts(conn: sqlite3.Connection, viewer: dict, today: date | None = None) ->
     if perms.can(viewer, "profiles"):  # §7: profile changes — owners and admins; payment details — owners (В20)
         out["profile_changes"] = conn.execute(
             "SELECT COUNT(*) FROM profile_requests WHERE kind = 'profile' AND status = 'pending'").fetchone()[0]
+    if perms.sees_everyone(viewer):
+        # 18.11: a person of the system with no network is a decision — put them somewhere («Сети» → «Без сети»)
+        out["no_network"] = conn.execute(
+            """SELECT COUNT(*) FROM users WHERE status = 'approved' AND account_state != 'blocked'
+               AND role = 'employee' AND network_id IS NULL""").fetchone()[0]
     if perms.can(viewer, "money"):
         out["payment_changes"] = conn.execute(
             "SELECT COUNT(*) FROM profile_requests WHERE kind = 'payment' AND status = 'pending'").fetchone()[0]
@@ -130,6 +135,7 @@ LABELS = {
     "fines_draft": "💸 Штрафы без суммы", "registrations": "👤 Заявки на доступ", "onboarding_new": "🧑‍🎓 Новые анкеты",
     "internship_review": "🎯 Стажировки на проверку", "training_requests": "⏳ Обучение: ожидает согласования",
     "profile_changes": "🪪 Изменения профилей", "payment_changes": "💳 Изменения реквизитов", "actual_missing": "📊 Дни без общего факта",
+    "no_network": "🌐 Не распределены по сети",
     "actual_overdue": "📊 Просрочено без общего факта", "alice_moderation": "📸 «Алиса»: на модерации",
     "alice_failed": "📸 «Алиса»: не отправлено", "plus_moderation": "📸 «Яндекс Плюс»: на модерации",
     "plus_failed": "📸 «Яндекс Плюс»: не отправлено",

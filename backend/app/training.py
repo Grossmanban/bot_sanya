@@ -570,7 +570,8 @@ def ack_cancellations(conn: sqlite3.Connection, actor: dict, app_id: int, key: s
 
 
 def start(conn: sqlite3.Connection, actor: dict, app_id: int, key: str) -> tuple[dict, bool]:
-    """«Обучение начато» (an admin, or a trainer's request approved)."""
+    """«Выдать доступ к приложению» (18.11): the candidate's account is approved — the Mini App opens (they
+    see the schedule and the training, they are not working yet); training_started_at marks the training held."""
     _check_key(key)
     with transaction(conn):
         actor, app = _load(conn, actor, app_id)
@@ -579,7 +580,10 @@ def start(conn: sqlite3.Connection, actor: dict, app_id: int, key: str) -> tuple
         if app["status"] != "scheduled" or not app["trainer_id"]:
             raise ServiceError("Сначала назначьте тренера", 409, "bad_status")
         _bump(conn, app_id, training_started_at=now_iso())
-        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="TRAINING_STARTED", key=key)
+        conn.execute("""UPDATE users SET status = 'approved', decided_at = ?, decided_by = ? WHERE id = ?
+                        AND status != 'approved'""", (now_iso(), actor["telegram_id"], app["user_id"]))
+        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="TRAINING_STARTED", key=key,
+                  new={"app_access": True})
     return get(conn, app_id), True
 
 

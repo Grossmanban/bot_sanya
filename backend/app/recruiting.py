@@ -6,9 +6,11 @@
       → staff assign a training: date, time, place, trainer (`scheduled`); the candidate confirms with a button;
         reminders the evening before and in the morning
       → «Начать стажировку»: access to the app as a trainee (`internship`); their shifts are training ones —
-        in the schedule and the raspred as «стажёр», not paid
-      → `internship_units` approved units reached → staff check it (may count fewer, e.g. 15 of 20),
-        confirm and give the referrer a bonus (`done`; the trainee is a regular employee from now on)
+        in the schedule and the raspred as «стажёр»; only the first `internship_units` pieces of theirs are
+        the internship, everything above pays as usual
+      → the goal counts what was PAID to the trainee by the payouts (18.11): a payout's units advance the
+        goal and reaching it closes the internship by itself (the trainee is a regular employee from now on);
+        staff may still check it by hand (may count fewer, e.g. 15 of 20) and give the referrer a bonus
       → `second_stage_units` work units after the internship → the second check and bonus.
     Any step: «Отказать» (optional reason; the account is closed — the bot stays silent), «Связаться
     напрямую» (a manager's @username; the candidate answers «Я написал» / «Не могу написать первым»),
@@ -50,6 +52,13 @@ def get(conn: sqlite3.Connection, app_id: int) -> dict | None:
 def current(conn: sqlite3.Connection, user_id: int) -> dict | None:
     """The person's application in work (not one returned to the reserve)."""
     row = conn.execute("SELECT * FROM applications WHERE user_id = ? AND status != 'returned' ORDER BY id DESC LIMIT 1",
+                       (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def open_internship(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    """The person's application while it is an internship (18.11: payouts advance its goal)."""
+    row = conn.execute("SELECT * FROM applications WHERE user_id = ? AND status = 'internship' ORDER BY id DESC LIMIT 1",
                        (user_id,)).fetchone()
     return dict(row) if row else None
 
@@ -138,19 +147,109 @@ def units(conn: sqlite3.Connection, user_id: int, training: bool, since: str | N
 
 
 def progress(conn: sqlite3.Connection, app: dict, user: dict | None = None) -> dict | None:
-    """What the trainee, the referrer and staff see: the internship, then the work units for the second bonus."""
+    """What the trainee, the referrer and staff see: the internship, then the work units for the second bonus.
+    18.11: the internship's goal counts what was PAID (payout_items.internship_units + the owner's manual
+    correction); before the first payout it shows the approved fact, like it always did."""
     if app["status"] not in ("internship", "done"):
         return None
     user = user or svc.get_user(conn, app["user_id"])
     cfg = app_settings.get_all(conn)
     if app["status"] == "internship":
-        done, pending = units(conn, user["id"], True)
+        fact, pending = units(conn, user["id"], True)
         target = cfg["internship_units"]
-        return {"stage": 1, "units": done, "pending": pending, "target": target, "review": done >= target}
+        paid = paid_total(conn, app)
+        done = paid if paid else min(fact, target)
+        return {"stage": 1, "units": done, "paid": paid, "fact": fact, "pending": pending, "target": target,
+                "review": fact >= target}
     done, pending = units(conn, user["id"], False, user.get("trainee_done_at"))
     target = cfg["second_stage_units"]
     return {"stage": 2, "units": done, "pending": pending, "target": target,
             "review": done >= target and not app["stage2_at"], "finished": bool(app["stage2_at"])}
+
+
+def paid_total(conn: sqlite3.Connection, app: dict) -> float:
+    """How much of the internship's goal is already paid: the live payout items' contributions plus the
+    owner's manual correction (applications.internship_manual_units)."""
+    items = conn.execute(
+        """SELECT COALESCE(SUM(i.internship_units), 0) FROM payout_items i WHERE i.user_id = ? AND i.voided = 0
+           AND i.internship_units IS NOT NULL""", (app["user_id"],)).fetchone()[0]
+    return round(items + (app.get("internship_manual_units") or 0), 2)
+
+
+def internship_target(conn: sqlite3.Connection) -> int:
+    return app_settings.get_all(conn)["internship_units"]
+
+
+def internship_take(conn: sqlite3.Connection, app: dict, units: float) -> float:
+    """How much of this payout's units goes to the goal: as much as is still missing (never above the target)."""
+    if units <= 0:
+        return 0.0
+    left = max(0.0, internship_target(conn) - paid_total(conn, app))
+    return round(min(units, left), 2)
+
+
+def shift_is_training(conn: sqlite3.Connection, user: dict) -> bool:
+    """18.11: a trainee's shift is a training one while their approved training pieces are still below the
+    goal — everything above the first `internship_units` pieces pays as usual."""
+    if not is_trainee(user):
+        return False
+    done = conn.execute(
+        f"""SELECT COALESCE(SUM(fact_volume), 0) FROM shifts WHERE user_id = ? AND training = 1
+            AND fact_volume IS NOT NULL AND status IN {ACTIVE}""", (user["id"],)).fetchone()[0]
+    return done < internship_target(conn)
+
+
+def close_internship(conn: sqlite3.Connection, actor: dict, app_id: int, batch_id: int | None = None) -> dict:
+    """Plain writes, the caller owns the transaction: «Принять в команду» by itself — the goal is paid up
+    (a payout reached it) or the owner counted it by hand. The referrer's bonus stays staff's decision."""
+    app = get(conn, app_id)
+    user = svc.get_user(conn, app["user_id"])
+    counted = paid_total(conn, {**app, "internship_manual_units": app.get("internship_manual_units") or 0})
+    conn.execute("UPDATE applications SET status = 'done', stage1_counted = ?, stage1_at = ?, version = version + 1 "
+                 "WHERE id = ?", (round(counted), now_iso(), app_id))
+    conn.execute("UPDATE users SET trainee_done_at = ? WHERE id = ?", (now_iso(), user["id"]))
+    log_event(conn, user_id=user["id"], actor_id=actor["telegram_id"], event_type="INTERNSHIP_AUTO_CLOSED",
+              key=svc.new_key(), new={"application": app_id, "counted": round(counted)},
+              description=f"закрыта выплатой №{batch_id}" if batch_id else "закрыта вручную по выплатам")
+    return get(conn, app_id)
+
+
+def set_internship_units(conn: sqlite3.Connection, actor: dict, app_id: int, value: int, key: str) -> tuple[dict, bool]:
+    """18.11: the owner corrects the goal's paid counter by hand (the card of the internship). Reaching the
+    target closes the internship; an auto-closed one returns to «Стажировка» if the value drops below."""
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return get(conn, app_id), False
+        actor, app = _load(conn, actor, app_id)
+        user = svc.get_user(conn, app["user_id"])
+        if app["status"] not in ("internship", "done") or app["stage2_at"] or user is None:
+            raise ServiceError("Корректировать можно идущую стажировку", 409, "bad_status")
+        target = internship_target(conn)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= target:
+            raise ServiceError(f"Значение — от 0 до {target}", 422, "bad_units")
+        items = conn.execute(
+            "SELECT COALESCE(SUM(internship_units), 0) FROM payout_items WHERE user_id = ? AND voided = 0",
+            (user["id"],)).fetchone()[0]
+        old_paid = paid_total(conn, app)
+        conn.execute("UPDATE applications SET internship_manual_units = ? WHERE id = ?",
+                     (round(value - items, 2), app_id))
+        closed = False
+        if value >= target and app["status"] == "internship":
+            close_internship(conn, actor, app_id)
+            closed = True
+        elif value < target and app["status"] == "done" and app["stage1_at"]:
+            last = conn.execute(
+                """SELECT event_type FROM event_logs WHERE user_id = ? AND user_id != 0
+                   AND event_type IN ('INTERNSHIP_AUTO_CLOSED', 'REFERRAL_STAGE1_CONFIRMED') ORDER BY id DESC LIMIT 1""",
+                (user["id"],)).fetchone()
+            if last and last["event_type"] == "INTERNSHIP_AUTO_CLOSED":  # a staff-checked one stays done
+                conn.execute("UPDATE applications SET status = 'internship', stage1_counted = NULL, stage1_at = NULL, "
+                             "version = version + 1 WHERE id = ?", (app_id,))
+                conn.execute("UPDATE users SET trainee_done_at = NULL WHERE id = ?", (user["id"],))
+        log_event(conn, user_id=user["id"], actor_id=actor["telegram_id"], event_type="INTERNSHIP_UNITS_SET", key=key,
+                  old={"paid": old_paid}, new={"paid": value})
+    return get(conn, app_id), closed
 
 
 # ---------------------------------------------------------------- views

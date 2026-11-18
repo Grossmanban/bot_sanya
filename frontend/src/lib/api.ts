@@ -287,6 +287,9 @@ export type ApplicationStatus = "new" | "scheduled" | "internship" | "done" | "r
 export interface StageProgress {
   stage: 1 | 2;
   units: number;
+  /** 18.11 (stage 1): how much of the goal is paid by the payouts already; `fact` — the approved pieces */
+  paid?: number;
+  fact?: number;
   pending: number;
   target: number;
   review: boolean;
@@ -743,6 +746,8 @@ export type ReportCounts = {
   payment_changes?: number;
   unmarked?: number;
   events_pending?: number;
+  /** 18.11: approved employees of no network — a decision for «Сети» → «Без сети» */
+  no_network?: number;
   alice_moderation?: number;
   alice_failed?: number;
   plus_moderation?: number;
@@ -1194,6 +1199,8 @@ export interface PayoutRow {
   entered_units?: number | null;
   /** 18.11: what the shifts alone would have paid — the reference under the amount field */
   auto_pay?: number;
+  /** 18.11: a trainee's internship — `take` of this payout's units goes to the goal, `left` is still missing */
+  internship?: { app_id: number; target: number; left: number; take: number } | null;
   /** 18.11: the manual commission aggregate {volume, step_rate, rate, amount} of the included people's units */
   commission_detail?: { volume: number; step_rate: number; rate: number; amount: number } | null;
 }
@@ -1603,6 +1610,10 @@ export const api = {
       post<{ application: Application }>(`/api/admin/onboarding/${id}/internship`, { idempotency_key: key }),
     confirmStage: (id: number, stage: 1 | 2, counted: number, bonus: number, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/stage`, { stage, counted, bonus, idempotency_key: key }),
+    // 18.11: the owner corrects the internship's paid counter by hand; reaching the target closes it
+    setInternshipUnits: (id: number, units: number, key: string) =>
+      post<{ application: Application; closed: boolean }>(`/api/admin/onboarding/${id}/internship-units`,
+        { units, idempotency_key: key }),
     templates: () => request<{ items: BroadcastTemplate[] }>("/api/admin/broadcast-templates"),
     saveTemplate: (title: string, html: string, id?: number) =>
       id ? patch<{ template: BroadcastTemplate }>(`/api/admin/broadcast-templates/${id}`, { title, html })

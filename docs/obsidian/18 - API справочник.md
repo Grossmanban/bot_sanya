@@ -78,8 +78,10 @@
 
 ## Админ: онбординг и обучение
 
-`GET /api/admin/onboarding` · `GET /api/admin/onboarding/{app}/trainer-preview` ·
-`POST /api/admin/onboarding/{app}/trainer|trainer-message|timer-reset|remind-referrer|training|reject|cancel-training|start-training|cancel-ack|return|contact|internship|stage` ·
+`GET /api/admin/onboarding` (18.11: у тренеров в `trainers` — `role` для приоритета в списке) ·
+`GET /api/admin/onboarding/{app}/trainer-preview` ·
+`POST /api/admin/onboarding/{app}/trainer|trainer-message|timer-reset|remind-referrer|training|reject|cancel-training|start-training|cancel-ack|return|contact|internship|stage|internship-units`
+(`internship-units`, 18.11: `{units}` — правка зачёта стажировки владельцем; цель закрывает стажировку) ·
 `POST /api/admin/training-requests/{id}/decide` · тренер: `GET /api/training`, `POST /api/training/{app}/request|confirm|schedule|cancel|finish`.
 
 ## Админ: Алиса/Плюс, методички, рассылки, настройки
@@ -92,7 +94,7 @@
 `POST …/{id}/remind`, `POST /api/admin/broadcasts/test`, шаблоны `/api/admin/broadcast-templates`.
 Настройки: `GET/PATCH /api/admin/settings` · `GET/POST/PATCH /api/admin/reasons(/{id})` · `GET/PUT /api/admin/texts/{key}` ·
 `GET/PUT/DELETE /api/admin/header-title` · `GET/PUT/DELETE /api/admin/global-link` · `GET /api/reasons` · `POST /api/admin/media(/video)`.
-Счётчики: `GET /api/admin/pending`. Экспорт: `POST /api/admin/export`.
+Счётчики: `GET /api/admin/pending` (18.11: ключ `no_network` — сотрудники без сети, для владельца/админов). Экспорт: `POST /api/admin/export`.
 
 > [!note] Новые эндпоинты — дописать в эту таблицу (регламент [[00 - Регламент документации]]).
 
@@ -105,4 +107,6 @@
 - 2026-11-18 — `GET /api/admin/team`: держателю `money` приходит `lazy_pool` (копилка налога на лень, шт.).
 - 2026-11-18 — `POST /api/admin/team/{uid}/work-status`: «Работаю» переключают только начальники; `PATCH /api/me/work-status`
   самим сотрудником — 403.
+- 2026-11-18 — `POST /api/admin/onboarding/{app}/internship-units`; `GET /api/admin/pending`: `no_network`;
+  `GET /api/admin/onboarding`: `role` в списке тренеров.
 - 2026-11-18 — `GET /api/admin/broadcasts`: в `people` флаги `shift_today`/`shift_tomorrow`; аудитории `shift_today`/`shift_tomorrow` в `POST`.

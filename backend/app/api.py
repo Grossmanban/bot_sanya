@@ -678,6 +678,11 @@ class StageBody(BaseModel):
     idempotency_key: str
 
 
+class InternshipUnits(BaseModel):
+    units: int
+    idempotency_key: str
+
+
 class TemplateBody(BaseModel):
     title: str
     html: str
@@ -2362,8 +2367,9 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/onboarding")
     async def admin_onboarding(tab: str = "new", _: dict = Depends(staff("registrations"))):
-        # §2: any active employee may train a candidate (the inviter is put first on each card)
-        people = [{"id": u["id"], "name": svc.full_name(u), "username": u["username"]}
+        # §2: any active employee may train a candidate (the inviter is put first on each card); 18.11: the
+        # owners and the trainers/instructors are marked and sorted first in the picker
+        people = [{"id": u["id"], "name": svc.full_name(u), "username": u["username"], "role": perms.role_of(u)}
                   for u in svc.list_users(conn) if u["status"] == "approved" and u["account_state"] == "active"]
         cfg = app_settings.get_all(conn)
         return {"items": [application_out(a) for a in recruiting.listing(conn, tab)], "counts": recruiting.counts(conn),
@@ -2490,6 +2496,15 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             if body.stage == 1:
                 notifier.spawn(notifier.team_accepted(a, admin))
         return {"application": application_out(a)}
+
+    @api.post("/admin/onboarding/{app_id}/internship-units")
+    async def admin_internship_units(app_id: int, body: InternshipUnits, admin: dict = Depends(staff("registrations"))):
+        """18.11: the owner corrects the internship's paid counter by hand; reaching the target closes it."""
+        a, closed = recruiting.set_internship_units(conn, admin, app_id, body.units, body.idempotency_key)
+        if closed:
+            notifier.spawn(notifier.stage_confirmed(a, 1, None))
+            notifier.spawn(notifier.team_accepted(a, admin))
+        return {"application": application_out(a), "closed": closed}
 
     @api.post("/admin/training-requests/{request_id}/decide")
     async def admin_training_decide(request_id: int, body: DecideBody, admin: dict = Depends(staff("registrations"))):
@@ -2752,6 +2767,9 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
                                body.idempotency_key)
         if not batch.get("repeated"):  # a repeated tap gets the same payout and sends nothing again
             notifier.spawn(notifier.payout_committed(batch, owner))
+        for a in batch.get("internship_closed") or []:  # 18.11: the goal paid up — the trainee is in the team
+            notifier.spawn(notifier.stage_confirmed(a, 1, None))
+            notifier.spawn(notifier.team_accepted(a, owner))
         return {"batch": batch, "bank_text": payouts.bank_text(batch)}
 
     @api.post("/admin/payouts/{batch_id}/edit")
@@ -2762,10 +2780,16 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Выплата не найдена", 404, "not_found")
         if before.get("product") in alice.KINDS:
             alice.edit_payout(conn, owner, batch_id, body.confirmed, body.idempotency_key, body.note)
+            batch = payouts.batch(conn, batch_id)
         else:
-            payouts.edit(conn, owner, batch_id, [c.model_dump() for c in body.choices], body.idempotency_key, body.note)
-        batch = payouts.batch(conn, batch_id)
+            result = payouts.edit(conn, owner, batch_id, [c.model_dump() for c in body.choices],
+                                  body.idempotency_key, body.note)
+            batch = payouts.batch(conn, batch_id)
+            batch["internship_closed"] = result.get("internship_closed") or []
         notifier.spawn(notifier.payout_changed(before, batch, owner))
+        for a in batch.get("internship_closed") or []:  # 18.11: the goal paid up by the edited amounts
+            notifier.spawn(notifier.stage_confirmed(a, 1, None))
+            notifier.spawn(notifier.team_accepted(a, owner))
         return {"batch": batch, "bank_text": payouts.bank_text(batch)}
 
     @api.post("/admin/payouts/{batch_id}/annul")

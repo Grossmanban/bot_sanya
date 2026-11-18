@@ -1489,6 +1489,28 @@ ALTER TABLE payout_items ADD COLUMN entered_units REAL
 """)
 
 
+def _internship_paid_units(conn: sqlite3.Connection) -> None:
+    """Migration 45 — 18.11: стажировка идёт по оплаченному. `payout_items.internship_units` — сколько штук
+    этой выплаты пошло в зачёт стажировки; `applications.internship_manual_units` — ручная правка владельца
+    поверх выплат. Раз зачёт теперь по выплатам, у действующих стажёров засчитываются только первые
+    `internship_units` штук: со смен сверх цели флаг training снимается (раньше помечались целиком)."""
+    conn.execute("ALTER TABLE applications ADD COLUMN internship_manual_units REAL NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE payout_items ADD COLUMN internship_units REAL")
+    row = conn.execute("SELECT value FROM app_settings WHERE key = 'internship_units'").fetchone()
+    target = int(row[0]) if row and str(row[0]).strip().isdigit() else 20
+    for app in conn.execute("SELECT id, user_id FROM applications WHERE status = 'internship' ORDER BY id").fetchall():
+        seen = 0
+        for shift in conn.execute(
+                """SELECT id, fact_volume FROM shifts WHERE user_id = ? AND training = 1 AND fact_volume IS NOT NULL
+                   AND status IN ('active', 'restored') ORDER BY shift_date, id""", (app["user_id"],)).fetchall():
+            seen += shift["fact_volume"] or 0
+            if seen > target:
+                conn.execute("UPDATE shifts SET training = 0 WHERE id = ?", (shift["id"],))
+
+
+MIGRATIONS.append(_internship_paid_units)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

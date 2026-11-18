@@ -4,7 +4,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Send, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type Application, type TrainingRequest, type User } from "@/lib/api";
+import { api, type Application, type Role, type StageProgress, type TrainingRequest, type User } from "@/lib/api";
 import { ddmm, plural } from "@/lib/format";
 import { moscowToday, useAction, useLoad } from "@/lib/hooks";
 import { openProfile } from "@/lib/telegram";
@@ -22,7 +22,7 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 const DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 const field = "h-11 w-full rounded-xl border-0 bg-muted px-3 text-[15px] outline-none focus:ring-2 focus:ring-ring/25";
-type Trainer = { id: number; name: string; username: string | null };
+type Trainer = { id: number; name: string; username: string | null; role?: Role };
 type Sort = "new" | "age" | "skill" | "days";
 type Dir = "desc" | "asc";
 
@@ -67,6 +67,8 @@ export function OnboardingSection({ me }: { me: User }) {
     return list.sort((a, b) => agreement(a) - agreement(b) || chosen(a, b) || byNewest(a, b));
   }, [data, age, skill, days, sort, dir, tab]);
   const filtered = !!(age[0] || age[1]) || skill[0] > 1 || skill[1] < 10 || days.length > 0;
+  // 18.11: in all the pickers the owners and the trainers/instructors come first (the inviter tops it on the card)
+  const trainersSorted = useMemo(() => sortedTrainers(data?.trainers ?? []), [data]);
 
   return (
     <div className="space-y-4">
@@ -142,7 +144,7 @@ export function OnboardingSection({ me }: { me: User }) {
       </details>
 
       {data && data.requests.length > 0 && (
-        <Requests items={data.requests} trainers={data.trainers} points={data.points} onDone={reload} />
+        <Requests items={data.requests} trainers={trainersSorted} points={data.points} onDone={reload} />
       )}
 
       {!data ? <Skeleton className="h-48 rounded-3xl" /> : items.length === 0 ? (
@@ -155,7 +157,7 @@ export function OnboardingSection({ me }: { me: User }) {
             <li className="px-1 text-xs text-muted-foreground">Сверху — кандидаты, у которых дату и время подтвердили и кандидат, и тренер.</li>
           )}
           {items.map((a) => (
-            <Candidate key={a.id} a={a} me={me} trainers={data.trainers} points={data.points} onDone={reload} />
+            <Candidate key={a.id} a={a} me={me} trainers={trainersSorted} points={data.points} onDone={reload} />
           ))}
         </ul>
       )}
@@ -202,12 +204,12 @@ function Candidate({ a, me, trainers, points, onDone }: {
     </Button>);
   add(scheduled && a.trainer && !a.training_started_at, "start",
     <Button size="sm" variant="secondary" className="h-9 rounded-xl" disabled={!!busy}
-            onClick={() => act("start", (k) => api.admin.startTraining(a.id, k), "Обучение начато")}>
-      <Play /> Начать обучение
+            onClick={() => act("start", (k) => api.admin.startTraining(a.id, k), "Доступ к приложению открыт")}>
+      <Play /> Выдать доступ к приложению
     </Button>);
   add(scheduled && a.trainer, "intern",
     <Button size="sm" className="h-9 rounded-xl bg-go text-white hover:bg-go/90" disabled={!!busy}
-            onClick={() => act("intern", (k) => api.admin.startInternship(a.id, k), "Стажировка началась: доступ к приложению открыт")}>
+            onClick={() => act("intern", (k) => api.admin.startInternship(a.id, k), "Стажировка началась: у кандидата цель по стажировке")}>
       {busy === "intern" ? <LoaderCircle className="animate-spin" /> : <GraduationCap />} Начать стажировку
     </Button>);
   add(a.status === "internship" || (a.status === "done" && !a.stage2_at), "stage",
@@ -339,11 +341,15 @@ function Candidate({ a, me, trainers, points, onDone }: {
                   style={{ width: `${Math.min(100, (p.units / Math.max(p.target, 1)) * 100)}%` }} />
           </div>
           <p className="text-xs text-muted-foreground">
-            {p.stage === 1 ? "Стажировка (учебные, не оплачиваются)" : "Работа после стажировки"}: <b className="text-foreground">{p.units} из {p.target}</b>
+            {p.stage === 1 ? "Стажировка (зачёт по оплаченным выплатам)" : "Работа после стажировки"}:{" "}
+            <b className="text-foreground">{p.units} из {p.target}</b>
+            {p.stage === 1 && !!p.paid && p.fact != null && p.fact !== p.units ? ` · сделано по факту ${p.fact}` : ""}
             {p.pending ? `, ещё ${p.pending} на проверке` : ""}{p.review ? " · ждёт проверки" : ""}
             {a.finish_requested_at ? " · тренер отметил завершение" : ""}
             {a.stage1_counted != null ? ` · стажировка засчитана: ${a.stage1_counted}` : ""}
           </p>
+          {/* 18.11: the owner corrects the paid counter by hand; the target closes the internship */}
+          {p.stage === 1 && a.status === "internship" && <PaidUnits a={a} p={p} onDone={onDone} />}
         </div>
       )}
 
@@ -384,10 +390,22 @@ function Candidate({ a, me, trainers, points, onDone }: {
   );
 }
 
+/** 18.11: the picker's order — the inviter first, then the owners, the trainers and the instructors (marked),
+ * then the rest of the employees. */
+const TRAINER_RANK: Record<string, number> = { owner: 1, trainer: 2, instructor: 3, admin: 4, employee: 5 };
+const TRAINER_TAG: Record<string, string> = { owner: "владелец · ", trainer: "тренер · ", instructor: "инструктор · ", admin: "админ · " };
+
+function sortedTrainers(trainers: Trainer[], referrerId: number | null = null): Trainer[] {
+  return [...trainers].sort((x, y) =>
+    (Number(y.id === referrerId) - Number(x.id === referrerId))
+    || ((TRAINER_RANK[x.role ?? "employee"] ?? 5) - (TRAINER_RANK[y.role ?? "employee"] ?? 5))
+    || x.name.localeCompare(y.name));
+}
+
 function TrainerForm({ a, trainers, busy, onSave }: { a: Application; trainers: Trainer[]; busy: boolean;
   onSave: (trainerId: number, send: boolean) => void }) {
-  // §2: the inviter first, marked; any active employee may be the trainer
-  const sorted = [...trainers].sort((x, y) => Number(y.id === a.referrer_id) - Number(x.id === a.referrer_id));
+  // §2 + 18.11: the inviter first, marked; the owners and the trainers/instructors next; any employee may train
+  const sorted = sortedTrainers(trainers, a.referrer_id ?? null);
   const [trainer, setTrainer] = useState<number | null>(a.trainer?.id ?? (a.referrer_id && trainers.some((t) => t.id === a.referrer_id) ? a.referrer_id : null));
   const [preview, setPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -409,7 +427,7 @@ function TrainerForm({ a, trainers, busy, onSave }: { a: Application; trainers: 
       <select className={field} aria-label="Тренер" value={trainer ?? ""} onChange={(e) => pick(e.target.value ? Number(e.target.value) : null)}>
         <option value="">Тренер — любой сотрудник</option>
         {sorted.map((t) => (
-          <option key={t.id} value={t.id}>{t.id === a.referrer_id ? "★ " : ""}{t.name}{t.username ? ` @${t.username}` : ""}{t.id === a.referrer_id ? " — пригласил(а)" : ""}</option>
+          <option key={t.id} value={t.id}>{t.id === a.referrer_id ? "★ " : ""}{TRAINER_TAG[t.role ?? "employee"] ?? ""}{t.name}{t.username ? ` @${t.username}` : ""}{t.id === a.referrer_id ? " — пригласил(а)" : ""}</option>
         ))}
       </select>
       {!preview ? (
@@ -588,6 +606,43 @@ function ContactForm({ me, busy, onSave }: { me: User; busy: boolean; onSave: (m
       <Button className="press h-11 w-full rounded-xl" disabled={busy || !manager.replace("@", "")} onClick={() => onSave(manager)}>
         {busy && <LoaderCircle className="animate-spin" />} Написать кандидату
       </Button>
+    </div>
+  );
+}
+
+/** 18.11: the owner corrects the internship's paid counter by hand — reaching the target closes the
+ * internship («Принять в команду» happens by itself, without the referrer's bonus). */
+function PaidUnits({ a, p, onDone }: { a: Application; p: StageProgress; onDone: () => void }) {
+  const [value, setValue] = useState<string | null>(null);
+  const { busy, run } = useAction();
+  const paid = p.paid ?? p.units;
+  const save = async () => {
+    const n = Number(value);
+    if (!value || Number.isNaN(n)) return;
+    try {
+      const res = await run("paid", (k) => api.admin.setInternshipUnits(a.id, Math.min(Math.max(0, Math.round(n)), p.target), k),
+        n >= p.target ? "Цель закрыта — стажировка завершена, кандидат в команде" : "Зачёт стажировки обновлён");
+      if (res) onDone();
+      setValue(null);
+    } catch {
+      /* toast shown */
+    }
+  };
+  return (
+    <div className="flex items-center gap-2">
+      {value === null ? (
+        <button className="text-xs font-semibold text-primary" onClick={() => setValue(String(Math.round(paid)))}>
+          Править зачёт ({Math.round(paid)}/{p.target})
+        </button>
+      ) : (
+        <>
+          <input inputMode="numeric" aria-label="Зачтено выплатами, шт." value={value} autoFocus
+                 onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 3))}
+                 className="h-8 w-16 rounded-lg border-0 bg-card px-2 text-sm font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
+          <Button size="sm" className="press h-8 rounded-lg px-2" disabled={!!busy} onClick={save}>Сохранить</Button>
+          <Button size="sm" variant="ghost" className="h-8 rounded-lg px-2" onClick={() => setValue(null)}>Отмена</Button>
+        </>
+      )}
     </div>
   );
 }
