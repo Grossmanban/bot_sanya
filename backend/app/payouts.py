@@ -6,8 +6,8 @@ in the wizard count. The period's plan and approved fact stay as a reference (п
 
     base      = the entered amount + the commission (the trainer's/instructor's share of the included units)
     trainers  += the included team volume × the step rate (the ladder or the personal one), within the delta
-    the «налог на лень» pool pays at the lazy rate: of the payout's units the first min(P, L) — in the manual
-    mode too, the units come from the entered amounts; what didn't fit waits for the next payout
+    the «налог на лень» pool pays at the lazy rate only in the legacy auto count; 19.11 hotfix: a hand-entered
+    amount is the pay in full — nothing fact-derived nibbles at it, the pool neither taxes it nor is consumed
     bonuses, fines, deductions — everything still active settles at the nearest payout, whatever its date
 Money is settled oldest first while it fits: deductions, then fines. What doesn't fit stays active —
 the debt is kept and the payout never goes below zero. Settled entries become 'offset' with the payout id.
@@ -285,11 +285,12 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
         amount = int(amounts.get(u["id"]) or 0) if manual else 0
         units = units_of.get(u["id"], 0.0)
         if manual:
-            # 18.11: the entered rubles stand, but the pool takes its tax the smart way — of the units derived
-            # from the amount the first min(units, pool) pay at the lazy rate (ТЗ 27.10 §21), the rest of the
-            # pool waits for the next payout (payout_items keeps only what was actually taken)
-            lazy = split_lazy(units, pool, own)
-            pieces_pay = amount - int(round(lazy["lazy_units"] * (own["rate_base"] - own["rate_lazy"])))
+            # 19.11 hotfix: a hand-entered amount is the pay, full stop — no fact-derived nibbling. The lazy
+            # pool neither taxes the amount nor is written off (nothing counted «по фактическим» ever changes
+            # a manual payout; the reference under the field stays for the owner's eye)
+            lazy = {"lazy_units": 0.0, "full_units": units, "lazy_before": pool, "lazy_after": pool,
+                    "rate_base": own["rate_base"], "rate_lazy": own["rate_lazy"], "pieces_pay": amount}
+            pieces_pay = amount
             # what the shifts alone would have paid — the reference under the amount field
             lazy["auto_pay"] = split_lazy(personal, pool, own)["pieces_pay"]
         else:

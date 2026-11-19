@@ -184,10 +184,11 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
     }
   }
 
-  // the server recalculates on commit; here the row is shown as amount − pool tax + commission + bonuses − fines
+  // the server recalculates on commit; here the row is shown as amount + commission + bonuses − fines (19.11:
+  // the hand-entered amount stands in full — no fact-derived adjustments touch it)
   const shown = (r: PayoutRow) => {
     const amt = entered[r.user_id] ?? 0;
-    return Math.max(0, amt - lazyTax(r, amt) + r.commission + r.bonuses - r.fines - r.deductions);
+    return Math.max(0, amt + r.commission + r.bonuses - r.fines - r.deductions);
   };
   const picked = rows.filter((r) => include[r.user_id]);
   const total = picked.reduce((s, r) => s + shown(r), 0);
@@ -440,15 +441,6 @@ function PhotoDialog({ report, people, busy, onApply, onClose, onNewPhoto }: {
   );
 }
 
-/** 18.11: the pool's tax on a hand-entered amount — of the units derived from it the first min(units, L) pay at
- * the lazy rate; the rest of the pool waits for the next payout. The same formula the server applies. */
-function lazyTax(row: Pick<PayoutRow, "lazy_before" | "rate_base" | "rate_lazy">, amount: number): number {
-  const pool = row.lazy_before ?? 0;
-  const base = row.rate_base ?? 0, lazyRate = row.rate_lazy ?? 0;
-  if (!pool || !amount || base <= lazyRate) return 0;
-  return Math.round(Math.min(Number((amount / base).toFixed(2)), pool) * (base - lazyRate));
-}
-
 function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: {  row: PayoutRow; on: boolean; total: number; amount: string; onToggle: () => void; onAmount: (v: string) => void;
   onMoney: () => void;
 }) {
@@ -457,8 +449,6 @@ function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: 
   const rate = row.rate_base ?? 0;
   const units = amount && rate > 0 ? Number((Number(amount) / rate).toFixed(2)) : 0;
   const pool = row.lazy_before ?? 0;
-  const lazyUnits = pool > 0 && units > 0 ? Math.min(units, pool) : 0;
-  const tax = lazyTax(row, Number(amount) || 0);
   const detail = row.commission_detail;
   return (
     <li className={cn("px-5 py-4 md:px-6", on ? "bg-primary/5" : "opacity-50")}>
@@ -506,12 +496,7 @@ function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: 
       {!!pool && (
         <p className="mt-2 pl-9 text-xs text-muted-foreground">
           Копилка налога на лень: <span className="font-semibold text-foreground tabular">{pool} шт.</span>
-          {units > 0
-            ? <> — {lazyUnits} шт. из ≈ {units} оплатим по {row.rate_lazy} ₽ вместо {rate} ₽{tax > 0 ? <>: минус {rub(tax)} ₽</> : null}</>
-            : <> — столько штук ближайшей выплаты оплатятся по {row.rate_lazy} ₽ вместо {rate} ₽</>}
-          {units > 0 && lazyUnits < pool && (
-            <span className="block">Остаток {+(pool - lazyUnits).toFixed(2)} шт. перенесётся на следующую выплату.</span>
-          )}
+          {" "}— справка; на ручную выплату не влияет, платит ваша сумма.
         </p>
       )}
       {!!row.internship && (

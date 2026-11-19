@@ -1,5 +1,6 @@
 """18.11: ручные суммы в мастере выплат — штуки из ставки, комиссии с включённых, полный зачёт денег,
-копилка налога на лень платится по ставке лени с переносом остатка, сброс копилок и список для банка."""
+сброс копилок и список для банка. 19.11: ручная сумма не режется ничем «по фактическим» — долг
+списывается с полной введённой суммы, копилка налога на лень на выплату не влияет."""
 
 from datetime import date, timedelta
 
@@ -44,22 +45,23 @@ def test_the_amount_is_the_pay_and_the_units_feed_the_trainer(conn, make_user):
     owner, north, vera, ivan, petya = world(conn, make_user)
     did(conn, ivan, WEEK[0], 10)  # a lazy day (below 20): 10 pieces into the pool
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1200}, {ivan["id"], vera["id"]})
-    # 1200 ₽ at the common 120 → 10 units; the pool has 10 — all 10 pay at the lazy 100, so 1000 ₽
+    # 1200 ₽ at the common 120 → 10 units; 19.11: the entered rubles are the pay in full — the pool
+    # neither taxes them nor is consumed; auto_pay stays a reference for the owner's eye
     assert rows[ivan["id"]]["entered_amount"] == 1200 and rows[ivan["id"]]["entered_units"] == 10
-    assert rows[ivan["id"]]["pieces_pay"] == 1000 and rows[ivan["id"]]["lazy_units"] == 10
+    assert rows[ivan["id"]]["pieces_pay"] == 1200 and rows[ivan["id"]]["lazy_units"] == 0
     assert rows[ivan["id"]]["auto_pay"] == 10 * 100
     assert rows[ivan["id"]]["plan_volume"] == 20  # the plan of the day (did() defaults to 20)
     # the trainer's commission: 10 units × min(trainer_commission=10, delta=30) — she did nothing herself
     vera_row = rows[vera["id"]]
     assert vera_row["team_volume"] == 10 and vera_row["commission"] == 100
     assert vera_row["commission_detail"] == {"volume": 10, "step_rate": 10, "rate": 10, "amount": 100}
-    # a personal rate changes the units: 1200 ₽ at 200 → 6 units; the tax comes off the entered rubles
+    # a personal rate changes the units: 1200 ₽ at 200 → 6 units; the pay is still the whole 1200
     from app import rates
 
     rates.set_user_rates(conn, owner, ivan["id"], {"personal_rate": 200}, svc.new_key())
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1200}, {ivan["id"], vera["id"]})
     assert rows[ivan["id"]]["entered_units"] == 6 and rows[vera["id"]]["team_volume"] == 6
-    assert rows[ivan["id"]]["pieces_pay"] == 1200 - 6 * (200 - 100)  # the lazy rate of his personal ladder
+    assert rows[ivan["id"]]["pieces_pay"] == 1200
 
 
 def test_commissions_count_only_the_included_people(conn, make_user):
@@ -130,26 +132,54 @@ def test_a_fine_bigger_than_the_payout_eats_it_all_and_keeps_the_debt(conn, make
     assert rows[ivan["id"]]["fines"] == 1840 and rows[ivan["id"]]["total"] == 3160
 
 
-def test_the_lazy_pool_pays_at_the_lazy_rate_and_carries_over(conn, make_user):
-    """18.11: the entered amount is the units; their first min(units, L) pay at the lazy rate, the tax comes
-    off the pay. Only what actually fit is written off — the rest waits for the next payout."""
+def test_the_pool_never_touches_a_manual_payout(conn, make_user):
+    """19.11 hotfix: a hand-entered amount is the pay in full — the lazy pool (accrued from fact days)
+    neither taxes it nor is written off by the payout; it stays as a reference counter."""
     owner, north, vera, ivan, petya = world(conn, make_user)
     for i, fact in enumerate((10, 15, 5)):
         did(conn, ivan, WEEK[i], fact)
     assert payouts.lazy_pool(conn, ivan["id"], 20, WEEK[-1]) == 30
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1200}, {ivan["id"]})
     r = rows[ivan["id"]]
-    # 1200 ₽ → 10 units; the pool has 30 — all 10 pay at the lazy 100 ₽: 1000 ₽
-    assert r["lazy_units"] == 10 and r["full_units"] == 0 and r["pieces_pay"] == 1000
+    # 1200 ₽ → 10 units, all pay at the full rate: the pay is the entered sum, the pool untouched
+    assert r["lazy_units"] == 0 and r["full_units"] == 10 and r["pieces_pay"] == 1200
     payouts.commit(conn, owner, "Зарплата", WEEK[0], WEEK[-1], payouts.Rates.from_dict(None), north["id"],
                    [{"user_id": ivan["id"], "amount": 1200}], [], [], svc.new_key())
-    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE) == 20  # 10 of 30 consumed, the rest carried
-    # the next payout eats the rest: 2400 ₽ → 20 units → all 20 lazy → 2000 ₽, and the pool is empty
+    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE) == 30  # nothing consumed
     rows = rows_of(conn, FUTURE, FUTURE, {ivan["id"]: 2400}, {ivan["id"]})
-    assert rows[ivan["id"]]["lazy_units"] == 20 and rows[ivan["id"]]["pieces_pay"] == 2000
+    assert rows[ivan["id"]]["lazy_units"] == 0 and rows[ivan["id"]]["pieces_pay"] == 2400
     payouts.commit(conn, owner, "Зарплата 2", FUTURE, FUTURE, payouts.Rates.from_dict(None), north["id"],
                    [{"user_id": ivan["id"], "amount": 2400}], [], [], svc.new_key())
-    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE + timedelta(days=30)) == 0
+    assert payouts.lazy_pool(conn, ivan["id"], 20, FUTURE + timedelta(days=30)) == 30  # still untouched
+
+
+def test_debts_settle_from_the_full_entered_amount(conn, make_user):
+    """19.11 hotfix (the owner's case): a 1800 debt — fines and deductions — settles from the entered sum
+    in full. 1500 pays off 1500 and leaves exactly 300; the payout after that closes the rest. A lazy pool
+    sitting on the person changes nothing."""
+    owner, north, vera, ivan, petya = world(conn, make_user)
+    did(conn, ivan, WEEK[0], 10)  # 10 pieces in the pool — must not nibble at the entered sum
+    fine = finance.create(conn, owner, ivan["id"], "fine", None, "Штраф", svc.new_key(), units=12).tx  # 12 × 120 = 1440
+    deduction = finance.create(conn, owner, ivan["id"], "deduction", 360, "Вычет", svc.new_key()).tx
+    # 1800 covers the whole debt: everything offsets, the person is paid nothing, nothing hangs
+    rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1800}, {ivan["id"]})
+    r = rows[ivan["id"]]
+    assert (r["deductions"], r["fines"]) == (360, 1440) and r["carried_debt"] == 0 and r["total"] == 0
+    # 1500: the deduction goes first, the fine takes the rest — 300 of it stays as the debt
+    rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1500}, {ivan["id"]})
+    r = rows[ivan["id"]]
+    assert (r["deductions"], r["fines"]) == (360, 1140) and r["carried_debt"] == 300 and r["total"] == 0
+    payouts.commit(conn, owner, "Зарплата", WEEK[0], WEEK[-1], payouts.Rates.from_dict(None), north["id"],
+                   [{"user_id": ivan["id"], "amount": 1500}], [], [], svc.new_key())
+    assert finance.get(conn, deduction["id"])["status"] == "offset"
+    left = finance.get(conn, fine["id"])
+    assert left["status"] == "active" and left["amount"] == 300
+    # the next payout of 300 closes the debt completely
+    rows = rows_of(conn, FUTURE, FUTURE, {ivan["id"]: 300}, {ivan["id"]})
+    assert rows[ivan["id"]]["fines"] == 300 and rows[ivan["id"]]["carried_debt"] == 0
+    payouts.commit(conn, owner, "Зарплата 2", FUTURE, FUTURE, payouts.Rates.from_dict(None), north["id"],
+                   [{"user_id": ivan["id"], "amount": 300}], [], [], svc.new_key())
+    assert finance.get(conn, fine["id"])["status"] == "offset"
 
 
 # ---------------------------------------------------------------- the pools reset
