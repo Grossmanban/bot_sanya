@@ -31,7 +31,7 @@ export function ExportCard({ from, to, user }: { from: string; to: string; user:
       <div className="min-w-0 flex-1">
         <p className="font-semibold">Выгрузка в Excel</p>
         <p className="text-sm text-muted-foreground">
-          {user ? `${user.first_name} ${user.last_name}` : "Вся команда"}: итоги, смены и штрафы за выбранный период. Файл придёт в бот.
+          {user ? `${user.name}` : "Вся команда"}: итоги, смены и штрафы за выбранный период. Файл придёт в бот.
         </p>
       </div>
       <Button

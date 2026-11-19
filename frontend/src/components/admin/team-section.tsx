@@ -89,7 +89,7 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
               <li key={u.id} className="row-in flex flex-wrap items-center gap-3 px-5 py-3.5 md:px-6">
                 <Avatar user={u} className="size-10 rounded-xl bg-wait text-sm text-white" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium">{u.first_name} {u.last_name}</p>
+                  <p className="truncate font-medium">{u.name}</p>
                   <p className="text-sm text-muted-foreground">
                     {u.username ? `@${u.username}` : `ID ${u.telegram_id}`}
                     {u.created_at ? `, ${dayMonth(u.created_at.slice(0, 10))}` : ""}
@@ -217,7 +217,7 @@ function Group({
                 <Avatar user={u} className={cn("size-10 rounded-xl text-sm", muted && "bg-muted text-muted-foreground")} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">
-                    {u.first_name} {u.last_name}
+                    {u.name}
                     {u.id === me.id && <span className="font-normal text-muted-foreground"> (вы)</span>}
                   </span>
                   <span className="block text-sm text-muted-foreground">
@@ -344,12 +344,12 @@ function MemberSheet({
               <div className="flex items-start gap-4">
                 <Avatar user={user} className={cn("size-16 rounded-2xl text-xl", state === "blocked" && "bg-muted text-muted-foreground")} />
                 <div className="min-w-0 flex-1">
-                  <DrawerTitle className="font-display text-xl font-semibold">{user.first_name} {user.last_name}</DrawerTitle>
+                  <DrawerTitle className="font-display text-xl font-semibold">{user.name}</DrawerTitle>
                   <DrawerDescription>
                     {user.username ? `@${user.username}, ` : ""}ID {user.telegram_id}
                   </DrawerDescription>
                   <button className="mt-1 text-sm font-semibold text-primary underline-offset-2 hover:underline"
-                          onClick={() => openProfile(user.username, user.telegram_id, `${user.first_name} ${user.last_name}`)}>
+                          onClick={() => openProfile(user.username, user.telegram_id, `${user.name}`)}>
                     Открыть профиль в Telegram
                   </button>
                 </div>
@@ -557,7 +557,7 @@ function MemberSheet({
       <AlertDialog open={blocking} onOpenChange={(o) => { setBlocking(o); if (!o) setReason(""); }}>
         <AlertDialogContent className="rounded-3xl">
           <AlertDialogHeader>
-            <AlertDialogTitle className="font-display">Заблокировать {user?.first_name}?</AlertDialogTitle>
+            <AlertDialogTitle className="font-display">Заблокировать {user?.name}?</AlertDialogTitle>
             <AlertDialogDescription>
               Бот и приложение закроются, рабочие сообщения и напоминания приходить не будут, права будут сняты.
               История и деньги сохранятся, разблокировать можно в любой момент.
@@ -761,7 +761,7 @@ function PersonData({ userId }: { userId: number }) {
         <StatusPill status={data.state.status} />
       </div>
       <p className="text-sm break-words">
-        {[p.last_name, p.first_name, p.middle_name].filter(Boolean).join(" ")}{p.age ? ` · ${p.age} лет` : ""}{p.metro ? ` · м. ${p.metro}` : ""}
+        {[p.last_name, p.first_name, p.middle_name ? `${p.middle_name[0]}.` : ""].filter(Boolean).join(" ")}{p.age ? ` · ${p.age} лет` : ""}{p.metro ? ` · м. ${p.metro}` : ""}
         {p.min_days ? ` · от ${p.min_days} дн. (${p.work_days.map((i) => WD[i]).join(", ")})` : ""}
       </p>
       {data.missing.length > 0 && <p className="text-xs text-muted-foreground">Не заполнено: {data.missing.join(", ").toLowerCase()}</p>}

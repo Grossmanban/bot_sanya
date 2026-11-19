@@ -389,7 +389,7 @@ function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Reco
       </button>
       <p className="mt-1.5 text-xs text-muted-foreground">
         {b.media_file_id ? (b.media_kind === "video" ? "🎬 " : "📷 ") : ""}{who}, доставлено {b.delivered} из {b.recipients}
-        {b.first_name ? `, ${b.first_name}` : ""}, {ddmm(b.created_at.slice(0, 10))} в {b.created_at.slice(11, 16)}
+        {[b.last_name, b.first_name].filter(Boolean).length ? `, ${[b.last_name, b.first_name].filter(Boolean).join(" ")}` : ""}, {ddmm(b.created_at.slice(0, 10))} в {b.created_at.slice(11, 16)}
       </p>
       <SentMessage b={b} html={html} meta={`${who}, ${ddmm(b.created_at.slice(0, 10))} в ${b.created_at.slice(11, 16)}`}
                    open={full} onOpenChange={setFull} />

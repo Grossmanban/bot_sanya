@@ -304,7 +304,7 @@ def test_unmarked_tomorrow_reminder_then_violation(conn, make_user):
     assert asks == [silent["telegram_id"]]
     run(jobs.tick(conn, n, at(today, "22:00")))
     pending = violations.listing(conn, owner)
-    assert [(v["name"].split()[0], v["kind"]) for v in pending] == [("Вика", "unmarked")]
+    assert [(v["name"].split()[1], v["kind"]) for v in pending] == [("Вика", "unmarked")]
     assert any("Не отметили график" in t for chat, t in n.sent if chat == 999)
     run(jobs.tick(conn, n, at(today, "22:01")))  # once a day
     assert len(violations.listing(conn, owner)) == 1

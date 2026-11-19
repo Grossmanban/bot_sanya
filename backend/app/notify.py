@@ -765,7 +765,7 @@ class Notifier:
         user = svc.get_user(self.conn, app["user_id"])
         ref = svc.get_user(self.conn, app["referrer_id"]) if app["referrer_id"] else None
         sent = msk_datetime(app.get("created_at"))
-        return (f"👤 {person_link(user, app['full_name'])}, {app['age']} лет, м. {escape(app['metro'])}\n"
+        return (f"👤 {person_link(user, svc.fio_text(app['full_name']))}, {app['age']} лет, м. {escape(app['metro'])}\n"
                 f"Дней в неделю: от {app['min_days']}, обучение: {recruiting.days_text(app)}, общение: {app['communication']}/10"
                 + (f"\nПригласил(а): {escape(svc.full_name(ref))}" if ref else "")
                 # 19.11: the questionnaire's priority mark — «в первую очередь на обучение»
@@ -825,7 +825,7 @@ class Notifier:
         if previous_id and previous_id != trainer["id"]:
             prev = svc.get_user(self.conn, previous_id)
             if prev:
-                await self.send(prev["telegram_id"], f"ℹ️ Кандидат {escape(app['full_name'])} передан другому тренеру — "
+                await self.send(prev["telegram_id"], f"ℹ️ Кандидат {escape(svc.fio_text(app['full_name']))} передан другому тренеру — "
                                                      f"{escape(svc.full_name(trainer))}. Из вашего списка он убран.")
         if send_candidate:
             return await self.trainer_message(app)
@@ -848,14 +848,14 @@ class Notifier:
         if previous_id and previous_id != trainer["id"]:
             prev = svc.get_user(self.conn, previous_id)
             if prev:
-                await self.send(prev["telegram_id"], f"ℹ️ Кандидат {escape(app['full_name'])} передан другому тренеру — "
+                await self.send(prev["telegram_id"], f"ℹ️ Кандидат {escape(svc.fio_text(app['full_name']))} передан другому тренеру — "
                                                      f"{escape(svc.full_name(trainer))}.")
 
     async def training_confirmed(self, app: dict) -> None:
         user = svc.get_user(self.conn, app["user_id"])
         await self.send(user["telegram_id"], "✅ Вы успешно записаны. Ждём вас!")
         trainer = svc.get_user(self.conn, app["trainer_id"])
-        text = (f"✅ Кандидат {escape(app['full_name'])} подтвердил запись на обучение "
+        text = (f"✅ Кандидат {escape(svc.fio_text(app['full_name']))} подтвердил запись на обучение "
                 f"{app['training_date'][8:10]}.{app['training_date'][5:7]} в {app['training_time']}, {escape(app['training_location'])}.")
         await self.send(trainer["telegram_id"], text)
 
@@ -882,7 +882,7 @@ class Notifier:
         await self.send(user["telegram_id"], f"ℹ️ {what}.\nПричина: {reason}\n"
                                              "Мы рассмотрим вашу анкету заново и напишем, когда назначим обучение.")
         head = "Неявка кандидата — обучение отменено" if no_show else f"Обучение{when} отменено"
-        lines = (f"Кандидат: {person_link(user, app['full_name'])}\n"
+        lines = (f"Кандидат: {person_link(user, svc.fio_text(app['full_name']))}\n"
                  f"Тренер: {person_link(trainer) if trainer else '—'}\nПричина: {reason}\n"
                  f"Отмены обучения: {n}/{top}")
         if trainer:
@@ -893,7 +893,7 @@ class Notifier:
                 await self.send(chat, f"🚫 <b>{head}</b>\n{lines}\nКандидат вернулся в «Онбординг» → «Ожидают рассмотрения» — "
                                       "его можно назначить тому же или другому тренеру.", _open_app())
         if n >= top > 0:
-            await self.to_admins(f"⚠️ <b>Отмены обучения: {n}/{top}</b> — {escape(app['full_name'])}.\n"
+            await self.to_admins(f"⚠️ <b>Отмены обучения: {n}/{top}</b> — {escape(svc.fio_text(app['full_name']))}.\n"
                                  "Решите в «Онбординге»: назначить обучение снова или отказать. Автоматического отказа нет.",
                                  _open_app())
 
@@ -915,7 +915,7 @@ class Notifier:
         was = when(old.get("training_date"), old.get("training_time"), old.get("training_location"))
         head = (f"🔁 <b>Обучение перенесено</b>\nБыло: {was}\nСтало: {new}\n\n" if changed else "")
         await self.send(user["telegram_id"], head + self._training_text(app), self._candidate_buttons(app))
-        who_line = (f"Кандидат: {person_link(user, app['full_name'])}\nТренер: {person_link(trainer)}")
+        who_line = (f"Кандидат: {person_link(user, svc.fio_text(app['full_name']))}\nТренер: {person_link(trainer)}")
         text = (f"🔁 <b>Тренер изменил дату обучения</b>\n{who_line}\nБыло: {was}\nСтало: <b>{new}</b>" if changed else
                 f"📅 <b>Тренер назначил дату обучения</b>\n{who_line}\nКогда: <b>{new}</b>")
         for chat in svc.owner_telegram_ids():
@@ -923,7 +923,7 @@ class Notifier:
                 await self.send(chat, text + "\nКандидат получил уведомление и подтвердит запись.", _open_app())
         await self.send(trainer["telegram_id"],
                         f"✅ {'Дата обучения изменена' if changed else 'Дата обучения назначена'}: {new}\n"
-                        f"Кандидат {escape(app['full_name'])} получил уведомление"
+                        f"Кандидат {escape(svc.fio_text(app['full_name']))} получил уведомление"
                         + (f" (было: {was})" if changed else "") + ". Ждём его подтверждения.")
 
     async def access_restored(self, telegram_id: int) -> bool:
@@ -944,14 +944,14 @@ class Notifier:
             return False
         cand = svc.get_user(self.conn, app["user_id"])
         text = templates.render(self.conn, "referrer_help", имя_пригласившего=escape(ref["first_name"]),
-                                ФИО_кандидата=person_link(cand, app["full_name"]), ФИО_тренера=person_link(trainer))
+                                ФИО_кандидата=person_link(cand, svc.fio_text(app["full_name"])), ФИО_тренера=person_link(trainer))
         return await self.send(ref["telegram_id"], text)
 
     async def candidate_answered(self, app: dict) -> None:
         """«Я связался» / «Не могу написать первым» — to the trainer and the admins."""
         user = svc.get_user(self.conn, app["user_id"])
         trainer = svc.get_user(self.conn, app["trainer_id"])
-        link = person_link(user, app["full_name"])
+        link = person_link(user, svc.fio_text(app["full_name"]))
         text = (f"✍️ Кандидат {link} сообщил, что связался с тренером {escape(svc.full_name(trainer))}."
                 if app["contact_answer"] == "wrote" else
                 f"⚠️ Кандидат {link} не может написать первым — напишите ему сами. Тренер: {person_link(trainer)}")
@@ -970,7 +970,7 @@ class Notifier:
         trainer = svc.get_user(self.conn, app["trainer_id"]) if app["trainer_id"] else None
         lines = [f"⏳ <b>Запрос: {escape(req['title'])}</b>",
                  f"От: {person_link(initiator) if initiator else '—'} ({role})",
-                 f"Кандидат: {person_link(who, app['full_name'])}",
+                 f"Кандидат: {person_link(who, svc.fio_text(app['full_name']))}",
                  f"Тренер: {escape(svc.full_name(trainer)) if trainer else '—'}"]
         if req["kind"] == "change":
             old, new = req["old"], req["payload"]
@@ -1030,7 +1030,7 @@ class Notifier:
         app = training.get(self.conn, req["application_id"])
         initiator = svc.get_user_by_tg(self.conn, req["initiator_tg"]["telegram_id"]) if req.get("initiator_tg") else None
         if initiator:
-            text = f"{verdict}: «{escape(req['title'])}» — {escape(app['full_name'])}" if req["initiator_role"] == "trainer" \
+            text = f"{verdict}: «{escape(req['title'])}» — {escape(svc.fio_text(app['full_name']))}" if req["initiator_role"] == "trainer" \
                 else f"{verdict}: ваш запрос на перенос обучения."
             if req.get("decision_reason"):
                 text += f"\nПричина: {escape(req['decision_reason'])}"
@@ -1113,7 +1113,7 @@ class Notifier:
     async def finish_requested(self, app: dict) -> None:
         from . import digest
 
-        name = escape(app["full_name"])
+        name = escape(svc.fio_text(app["full_name"]))
         if digest.on(self.conn):
             await self.to_onboarding(f"🎯 {name}: тренер отметил стажировку завершённой — "
                                      "ждёт проверки («Онбординг» → «Принять в команду»)", category="onboarding")
@@ -1142,7 +1142,7 @@ class Notifier:
         await self.send(user["telegram_id"], text, force=True)  # the account is blocked by now (§6)
         trainer = svc.get_user(self.conn, app["trainer_id"]) if app.get("trainer_id") else None
         if trainer:
-            await self.send(trainer["telegram_id"], f"ℹ️ Кандидату {escape(app['full_name'])} отказано — он убран из вашего списка.")
+            await self.send(trainer["telegram_id"], f"ℹ️ Кандидату {escape(svc.fio_text(app['full_name']))} отказано — он убран из вашего списка.")
 
     async def application_returned(self, app: dict) -> None:
         user = svc.get_user(self.conn, app["user_id"])
@@ -1161,9 +1161,9 @@ class Notifier:
                         markup)
 
     async def contact_answered(self, app: dict) -> None:
-        name = escape(app["full_name"])
+        name = escape(svc.fio_text(app["full_name"]))
         user = svc.get_user(self.conn, app["user_id"])
-        link = person_link(user, app["full_name"])
+        link = person_link(user, svc.fio_text(app["full_name"]))
         text = (f"✍️ Кандидат {link} сообщил, что связался с вами (@{escape(app['contact_manager'])})."
                 if app["contact_answer"] == "wrote" else
                 f"⚠️ Кандидат {link} просит написать ему сам. Причина: ограничения аккаунта или стеснение. "
@@ -1190,7 +1190,7 @@ class Notifier:
         from . import digest
 
         what = "набрал(а) стажировку" if app["stage"] == 1 else "отработал(а) второй этап"
-        name, units = escape(app["full_name"]), f"{app['units']} из {app['target']} шт."
+        name, units = escape(svc.fio_text(app["full_name"])), f"{app['units']} из {app['target']} шт."
         if digest.on(self.conn):
             await self.to_admins(f"🎯 {name} {what}: {units} — подтвердите в «Онбординг»", category="onboarding")
             return
@@ -1211,7 +1211,7 @@ class Notifier:
         if app["referrer_id"]:
             ref = svc.get_user(self.conn, app["referrer_id"])
             step = "прошёл стажировку" if stage == 1 else "отработал второй этап"
-            text = f"🤝 Ваш приглашённый {escape(app['full_name'])} {step}: засчитано {counted} шт."
+            text = f"🤝 Ваш приглашённый {escape(svc.fio_text(app['full_name']))} {step}: засчитано {counted} шт."
             if tx:
                 text += f"\n💰 Бонус {tx['amount']} ₽ начислен."
             await self.send(ref["telegram_id"], text)

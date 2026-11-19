@@ -254,7 +254,7 @@ function Attempts() {
         <ul className="divide-y">
           {[...people.values()].map((rows) => {
             const a = rows[0];
-            const name = [a.first_name, a.last_name].filter(Boolean).join(" ");
+            const name = [a.last_name, a.first_name].filter(Boolean).join(" ");
             const st = ACCESS[a.access] ?? ACCESS.none;
             const restorable = canRestore && (a.access === "none" || a.access === "invited");
             return (

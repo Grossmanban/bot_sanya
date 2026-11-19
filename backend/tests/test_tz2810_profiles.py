@@ -57,7 +57,7 @@ def test_request_review_reject_resend_approve_and_the_log(conn, setup):
     assert (fresh["middle_name"], fresh["age"], fresh["min_days"]) == ("Ильич", 26, 3)
     assert client.get("/api/me/profile", headers=h).json()["state"]["status"] == "complete"
     log = client.get(f"/api/admin/users/{u['id']}/profile", headers=oh).json()["history"]
-    assert log[0]["how"] == "одобрена заявка сотрудника" and log[0]["new"]["age"] == 26 and log[0]["by"] == "Саня Владелец"
+    assert log[0]["how"] == "одобрена заявка сотрудника" and log[0]["new"]["age"] == 26 and log[0]["by"] == "Владелец Саня"
 
 
 def test_admin_edits_at_once_and_the_waiting_request_is_superseded(conn, setup):

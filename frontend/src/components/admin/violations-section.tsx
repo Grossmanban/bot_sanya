@@ -29,11 +29,6 @@ const what = (v: Violation) => v.kind === "unmarked"
   ? `не отметил график на ${dayChip(v.week_start)}`
   : `вышел ${v.actual_days} из ${v.required_days}, ${weekRange(v.week_start, v.week_end)}`;
 
-function initials(name: string) {
-  const [first = "", last = ""] = name.split(" ");
-  return { first_name: first, last_name: last };
-}
-
 /** ТЗ 12.4: weeks below the norm of work days — every one gets «штраф» or «оправдание», once. */
 export function ViolationsSection({ onChanged }: { onChanged: () => void }) {
   const [tab, setTab] = useState<"pending" | "resolved">("pending");
@@ -113,7 +108,7 @@ export function ViolationsSection({ onChanged }: { onChanged: () => void }) {
 function Head({ v }: { v: Violation }) {
   return (
     <div className="flex items-start gap-3">
-      <Avatar user={initials(v.name)} className="size-11 rounded-2xl text-sm" />
+      <Avatar user={{ name: v.name }} className="size-11 rounded-2xl text-sm" />
       <div className="min-w-0 flex-1">
         <p className="truncate font-semibold">{v.name}</p>
         <p className="text-sm text-muted-foreground">

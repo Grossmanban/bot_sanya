@@ -218,7 +218,7 @@ def test_week_view_shows_colleagues_and_flags(conn, make_user):
     assert week["start"] == "2026-10-12" and week["end"] == "2026-10-18"
     sat = week["days"][5]
     assert sat["date"] == SAT.isoformat() and sat["my_shift"] is None
-    assert sat["colleagues"][0]["name"] == "Ваня Бургер" and sat["colleagues"][0]["start_time"] == "14:00"
+    assert sat["colleagues"][0]["name"] == "Бургер Ваня" and sat["colleagues"][0]["start_time"] == "14:00"
     assert sat["colleagues_off"][0]["first_name"] == "Вера"
     assert week["days"][0]["is_past"] and week["days"][2]["is_today"]
 
@@ -258,9 +258,9 @@ def test_raspred_sorted_and_excludes_cancelled(conn, make_user):
     sid = create(conn, c, payload={**PAYLOAD, "start_time": "15:00"}).shift["id"]
     svc.cancel_shift(conn, c, sid, svc.new_key(), today=TODAY)
     data = svc.raspred(conn, SAT)
-    assert [r["name"] for r in data["rows"]] == ["Мария Пупкина", "Вася Пупкин"]
+    assert [r["name"] for r in data["rows"]] == ["Пупкина Мария", "Пупкин Вася"]
     assert data["total_count"] == 2 and data["total_volume"] == 45
-    assert "16:00–19:00 — Мария Пупкина — 15 шт. — Центр" in data["text"]
+    assert "16:00–19:00 — Пупкина Мария — 15 шт. — Центр" in data["text"]
     assert "(@vasya)" in data["text"]
     assert "нет сотрудников" in svc.raspred(conn, SAT + timedelta(days=1))["text"]
 
@@ -376,3 +376,18 @@ def test_pending_request_decided_from_team(conn):
     user, changed = svc.set_access(conn, owner, newbie["id"], True, svc.new_key())
     assert changed and user["status"] == "approved"
     assert svc.claim_welcome(conn, user["id"])
+
+
+def test_name_format_one_style(conn, make_user):
+    """19.11: «Фамилия Имя О.» everywhere — the questionnaire's «Имя Отчество» kept in first_name and the older
+    accounts' middle_name render the same way; no patronymic — no initial."""
+    petr = make_user(first="Пётр Ильич", last="Сидоров")       # from the questionnaire
+    sasha = make_user(first="Александр", last="Иванов")
+    conn.execute("UPDATE users SET middle_name = 'Аркадьевич' WHERE id = ?", (sasha["id"],))
+    sasha = svc.get_user(conn, sasha["id"])
+    plain = make_user(first="Мария", last="Кузнецова")
+    assert svc.full_name(petr) == "Сидоров Пётр И."
+    assert svc.full_name(sasha) == "Иванов Александр А."
+    assert svc.full_name(plain) == "Кузнецова Мария"
+    assert svc.fio_text("Сидоров Пётр Ильич") == "Сидоров Пётр И."
+    assert svc.fio_text("Кузнецова Мария") == "Кузнецова Мария"

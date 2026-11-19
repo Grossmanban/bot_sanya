@@ -47,7 +47,7 @@ export function NetworksSection() {
             {loose.map((u) => (
               <li key={u.id} className="flex items-center gap-3 px-5 py-3 md:px-6">
                 <Avatar user={u} className="size-9 rounded-xl text-xs" />
-                <span className="min-w-0 flex-1 truncate">{u.first_name} {u.last_name}</span>
+                <span className="min-w-0 flex-1 truncate">{u.name}</span>
                 {canEdit && nets.data!.items.length > 0 && <MoveTo user={u} nets={nets.data!.items} onDone={reload} />}
               </li>
             ))}
@@ -211,7 +211,7 @@ function NetworkCard({ net, people, owners, canEdit, onChanged }: {
           {adding && (
             <div className="w-full">
               <Picker people={candidates} busy={!!busy} label="Добавить в сеть"
-                      onPick={(u) => act(`in-${u.id}`, (k) => api.admin.setMemberNetwork(u.id, net.id, k), `${u.first_name} в сети «${net.name}»`)} />
+                      onPick={(u) => act(`in-${u.id}`, (k) => api.admin.setMemberNetwork(u.id, net.id, k), `${u.name} — сеть «${net.name}»`)} />
             </div>
           )}
         </div>
@@ -222,7 +222,7 @@ function NetworkCard({ net, people, owners, canEdit, onChanged }: {
 
 function Picker({ people, onPick, busy, label }: { people: User[]; onPick: (u: User) => void; busy: boolean; label: string }) {
   const [q, setQ] = useState("");
-  const list = people.filter((u) => `${u.first_name} ${u.last_name}`.toLowerCase().includes(q.toLowerCase())).slice(0, 30);
+  const list = people.filter((u) => (u.name ?? "").toLowerCase().includes(q.toLowerCase())).slice(0, 30);
   return (
     <div className="row-in mt-3 space-y-2">
       <input autoFocus className={cn(field, "w-full")} placeholder={`${label}: поиск`} value={q} onChange={(e) => setQ(e.target.value)} />
@@ -232,7 +232,7 @@ function Picker({ people, onPick, busy, label }: { people: User[]; onPick: (u: U
           <li key={u.id}>
             <button disabled={busy} onClick={() => onPick(u)} className="press flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-muted">
               <Avatar user={u} className="size-8 rounded-lg text-xs" />
-              <span className="min-w-0 flex-1 truncate">{u.first_name} {u.last_name}</span>
+              <span className="min-w-0 flex-1 truncate">{u.name}</span>
               {u.is_owner ? <span className="text-xs text-muted-foreground">владелец</span>
                 : u.network_id != null && <span className="text-xs text-muted-foreground">из другой сети</span>}
             </button>

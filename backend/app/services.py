@@ -70,8 +70,31 @@ def _row(r: sqlite3.Row | None) -> dict | None:
     return dict(r) if r is not None else None
 
 
+def format_name(last: str, first: str, middle: str = "") -> str:
+    """19.11: the display format everywhere — the last name first, then the first name, then the initial of
+    the patronymic: «Иванов Александр А.»; without a patronymic — «Иванов Александр»."""
+    parts = [p for p in ((last or "").strip(), (first or "").strip()) if p]
+    middle = (middle or "").strip()
+    if middle:
+        parts.append(f"{middle[0].upper()}.")
+    return " ".join(parts)
+
+
 def full_name(user: dict) -> str:
-    return f"{user['first_name']} {user['last_name']}".strip()
+    """19.11: «Фамилия Имя О.» everywhere, one style for the people who came through the questionnaire and the
+    people who registered before it. The questionnaire keeps «Имя Отчество» in first_name (submit splits the raw
+    ФИО after the first word), the older accounts have the patronymic in middle_name — both render the same way."""
+    first = (user.get("first_name") or "").split()
+    middle = (user.get("middle_name") or "").strip() or (first[1] if len(first) > 1 else "")
+    return format_name(user.get("last_name") or "", first[0] if first else "", middle)
+
+
+def fio_text(text: str) -> str:
+    """A questionnaire's raw «Фамилия Имя Отчество» → «Фамилия Имя О.» — display only, the stored text stays."""
+    parts = (text or "").split()
+    if len(parts) <= 2:
+        return (text or "").strip()
+    return format_name(parts[0], parts[1], parts[2])
 
 
 def _check_key(key: str) -> str:

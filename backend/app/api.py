@@ -733,6 +733,8 @@ def public_user(user: dict) -> dict:
         "telegram_id": user["telegram_id"],
         "first_name": user["first_name"],
         "last_name": user["last_name"],
+        # 19.11: «Фамилия Имя О.» — the one display style, composed on the server
+        "name": svc.full_name(user),
         "username": user["username"],
         "status": user["status"],
         "role": perms.role_of(user),

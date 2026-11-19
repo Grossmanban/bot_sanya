@@ -227,7 +227,7 @@ def test_trainer_sees_only_own_network_and_cannot_fine(client, conn):
                                             updated_at) VALUES (?, ?, '10:00', '16:00', 20, 'Европа', 'active', 't', 't')""",
                      (ids[name], tomorrow))
     rows = client.get("/api/admin/raspred/tomorrow", headers=th).json()["rows"]
-    assert [r["name"] for r in rows] == ["Свой Тест"]
+    assert [r["name"] for r in rows] == ["Тест Свой"]
     assert client.get("/api/admin/raspred/tomorrow", headers=owner).json()["total_count"] == 2
     assert "raspred" in me["capabilities"] and "all_people" not in me["capabilities"]
     assert client.get("/api/admin/settings", headers=th).status_code == 403

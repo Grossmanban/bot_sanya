@@ -58,7 +58,7 @@ def test_trainer_sets_and_changes_the_date_with_notifications(conn, world):
     assert cand and cand[-1].inline_keyboard[0][0].callback_data == f"trc:{app['id']}:{version}"
     assert "Ваше обучение запланировано" in bot.to(7001)[-1] and "11:00" in bot.to(7001)[-1]
     owner = bot.to(999)[-1]
-    assert "Тренер назначил дату обучения" in owner and "Сидоров Пётр Ильич" in owner and "Вера" in owner
+    assert "Тренер назначил дату обучения" in owner and "Сидоров Пётр И." in owner and "Вера" in owner
     assert "Дата обучения назначена" in bot.to(world["vera"]["telegram_id"])[-1]
     # the admin's list shows the same date
     board = c.get("/api/admin/onboarding?tab=scheduled", headers=world["oh"]).json()
@@ -137,7 +137,7 @@ def test_trainer_cancels_candidate_goes_back_to_review_with_history(conn, world)
     assert [x["id"] for x in board["items"]] == [app["id"]] and board["counts"]["scheduled"] == 0
     # the attempt is kept with everything it had
     [att] = a["attempts"]
-    assert att["status"] == "cancelled" and att["trainer"].startswith("Вера") and att["reason"] == "Кандидат заболел"
+    assert att["status"] == "cancelled" and att["trainer"].endswith("Вера") and att["reason"] == "Кандидат заболел"
     assert att["training_date"] == app["training_date"] and att["training_time"] == "11:00"
     assert att["candidate_confirmed_at"] and att["trainer_confirmed_at"] and att["cancelled_at"]
     assert [e["title"] for e in att["events"]][0].startswith("Назначен тренер") and att["events"][-1]["title"] == "Обучение отменено"
@@ -146,7 +146,7 @@ def test_trainer_cancels_candidate_goes_back_to_review_with_history(conn, world)
     assert "отменено" in bot.to(7001)[-1] and "Кандидат заболел" in bot.to(7001)[-1]
     assert "Кандидат заболел" in bot.to(world["vera"]["telegram_id"])[-1] and "Ожидают рассмотрения" in bot.to(world["vera"]["telegram_id"])[-1]
     owner = bot.to(999)[-1]
-    assert "Сидоров Пётр Ильич" in owner and "Вера" in owner and "Кандидат заболел" in owner
+    assert "Сидоров Пётр И." in owner and "Вера" in owner and "Кандидат заболел" in owner
     # the old trainer can't touch the candidate any more
     r = c.post(f"/api/training/{app['id']}/schedule",
                json={"date": day(2), "time": "11:00", "location": "Европа", "idempotency_key": key()}, headers=vh)
@@ -157,8 +157,8 @@ def test_trainer_cancels_candidate_goes_back_to_review_with_history(conn, world)
                                                               "idempotency_key": key()}, headers=oh)
     a = recruiting.view(conn, recruiting.get(conn, app["id"]))
     assert a["status"] == "scheduled" and a["cancel_count"] == 1 and a["attempt"] == 2
-    assert [x["status"] for x in a["attempts"]] == ["cancelled", "active"] and a["attempts"][0]["trainer"].startswith("Вера")
-    assert a["attempts"][1]["trainer"].startswith("Олег") and a["attempts"][1]["training_date"] is None
+    assert [x["status"] for x in a["attempts"]] == ["cancelled", "active"] and a["attempts"][0]["trainer"].endswith("Вера")
+    assert a["attempts"][1]["trainer"].endswith("Олег") and a["attempts"][1]["training_date"] is None
     # the admin cancels the second one: 2/3, the history keeps both
     r = c.post(f"/api/admin/onboarding/{app['id']}/cancel-training",
                json={"reason": "Не отвечает", "idempotency_key": key()}, headers=oh).json()["application"]
@@ -200,7 +200,7 @@ def test_an_approved_cancel_request_also_returns_to_review(conn, world):
     a = recruiting.get(conn, app["id"])
     assert a["status"] == "new" and a["trainer_id"] is None
     [cancel] = training.cancellations(conn, app["id"])
-    assert cancel["role"] == "trainer" and cancel["initiator"].startswith("Вера") and cancel["trainer"].startswith("Вера")
+    assert cancel["role"] == "trainer" and cancel["initiator"].endswith("Вера") and cancel["trainer"].endswith("Вера")
 
 
 def test_migration_moves_waiting_candidates_back_but_not_refused_ones(tmp_path):
@@ -351,9 +351,9 @@ def test_owner_restores_access_by_hand(conn, make_user, world):
                json={"telegram_id": 5004, "referrer_id": world["ref"]["id"], "idempotency_key": key()}, headers=oh)
     assert r.status_code == 200
     res = r.json()
-    assert res["link"].startswith("https://t.me/test_bot?start=ref_") and res["referrer"].startswith("Пригласил")
+    assert res["link"].startswith("https://t.me/test_bot?start=ref_") and res["referrer"].endswith("Пригласил")
     row = next(a for a in res["items"] if a["telegram_id"] == 5004)
-    assert row["access"] == "invited" and row["restored_at"] and row["restored_by_name"].startswith("Саня")
+    assert row["access"] == "invited" and row["restored_at"] and row["restored_by_name"].endswith("Саня")
     assert row["restore_result"] == "sent" and res["delivered"] is True
     assert any(ch == 5004 and "анкету" in t for ch, t, _ in bot.sent)
     # the usual questionnaire with the chosen inviter; the existing record is the only one

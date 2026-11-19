@@ -47,7 +47,7 @@ def test_second_reviewer_learns_who_decided(conn, make_user):
     with pytest.raises(svc.ServiceError) as e:
         events.review(conn, owner, entry["id"], True, None, svc.new_key())
     assert e.value.code == "already_decided" and e.value.status == 409
-    assert e.value.message.startswith("Уже решено: ✅ Подтверждено — Максим Селезнев в ")
+    assert e.value.message.startswith("Уже решено: ✅ Подтверждено — Селезнев Максим в ")
     # the same request repeated (same key) is still a quiet no-op
     key = svc.new_key()
     entry2, _ = events.submit(conn, make_user(first="Оля"), ev["id"], 5, "p", svc.new_key(), now=at(THU, "12:10"))
@@ -81,7 +81,7 @@ def test_card_opens_the_app_and_is_marked_for_everyone(conn, make_user, https):
     result = events.review(conn, second, entry["id"], True, None, svc.new_key())
     run(n.event_reviewed(result, second))
     assert {e[0] for e in n.bot.edits} == set(cards)  # every reviewer's card, the decider's too
-    assert all("✅ Подтверждено</b> — Максим Селезнев" in e[2] and e[3] is None for e in n.bot.edits)
+    assert all("✅ Подтверждено</b> — Селезнев Максим" in e[2] and e[3] is None for e in n.bot.edits)
 
 
 def test_rejection_reason_on_the_cards(conn, make_user, https):

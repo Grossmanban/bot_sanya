@@ -162,8 +162,8 @@ def test_http_register_with_start_param_and_onboarding(conn, make_user):
     assert me["registered"] and me["application"]["status"] == "new"
     assert recruiting.current(conn, me["user"]["id"])["referrer_id"] == friend["id"]
     board = client.get("/api/admin/onboarding?tab=new", headers=owner).json()
-    assert [a["full_name"] for a in board["items"]] == ["Сидоров Пётр Ильич"] and board["counts"]["new"] == 1
-    assert board["items"][0]["referrer"].startswith("Аня")
+    assert [a["full_name"] for a in board["items"]] == ["Сидоров Пётр И."] and board["counts"]["new"] == 1
+    assert board["items"][0]["referrer"].endswith("Аня")
     employee = {"X-Telegram-Init-Data": sign_init_data({"id": friend["telegram_id"], "first_name": "Аня"}, settings.bot_token)}
     assert client.get("/api/admin/onboarding", headers=employee).status_code == 403
     refs = client.get("/api/me/referrals", headers=employee).json()

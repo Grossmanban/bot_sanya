@@ -178,8 +178,8 @@ def test_one_person_link_everywhere(conn, make_user):
 
     named = make_user(first="Аня", username="anya")
     plain = make_user(first="Без", username=None)
-    assert notify.who(named) == '<a href="https://t.me/anya">Аня Петров</a> (@anya)'
-    assert notify.who(plain) == (f'<a href="tg://user?id={plain["telegram_id"]}">Без Петров</a> '
+    assert notify.who(named) == '<a href="https://t.me/anya">Петров Аня</a> (@anya)'
+    assert notify.who(plain) == (f'<a href="tg://user?id={plain["telegram_id"]}">Петров Без</a> '
                                  f'(без username, ID <code>{plain["telegram_id"]}</code>)')
     assert notify.name_handle(named) == notify.who(named)
     assert notify.person_link(plain, "Кандидат <b>") .count("&lt;b&gt;") == 1  # names are escaped

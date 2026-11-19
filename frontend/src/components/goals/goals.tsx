@@ -380,7 +380,7 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
       {!editing && kind === "personal" && (
         <select className={field} value={userId ?? ""} onChange={(e) => setUserId(e.target.value ? Number(e.target.value) : null)}>
           <option value="">Кому</option>
-          {people.map((u) => <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>)}
+          {people.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
         </select>
       )}
       {!editing && kind === "network" && everyone && (
@@ -457,7 +457,7 @@ function GoalForm({ me, everyone, types, initial, onDone, onCancel }: {
 /** A group goal: tick the people (the customer: no saved groups, just checkboxes each time). */
 function PeopleChecklist({ people, value, onChange }: { people: User[]; value: number[]; onChange: (v: number[]) => void }) {
   const [q, setQ] = useState("");
-  const shown = people.filter((u) => `${u.first_name} ${u.last_name ?? ""}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const shown = people.filter((u) => (u.name ?? "").toLowerCase().includes(q.trim().toLowerCase()));
   const all = shown.length > 0 && shown.every((u) => value.includes(u.id));
   return (
     <div className="rounded-2xl bg-muted/50 p-3">
@@ -477,7 +477,7 @@ function PeopleChecklist({ people, value, onChange }: { people: User[]; value: n
               <label className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-2 hover:bg-card">
                 <input type="checkbox" className="size-4 accent-[var(--primary)]" checked={on}
                        onChange={() => onChange(on ? value.filter((x) => x !== u.id) : [...value, u.id])} />
-                <span className="min-w-0 flex-1 truncate text-[15px]">{u.first_name} {u.last_name}</span>
+                <span className="min-w-0 flex-1 truncate text-[15px]">{u.name}</span>
               </label>
             </li>
           );

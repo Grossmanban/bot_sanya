@@ -193,7 +193,8 @@ def request_view(conn: sqlite3.Connection, r: dict) -> dict:
             "status": r["status"], "reason": r["reason"], "created_at": r["created_at"],
             "initiator": svc.full_name(who) if who else None, "initiator_role": r["initiator_role"],
             "initiator_tg": {"telegram_id": who["telegram_id"], "username": who["username"]} if who else None,
-            "candidate": app.get("full_name"), "priority": bool(app.get("priority")),
+            "candidate": svc.fio_text(app.get("full_name") or "") if app else None,
+            "priority": bool(app.get("priority")),
             "payload": payload, "old": json.loads(r["old"] or "{}"),
             "new_trainer": svc.full_name(new_trainer) if new_trainer else None,
             "decision_reason": r["decision_reason"], "decided_at": r["decided_at"]}

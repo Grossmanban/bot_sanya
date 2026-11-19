@@ -311,10 +311,12 @@ def view(conn: sqlite3.Connection, app: dict) -> dict:
         waited = (svc.now_local() - datetime.fromisoformat(app["created_at"])).total_seconds() / 3600
         waiting = {"hours": round(max(0.0, waited), 2), "text": wait_text(waited)}
     return {
-        **{k: app[k] for k in ("id", "status", "full_name", "age", "metro", "min_days", "communication", "created_at",
-                               "reject_reason", "decided_at", "training_date", "training_time", "training_location",
-                               "training_confirmed_at", "contact_manager", "contacted_at", "contact_answer",
-                               "contact_answer_at", "stage1_counted", "stage1_at", "stage2_counted", "stage2_at")},
+        # 19.11: the card shows «Фамилия Имя О.» — the raw questionnaire text stays stored as the candidate sent it
+        **{k: (svc.fio_text(app[k]) if k == "full_name" else app[k])
+           for k in ("id", "status", "full_name", "age", "metro", "min_days", "communication", "created_at",
+                     "reject_reason", "decided_at", "training_date", "training_time", "training_location",
+                     "training_confirmed_at", "contact_manager", "contacted_at", "contact_answer",
+                     "contact_answer_at", "stage1_counted", "stage1_at", "stage2_counted", "stage2_at")},
         "training_days": _days(app),
         "priority": bool(app["priority"]),
         "hidden": bool(app["hidden_at"]),
@@ -393,7 +395,7 @@ def referrals(conn: sqlite3.Connection, user: dict) -> list[dict]:
         app = dict(r)
         p = progress(conn, app)
         person = svc.get_user(conn, app["user_id"]) or {}
-        out.append({"id": app["id"], "name": app["full_name"], "status": app["status"], "created_at": app["created_at"],
+        out.append({"id": app["id"], "name": svc.fio_text(app["full_name"]), "status": app["status"], "created_at": app["created_at"],
                     # ТЗ 27.10 §11: the profile by the Telegram ID
                     "telegram_id": person.get("telegram_id"), "username": person.get("username"),
                     "progress": p, "stage1_counted": app["stage1_counted"], "stage2_counted": app["stage2_counted"],

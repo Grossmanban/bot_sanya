@@ -39,7 +39,7 @@ def team(conn, make_user):
 
 def calc(conn, d_from=WEEK[0], d_to=WEEK[-1], **common):
     rows = payouts.calculate(conn, d_from, d_to, payouts.Rates.from_dict(common or None))
-    return {r["name"].split()[0]: r for r in rows}, rows
+    return {r["name"].split()[1]: r for r in rows}, rows
 
 
 def test_rate_hierarchy(conn, team):
@@ -124,7 +124,7 @@ def test_deduction_in_pieces_at_the_own_rate_hits_the_trainer_and_the_instructor
     assert (trainer["user_id"], trainer["amount"], trainer["rate"], trainer["linked_tx_id"]) == \
         (team["vera"]["id"], 50, 10, own["id"])
     assert (inst["user_id"], inst["amount"], inst["rate"], inst["linked_tx_id"]) == (olga["id"], 50, 10, own["id"])
-    assert "5 шт. × 140 ₽" in own["reason"] and "Вычет у Иван" in trainer["reason"]
+    assert "5 шт. × 140 ₽" in own["reason"] and "Вычет у Петров Иван" in trainer["reason"]
     # a «lazy» day (fact 10 < threshold) doesn't lower the deduction: always the person's own base rate
     did(conn, team["ivan"], WEEK[2], 10)
     own2, t2, i2 = finance.piece_deduction(conn, owner, team["ivan"]["id"], WEEK[2], 5, "Брак", svc.new_key())

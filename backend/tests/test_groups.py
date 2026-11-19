@@ -111,7 +111,7 @@ def test_board_auto_invites_and_reconciliation(conn, make_user):
     assert sorted(sent) == [("Новичок", "main"), ("Опытный", "main")]  # «Везде» already in the main team
     assert len(out) == 2 and run(groups.auto_invites(conn, bot, notify)) == []  # once
     run(groups.check(conn, bot))
-    rows = {r["name"].split()[0]: r for r in groups.board(conn)["items"]}
+    rows = {r["name"].split()[1]: r for r in groups.board(conn)["items"]}
     assert rows["Новичок"]["required"] == ["main"] and rows["Новичок"]["issues"] == ["Не хватает: «Основная команда»"]
     assert rows["Новичок"]["invites"]["main"]["auto"] and rows["Новичок"]["action"] == "invite_main"
     assert rows["Опытный"]["issues"] == ["Не хватает: «Основная команда»", "Остался в «Предзакрепе»"]
@@ -119,7 +119,7 @@ def test_board_auto_invites_and_reconciliation(conn, make_user):
     assert rows["Везде"]["problems"][0]["actions"] == ["remove_pre", "allow_both"]
     # В13: the admin allows both groups — it's normal now, and joining the main group won't move them out
     groups.set_mode(conn, owner, both["id"], "both", svc.new_key())
-    rows = {r["name"].split()[0]: r for r in groups.board(conn)["items"]}
+    rows = {r["name"].split()[1]: r for r in groups.board(conn)["items"]}
     assert rows["Везде"]["issues"] == [] and rows["Везде"]["required"] == ["pre", "main"]
     assert groups.keeps_both(conn, svc.get_user(conn, both["id"]))
     # a person kept in «Предзакреп» who got into the main team: «Не новичок — подтвердить» settles it, and it's undone

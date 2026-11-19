@@ -116,7 +116,7 @@ def test_hidden_colleague_names_and_raspred_today(client, conn, make_user):
                         created_at, updated_at) VALUES (?, ?, '16:00', '19:00', 20, 'Европа', 'active', 't', 't')""",
                      (u["id"], today.isoformat()))
     day = lambda h: next(d for d in client.get("/api/schedule/week", headers=h).json()["days"] if d["is_today"])  # noqa: E731
-    assert day(headers(a["telegram_id"]))["colleagues"][0]["name"] == "Вера Петров"
+    assert day(headers(a["telegram_id"]))["colleagues"][0]["name"] == "Петров Вера"
     app_settings.update(conn, {"show_colleague_names": False})
     hidden = day(headers(a["telegram_id"]))
     assert hidden["names_hidden"] and hidden["colleagues"][0]["name"] == "Коллега" and hidden["colleagues"][0]["first_name"] == ""

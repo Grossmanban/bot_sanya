@@ -138,3 +138,7 @@
   заблокированных; «Стажировки на проверку» (`GET /api/admin/pending`) не считает завершённые стажировки.
 - 2026-11-19 — `POST /api/me/referrals/{app}/hide` (миграция 51, `applications.ref_hidden_at`); в
   `GET /api/me/referrals` у каждого — `hidden` и `bonuses [{stage, amount, paid, status}]`.
+- 2026-11-19 — единый формат имён «Фамилия Имя О.»: `public_user` несёт `name` (сервер собирает из
+  `last_name + first_name + инициал` — у анкетных «Имя Отчество» лежит в `first_name`, у старых — отчество в
+  `middle_name`); анкеты (`GET /api/admin/onboarding`, «Ожидает согласования») и «Мои рефералы» отдают
+  «Фамилия Имя О.» из сырого текста анкеты; все списки на `svc.full_name` — тот же формат.

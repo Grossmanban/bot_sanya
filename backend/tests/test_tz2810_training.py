@@ -81,7 +81,7 @@ def test_trainer_then_date_then_both_confirm_then_predzakrep(conn, world):
     assert [m["kind"] for m in a["messages"]] == ["trainer", "trainer", "timer_reset"] and a["status"] == "scheduled"
     # the inviter is asked to help
     c.post(f"/api/admin/onboarding/{app['id']}/remind-referrer", json={"idempotency_key": key()}, headers=oh)
-    assert "Сидоров Пётр Ильич" in bot.to(world["ref"]["telegram_id"])[-1]
+    assert "Сидоров Пётр И." in bot.to(world["ref"]["telegram_id"])[-1]
     # the date: the candidate and the trainer confirm; «Предзакреп» only after both
     day = (today_local() + timedelta(days=2)).isoformat()
     a = c.post(f"/api/admin/onboarding/{app['id']}/training",
@@ -252,5 +252,5 @@ def test_legacy_cancellations_and_the_message_template(conn):
     templates.save_text(conn, owner, "candidate_trainer", "Напишите {ФИО_тренера}", svc.new_key())
     n = Notifier(None, conn)
     trainer = {"telegram_id": 5, "username": "vera", "first_name": "Вера", "last_name": "П"}
-    assert n.trainer_message_text(trainer) == 'Напишите <a href="https://t.me/vera">Вера П</a> (@vera)'
+    assert n.trainer_message_text(trainer) == 'Напишите <a href="https://t.me/vera">П Вера</a> (@vera)'
     assert groups.expected_for(conn, {"id": 12345}) == "main"  # no questionnaire — the main group

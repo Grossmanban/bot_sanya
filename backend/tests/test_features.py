@@ -234,7 +234,7 @@ def test_no_show_reminder_and_resolution(conn, make_user):
     approved(conn, svc.get_user(conn, other["user_id"]), other, 30, now=at(THU, "23:00"))
 
     digest = [t for chat, t in n.sent if chat == 999 and "Отчёты за" in t]
-    assert digest and "Иван Петров" in digest[0]  # 22:00 digest: who hasn't reported
+    assert digest and "Петров Иван" in digest[0]  # 22:00 digest: who hasn't reported
 
     run(jobs.tick(conn, n, at(THU + timedelta(days=1), "00:01")))
     assert svc.get_shift(conn, s["id"])["report_state"] == "no_show"
@@ -351,7 +351,7 @@ def test_excel_export_contents(conn, make_user):
     wb = load_workbook(io.BytesIO(export.build_xlsx(conn, TODAY, THU)))
     assert wb.sheetnames == ["Итоги", "Смены", "Штрафы и бонусы"]
     totals = list(wb["Итоги"].iter_rows(values_only=True))
-    assert totals[1][0] == "Иван Петров" and totals[1][3] == 25 and totals[1][4] == 20
+    assert totals[1][0] == "Петров Иван" and totals[1][3] == 25 and totals[1][4] == 20
     assert totals[-1][0] == "Итого"
     assert list(wb["Смены"].iter_rows(values_only=True))[1][5] == "Европа"
 
@@ -479,7 +479,7 @@ def test_archive_posts_with_hashtags_and_retries(conn, make_user):
     app_settings.set_raw(conn, "archive_chat_id", "-1001")
     assert run(notifier.archive(["штраф", "недобор"], "💸 500 ₽", user))
     chat, text = notifier.sent[-1]
-    assert chat == -1001 and text.startswith("#штраф #недобор #Олег_Сидоров_Петров")
+    assert chat == -1001 and text.startswith("#штраф #недобор #Сидоров_Петров_Олег")
     assert conn.execute("SELECT sent FROM archive_log ORDER BY id DESC").fetchone()[0] == 1
 
     calls = []
@@ -866,7 +866,7 @@ def test_payout_calculation_and_commit(conn, make_user):
     finance.create(conn, owner, b["id"], "fine", None, "Поломка", svc.new_key(), event_date=THU, units=17)  # 17 × 120
 
     rates = payouts.Rates.from_dict(None)
-    rows = {r["name"].split()[0]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), rates)}
+    rows = {r["name"].split()[1]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), rates)}
     ra = rows["Аня"]
     assert ra["personal_volume"] == 42 and ra["base_calc"] == 30 * 120 + 12 * 100
     assert (ra["bonuses"], ra["fines"], ra["deductions"]) == (300, 480, 200)
@@ -877,7 +877,7 @@ def test_payout_calculation_and_commit(conn, make_user):
 
     # a custom commission and a base override for a bonus
     custom = payouts.Rates.from_dict({"trainer_commission": 20})
-    assert {r["name"].split()[0]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), custom)}["Тренер"]["base_calc"] == 840
+    assert {r["name"].split()[1]: r for r in payouts.calculate(conn, TODAY, THU + timedelta(days=3), custom)}["Тренер"]["base_calc"] == 840
 
     with pytest.raises(svc.ServiceError) as e:
         payouts.commit(conn, a, "x", TODAY, THU, rates, None, [{"user_id": a["id"]}], [], [], svc.new_key())
@@ -890,7 +890,7 @@ def test_payout_calculation_and_commit(conn, make_user):
     batch = payouts.commit(conn, owner, "Зарплата 12–18", TODAY, THU + timedelta(days=3), rates, None,
                            [{"user_id": a["id"]}, {"user_id": b["id"]}, {"user_id": trainer["id"], "base_override": 1000}],
                            ["proof-1"], [], svc.new_key())
-    items = {i["name"].split()[0]: i for i in batch["items"]}
+    items = {i["name"].split()[1]: i for i in batch["items"]}
     assert items["Аня"]["total"] == 4420 and items["Тренер"]["base"] == 1000 and items["Боря"]["carried_debt"] == 2040
     assert batch["total"] == 4420 + 1000 and batch["proof_media"] == ["proof-1"]
     assert finance.balance(conn, a["id"])["balance"] == 0  # fine, bonus and deduction settled
@@ -1073,7 +1073,7 @@ def test_first_to_reach_race(conn, make_user):
         events.submit(conn, a, ev["id"], 32, "p", svc.new_key(), now=noon)
     assert e.value.code == "pending"
     board = events.view(conn, ev, a, noon)["leaderboard"]
-    assert board[0]["name"].startswith("Аня") and board[0]["score"] == 31 and not board[0]["winner"]  # soft score
+    assert board[0]["name"].endswith("Аня") and board[0]["score"] == 31 and not board[0]["winner"]  # soft score
 
     eb, _ = events.submit(conn, b, ev["id"], 30, "p", svc.new_key(), now=noon)
     with pytest.raises(svc.ServiceError) as e:
@@ -1094,7 +1094,7 @@ def test_first_to_reach_race(conn, make_user):
     second = events.review(conn, owner, ec["id"], True, None, svc.new_key())
     assert second.finished and events.get(conn, ev["id"])["status"] == "finished"
     board = events.leaderboard(conn, events.get(conn, ev["id"]))
-    assert [r["name"].split()[0] for r in board if r["winner"]] == ["Аня", "Вика"]  # 👑 in confirmation order
+    assert [r["name"].split()[1] for r in board if r["winner"]] == ["Аня", "Вика"]  # 👑 in confirmation order
     n = FakeNotifier(conn)
     run(n.event_reviewed(second, owner))
     assert any("завершено" in t for chat, t in n.sent if chat == b["telegram_id"])
@@ -1111,7 +1111,7 @@ def test_accumulative_scoreboard_and_finish(conn, make_user):
     e2, _ = events.submit(conn, b, ev["id"], 12, "p", svc.new_key(), now=at(THU, "12:00"))
     e3, _ = events.submit(conn, a, ev["id"], 5, "p", svc.new_key(), now=at(THU, "12:30"))
     board = events.view(conn, ev, None, at(THU, "13:00"))["leaderboard"]
-    assert [(r["name"].split()[0], r["score"], r["confirmed"]) for r in board] == [("Аня", 15, 10), ("Боря", 12, 0)]
+    assert [(r["name"].split()[1], r["score"], r["confirmed"]) for r in board] == [("Аня", 15, 10), ("Боря", 12, 0)]
     events.review(conn, owner, e2["id"], True, None, svc.new_key())
     events.review(conn, owner, e3["id"], False, "Не видно итога", svc.new_key())
     with pytest.raises(svc.ServiceError) as e:  # after the timer: closed for new entries
@@ -1123,7 +1123,7 @@ def test_accumulative_scoreboard_and_finish(conn, make_user):
     run(jobs.tick(conn, n, at(THU, "18:16")))
     assert events.get(conn, ev["id"])["status"] == "finished"
     board = events.leaderboard(conn, events.get(conn, ev["id"]))
-    assert [r["name"].split()[0] for r in board if r["winner"]] == ["Боря"]  # prizes by confirmed score: 12 > 10
+    assert [r["name"].split()[1] for r in board if r["winner"]] == ["Боря"]  # prizes by confirmed score: 12 > 10
     assert any("Победители" in t and "Боря" in t for chat, t in n.sent if chat == a["telegram_id"])
     # the creator is also an eligible participant: one message, not two; a later tick doesn't repeat it
     run(jobs.tick(conn, n, at(THU, "18:17")))

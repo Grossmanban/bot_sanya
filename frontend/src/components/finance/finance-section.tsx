@@ -92,7 +92,7 @@ function NewEntry({ onPick }: { onPick: (u: User) => void }) {
               <li key={u.id}>
                 <button className="press flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-muted" onClick={() => onPick(u)}>
                   <Avatar user={u} className="size-8 rounded-lg text-xs" />
-                  <span className="truncate">{u.first_name} {u.last_name}</span>
+                  <span className="truncate">{u.name}</span>
                 </button>
               </li>
             ))}

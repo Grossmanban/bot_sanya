@@ -190,7 +190,7 @@ export function MiniApp() {
           >
             <Avatar user={user} className="size-10 rounded-xl text-sm" />
             <span className="min-w-0">
-              <span className="block truncate font-semibold">{user.first_name} {user.last_name}</span>
+              <span className="block truncate font-semibold">{user.name}</span>
               <span className={cn("flex items-center gap-1.5 text-xs", working ? "text-go" : "text-muted-foreground")}>
                 <span className={cn("size-1.5 rounded-full", working ? "bg-go" : "bg-idle")} />
                 {user.account_state === "paused" ? "На паузе" : working ? "Работаю" : "Не работаю"}

@@ -740,14 +740,14 @@ function UserPicker({ users, value, onChange }: { users: User[]; value: User | n
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase().replace(/^@/, "");
     if (!s) return users;
-    return users.filter((u) => `${u.first_name} ${u.last_name} ${u.last_name} ${u.first_name} ${u.username ?? ""}`.toLowerCase().includes(s));
+    return users.filter((u) => `${u.name ?? ""} ${u.first_name} ${u.last_name} ${u.username ?? ""}`.toLowerCase().includes(s));
   }, [q, users]);
 
   if (value) {
     return (
       <div className="flex items-center justify-between rounded-2xl bg-muted px-4 py-3">
         <div className="min-w-0">
-          <p className="truncate font-semibold">{value.first_name} {value.last_name}</p>
+          <p className="truncate font-semibold">{value.name}</p>
           {value.username && <p className="text-sm text-muted-foreground">@{value.username}</p>}
         </div>
         <button className="text-sm font-semibold" onClick={() => onChange(null)}>Сменить</button>
@@ -764,7 +764,7 @@ function UserPicker({ users, value, onChange }: { users: User[]; value: User | n
         {filtered.map((u) => (
           <li key={u.id}>
             <button className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-muted/60" onClick={() => onChange(u)}>
-              <span className="font-medium">{u.first_name} {u.last_name}</span>
+              <span className="font-medium">{u.name}</span>
               <span className="text-sm text-muted-foreground">{u.username ? `@${u.username}` : ""}</span>
             </button>
           </li>

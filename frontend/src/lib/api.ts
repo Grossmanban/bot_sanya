@@ -14,6 +14,8 @@ export interface User {
   telegram_id: number;
   first_name: string;
   last_name: string;
+  /** 19.11: «Фамилия Имя О.» — the one display style, composed on the server */
+  name: string;
   username: string | null;
   status: "pending" | "approved" | "rejected";
   /** effective role: owners come from the server config (ADMIN_IDS) */

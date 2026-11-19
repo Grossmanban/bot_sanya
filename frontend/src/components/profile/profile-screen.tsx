@@ -82,7 +82,7 @@ export function ProfileScreen({
           <Avatar user={user} className="size-16 rounded-2xl text-xl" />
           <div className="min-w-0">
             <h1 className="truncate font-display text-xl font-semibold">
-              {user.first_name} {user.last_name}
+              {user.name}
             </h1>
             <p className="text-sm text-muted-foreground">
               {user.username ? `@${user.username}` : "без username"}
