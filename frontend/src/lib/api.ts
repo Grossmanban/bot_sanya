@@ -41,6 +41,8 @@ export interface User {
   /** owners only: personal rate (null — the network's or the common) and «не применять налог на лень» */
   personal_rate?: number | null;
   lazy_exempt?: boolean;
+  /** 19.11: «без штрафов» — the automatic fines don't apply to this person (manual ones still do) */
+  fines_exempt?: boolean;
   /** owners only («Команда», 18.11): the accumulated «налог на лень» pool, pieces */
   lazy_pool?: number;
   /** owners only: a trainer's or an instructor's own rate per piece of their people (null — the ladder / common) */
@@ -1768,8 +1770,10 @@ export const api = {
     setInstructor: (userId: number, instructorId: number | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/instructor`, { instructor_id: instructorId, idempotency_key: key }),
     setUserRates: (userId: number, body: { personal_rate?: number | null; clear_personal_rate?: boolean; lazy_exempt?: boolean;
-                     personal_commission?: number | null; clear_personal_commission?: boolean },
-                   key: string) => post<{ user: User }>(`/api/admin/team/${userId}/rates`, { ...body, idempotency_key: key }),
+                     fines_exempt?: boolean; personal_commission?: number | null; clear_personal_commission?: boolean },
+                   key: string) =>
+      post<{ user: User; cleared?: { violations: number; no_shows: number } | null }>(
+        `/api/admin/team/${userId}/rates`, { ...body, idempotency_key: key }),
     pieceDeduction: (body: { user_id: number; day: string; pieces: number; reason: string; media_file_id: string | null },
                      key: string) => post<{ items: Tx[] }>("/api/admin/finances/pieces", { ...body, idempotency_key: key }),
     commitPayout: (

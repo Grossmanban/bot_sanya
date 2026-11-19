@@ -270,8 +270,9 @@ def for_user(conn: sqlite3.Connection, user_id: int) -> dict:
 
 
 def set_user_rates(conn: sqlite3.Connection, actor: dict, user_id: int, changes: dict, key: str) -> dict:
-    """Owner: a personal rate (None = the common one), «не применять налог на лень», and for trainers and
-    instructors their individual rate per piece of their people (personal_commission, None = ladder / common)."""
+    """Owner: a personal rate (None = the common one), «не применять налог на лень», «без штрафов» (19.11 — the
+    automatic fines don't apply to the person), and for trainers and instructors their individual rate per piece
+    of their people (personal_commission, None = ladder / common)."""
     from . import services as svc
     from .db import transaction
     from .services import _check_key, _fresh_actor, _seen, log_event
@@ -284,6 +285,8 @@ def set_user_rates(conn: sqlite3.Connection, actor: dict, user_id: int, changes:
         fields["personal_rate"] = v
     if "lazy_exempt" in changes:
         fields["lazy_exempt"] = int(bool(changes["lazy_exempt"]))
+    if "fines_exempt" in changes:
+        fields["fines_exempt"] = int(bool(changes["fines_exempt"]))
     if "personal_commission" in changes:
         v = changes["personal_commission"]
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= MAX_RATE):

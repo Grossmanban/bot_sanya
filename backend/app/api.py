@@ -365,6 +365,8 @@ class UserRates(BaseModel):
     personal_rate: int | None = None
     clear_personal_rate: bool = False
     lazy_exempt: bool | None = None
+    # 19.11: «без штрафов» — the automatic fines don't apply to this person (manual ones still do)
+    fines_exempt: bool | None = None
     # trainers and instructors: an individual rate per piece of their people (ТЗ 27.10 §24)
     personal_commission: int | None = None
     clear_personal_commission: bool = False
@@ -748,6 +750,8 @@ def public_user(user: dict) -> dict:
         "created_at": user["created_at"],
         # 18.11: the personal toggles from «Команда» (the app opens the admin tab for a grant holder)
         "grants": svc.grants_of(user),
+        # 19.11: «без штрафов» — the automatic fines don't apply to this person
+        "fines_exempt": bool(user.get("fines_exempt")),
     }
 
 
@@ -2194,10 +2198,18 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             changes["personal_rate"] = None if body.clear_personal_rate else body.personal_rate
         if body.lazy_exempt is not None:
             changes["lazy_exempt"] = body.lazy_exempt
+        if body.fines_exempt is not None:
+            changes["fines_exempt"] = body.fines_exempt
         if body.personal_commission is not None or body.clear_personal_commission:
             changes["personal_commission"] = None if body.clear_personal_commission else body.personal_commission
         user = rates.set_user_rates(conn, owner, user_id, changes, body.idempotency_key)
-        return {"user": {**public_user(user), **money_fields(user)}}
+        cleared = None
+        if body.fines_exempt:
+            # 19.11: the toggle is on — everything already waiting for a decision is forgiven at once,
+            # so the staff never have to waive this person's fines by hand
+            cleared = {"violations": violations.waive_pending(conn, user_id, owner),
+                       "no_shows": reports.excuse_no_shows(conn, user_id, owner)}
+        return {"user": {**public_user(user), **money_fields(user)}, **({"cleared": cleared} if cleared else {})}
 
     @api.post("/admin/finances/pieces")
     async def admin_piece_deduction(body: PieceDeduction, owner: dict = Depends(staff("money"))):

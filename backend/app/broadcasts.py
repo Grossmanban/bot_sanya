@@ -141,13 +141,20 @@ async def enforce_deadlines(conn: sqlite3.Connection, notifier, now: datetime | 
             (now.isoformat(timespec="seconds"),))]:
         author = svc.get_user_by_tg(conn, b["author_id"])
         fined: list[tuple[dict, dict]] = []
+        skipped = 0
         with transaction(conn):
             rows = [dict(r) for r in conn.execute(
-                """SELECT d.*, u.status, u.account_state FROM broadcast_deliveries d JOIN users u ON u.id = d.user_id
+                """SELECT d.*, u.status, u.account_state, u.fines_exempt FROM broadcast_deliveries d
+                   JOIN users u ON u.id = d.user_id
                    WHERE d.broadcast_id = ? AND d.delivered = 1 AND d.read_at IS NULL AND d.fined_at IS NULL""",
                 (b["id"],))]
             for d in rows:
                 if d["status"] != "approved" or d["account_state"] == "blocked":
+                    continue
+                # 19.11: «без штрафов» — the fine is skipped quietly; the delivery stays unfined (never re-fined:
+                # the broadcast is marked done below)
+                if d["fines_exempt"]:
+                    skipped += 1
                     continue
                 tx = finance.record_fine(conn, user_id=d["user_id"], units=b["ack_fine_units"],
                                          reason=f"Не подтвердил(а) прочтение рассылки «{_excerpt(b)}» в срок",
@@ -163,8 +170,9 @@ async def enforce_deadlines(conn: sqlite3.Connection, notifier, now: datetime | 
                                                         f"Причина: {tx['reason']}")
         if fined and author is not None:
             names = ", ".join(svc.full_name(u) for u, _ in fined[:20]) + ("…" if len(fined) > 20 else "")
+            extra = f" Пропущены без штрафов («без штрафов» в «Команде»): {skipped} чел." if skipped else ""
             await notifier.send(author["telegram_id"],
                                 f"⏳ Срок отметки по рассылке «{_excerpt(b)}» истёк. Штраф ({b['ack_fine_units']} ед.) "
-                                f"назначен: {len(fined)} чел. — {names}")
-        done.append({"broadcast": b["id"], "fined": len(fined)})
+                                f"назначен: {len(fined)} чел. — {names}.{extra}")
+        done.append({"broadcast": b["id"], "fined": len(fined), "skipped": skipped})
     return done

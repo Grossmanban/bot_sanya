@@ -426,7 +426,8 @@ def manual_result(conn: sqlite3.Connection, actor: dict, shift_id: int, value: i
 
 
 def mark_no_show(conn: sqlite3.Connection, shift_id: int, now: datetime) -> dict | None:
-    """Deadline passed without a report: the shift becomes a no-show (returned once)."""
+    """Deadline passed without a report: the shift becomes a no-show (returned once). For a person with the
+    «без штрафов» toggle (19.11) the shift is excused right here — no review card, nothing to decide."""
     with transaction(conn):
         shift = svc.get_shift(conn, shift_id)
         if (shift is None or shift["status"] not in ACTIVE or not shift["start_time"]
@@ -436,7 +437,36 @@ def mark_no_show(conn: sqlite3.Connection, shift_id: int, now: datetime) -> dict
                      (now_iso(), now_iso(), shift_id))
         log_event(conn, user_id=shift["user_id"], actor_id=0, event_type="REPORT_NO_SHOW", key=svc.new_key(),
                   shift_id=shift_id, description=f"дедлайн {deadline(shift):%d.%m %H:%M}")
+        if svc.get_user(conn, shift["user_id"]).get("fines_exempt"):
+            return _excuse(conn, svc.get_shift(conn, shift_id), None)
     return svc.get_shift(conn, shift_id)
+
+
+def _excuse(conn: sqlite3.Connection, shift: dict, actor: dict | None) -> dict:
+    """Inside the caller's transaction: the no-show shift is waived without a fine («без штрафа» path of
+    resolve_no_show, also used by the «без штрафов» toggle — automatically, without a staff member)."""
+    conn.execute(
+        """UPDATE shifts SET shortfall_status = 'waived', shortfall_decided_by = ?, shortfall_decided_at = ?,
+               report_note = ?, updated_at = ? WHERE id = ?""",
+        (actor["telegram_id"] if actor else 0, now_iso(),
+         "Автоматически: освобождён от штрафов" if actor is None else "Освобождён от штрафов",
+         now_iso(), shift["id"]))
+    log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"] if actor else 0,
+              event_type="NO_SHOW_EXCUSED", key=svc.new_key(), shift_id=shift["id"], new={"auto": actor is None},
+              description="Освобождён от штрафов")
+    return svc.get_shift(conn, shift["id"])
+
+
+def excuse_no_shows(conn: sqlite3.Connection, user_id: int, actor: dict) -> int:
+    """19.11: the person got the «без штрафов» toggle — their no-show shifts still waiting for a decision are
+    excused at once, so no review cards remain for them. Returns how many."""
+    with transaction(conn):
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id FROM shifts WHERE user_id = ? AND report_state = 'no_show' AND shortfall_status IS NULL",
+            (user_id,))]
+        for s in rows:
+            _excuse(conn, svc.get_shift(conn, s["id"]), actor)
+    return len(rows)
 
 
 def reviewers(conn: sqlite3.Connection, user: dict) -> list[int]:

@@ -1566,6 +1566,17 @@ def _application_priority(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_application_priority)
 
 
+def _fines_exempt(conn: sqlite3.Connection) -> None:
+    """Migration 49 — 19.11: the per-person «без штрафов» toggle in «Команда». The automatic fines are not
+    applied to this person at all: the discipline checks (weekly norm, unmarked day) don't create violations,
+    the broadcast read-deadline fine is skipped, and a no-show shift is excused instead of waiting for a
+    decision — so the staff don't waive the same person's fines every day. Manual fines stay as they are."""
+    _run_script(conn, "ALTER TABLE users ADD COLUMN fines_exempt INTEGER NOT NULL DEFAULT 0;")
+
+
+MIGRATIONS.append(_fines_exempt)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

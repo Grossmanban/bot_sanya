@@ -58,7 +58,7 @@ def test_unread_get_fined_once(conn, make_user):
     deliver(conn, row["id"], petya, delivered=False)     # Telegram didn't take it — not fined
     expire(conn, row["id"])
     n = FakeNotifier(conn)
-    assert run(broadcasts.enforce_deadlines(conn, n)) == [{"broadcast": row["id"], "fined": 1}]
+    assert run(broadcasts.enforce_deadlines(conn, n)) == [{"broadcast": row["id"], "fined": 1, "skipped": 0}]
     tx = dict(conn.execute("SELECT * FROM financial_transactions WHERE user_id = ?", (ivan["id"],)).fetchone())
     rate = rates.for_user(conn, ivan["id"])["rate_base"]
     assert tx["status"] == "active" and tx["source"] == "broadcast" and tx["created_by"] == 999
@@ -82,7 +82,7 @@ def test_blocked_are_skipped(conn, make_user):
     conn.execute("UPDATE users SET account_state = 'blocked' WHERE id = ?", (ivan["id"],))  # blocked after the send
     deliver(conn, row["id"], ivan)
     expire(conn, row["id"])
-    assert run(broadcasts.enforce_deadlines(conn, FakeNotifier(conn))) == [{"broadcast": row["id"], "fined": 0}]
+    assert run(broadcasts.enforce_deadlines(conn, FakeNotifier(conn))) == [{"broadcast": row["id"], "fined": 0, "skipped": 0}]
     assert conn.execute("SELECT COUNT(*) FROM financial_transactions").fetchone()[0] == 0
 
 
@@ -94,7 +94,7 @@ def test_reply_counts_as_read(conn, make_user):
     deliver(conn, row["id"], ivan)
     broadcasts.add_reply(conn, row["id"], ivan, "Ок, понял", [])  # the answer sets read_at (a sync service call)
     expire(conn, row["id"])
-    assert run(broadcasts.enforce_deadlines(conn, FakeNotifier(conn))) == [{"broadcast": row["id"], "fined": 0}]
+    assert run(broadcasts.enforce_deadlines(conn, FakeNotifier(conn))) == [{"broadcast": row["id"], "fined": 0, "skipped": 0}]
     assert conn.execute("SELECT COUNT(*) FROM financial_transactions").fetchone()[0] == 0
 
 

@@ -1,6 +1,6 @@
 # Справочник REST API
 
-**Обновлено:** 2026-11-18 · **Исходники:** `backend/app/api.py` (все маршруты), фронтенд-клиент `frontend/src/lib/api.ts`
+**Обновлено:** 2026-11-19 · **Исходники:** `backend/app/api.py` (все маршруты), фронтенд-клиент `frontend/src/lib/api.ts`
 
 ## Общие правила
 
@@ -49,7 +49,8 @@
 
 `GET /api/admin/users` · `GET /api/admin/team` (18.11: держателю `money` — `lazy_pool`, копилка налога на лень человека) ·
 `POST /api/admin/team/{uid}/role|access|state|work-status|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile`
-(`work-status`, 18.11: `{work_status}` — переключают только начальники: инструктор своим, тренер своей сети, админ/владелец любому; 403 у чужих) ·
+(`work-status`, 18.11: `{work_status}` — переключают только начальники: инструктор своим, тренер своей сети, админ/владелец любому; 403 у чужих;
+`rates` (19.11): тело с `fines_exempt` — при `true` висящие нарушения и неявки человека прощаются, ответ несёт `cleared {violations, no_shows}`) ·
 `POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?}` (owner/admin, 18.11; в `GET /api/me`
 и «Команде» поля приходят как `grants`) ·
 инвайты `GET/POST /api/admin/invites`, `/{id}/revoke|qr`, `POST /api/admin/invites/rotate` · попытки доступа
@@ -127,3 +128,5 @@
   `GET /api/admin/broadcasts(/​{id})`: `ack_deadline_at`, `fined`, `fined_at`.
 - 2026-11-19 — `POST /api/register`: `priority`; `POST /api/admin/onboarding/{app}/priority` (`{on}`);
   в анкетах `priority` и `waiting`, `GET /api/me`: `application.priority`.
+- 2026-11-19 — `POST /api/admin/team/{uid}/rates`: `fines_exempt` («без штрафов», миграция 49); ответ несёт
+  `cleared {violations, no_shows}`; в людях `GET /api/admin/team` и `public_user` — `fines_exempt`.

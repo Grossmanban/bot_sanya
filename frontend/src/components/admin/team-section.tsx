@@ -993,6 +993,22 @@ function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) =
       /* toast shown */
     }
   }
+  // 19.11: the toggle reports what was forgiven on the spot — the backlog goes away with one switch
+  async function fines(on: boolean) {
+    try {
+      const res = await run("fines", (k) => api.admin.setUserRates(user.id, { fines_exempt: on }, k),
+        on ? "Автоматические штрафы не применяются" : "Автоматические штрафы применяются");
+      if (res) {
+        const c = res.cleared;
+        if (on && c && (c.violations || c.no_shows)) {
+          toast.success(`Прощено сразу: нарушений — ${c.violations}, неявок — ${c.no_shows}`);
+        }
+        onUpdated(res.user);
+      }
+    } catch {
+      /* toast shown */
+    }
+  }
   return (
     <div className="mt-4 space-y-3 rounded-2xl bg-muted/50 px-4 py-3">
       <div className="flex items-center gap-3">
@@ -1022,6 +1038,17 @@ function PersonalRates({ user, onUpdated }: { user: User; onUpdated: (u: User) =
         </span>
         <Switch checked={!!user.lazy_exempt} disabled={!!busy}
                 onCheckedChange={(v) => save({ lazy_exempt: v }, v ? "Налог на лень не применяется" : "Налог на лень применяется")} />
+      </label>
+      {/* 19.11: «без штрафов» — the automatic fines don't apply to this person; enabling forgives the backlog */}
+      <label className="flex cursor-pointer items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px] font-semibold">Без штрафов</span>
+          <span className="block text-xs text-muted-foreground">
+            Автоматические штрафы (норма недели, «не отметил день», неявки, срок отметки в рассылках) не выставляются,
+            прощать не нужно; ручной штраф остаётся. Включение сразу прощает висящие
+          </span>
+        </span>
+        <Switch checked={!!user.fines_exempt} disabled={!!busy} onCheckedChange={(v) => fines(v)} />
       </label>
       {/* 18.11: the owner watches the accumulated pool like bonuses, fines and deductions */}
       {user.lazy_pool != null && (

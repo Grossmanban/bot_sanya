@@ -198,6 +198,9 @@ def scan(conn: sqlite3.Connection, common: int, today: date | None = None) -> li
             """SELECT * FROM users WHERE status = 'approved' AND account_state = 'active'
                AND (decided_at IS NULL OR substr(decided_at, 1, 10) < ?)""", (start.isoformat(),)).fetchall():
             u = dict(u)
+            # 19.11: «без штрафов» — the norm check doesn't create violations for this person at all
+            if u["fines_exempt"]:
+                continue
             # ТЗ 28.10 §9, В27: «Не работаю» during that week — no check (switching off after the week doesn't dodge it)
             if u["work_status"] != "working" and (u["work_status_at"] or "")[:10] <= end.isoformat():
                 continue
@@ -231,10 +234,13 @@ def unmarked(conn: sqlite3.Connection, day: date) -> list[dict]:
 
 
 def scan_unmarked(conn: sqlite3.Connection, day: date) -> list[dict]:
-    """At the deadline: one violation per person who still hasn't marked `day`. Safe to run again."""
+    """At the deadline: one violation per person who still hasn't marked `day`. Safe to run again.
+    «Без штрафов» (19.11) — the person still gets the reminder to mark, but no violation is created."""
     created = []
     with transaction(conn):
         for u in unmarked(conn, day):
+            if u["fines_exempt"]:
+                continue
             cur = conn.execute(
                 """INSERT OR IGNORE INTO attendance_violations (user_id, kind, week_start_date, week_end_date, required_days,
                        actual_days, absent_dates, status, created_at) VALUES (?, 'unmarked', ?, ?, 1, 0, ?, 'pending', ?)""",
@@ -442,6 +448,23 @@ def waive(conn: sqlite3.Connection, actor: dict, violation_id: int, comment: str
         log_event(conn, user_id=v["user_id"], actor_id=actor["telegram_id"], event_type="VIOLATION_WAIVED", key=key,
                   new={"violation": violation_id}, description=comment)
     return Resolution(get(conn, violation_id), True)
+
+
+def waive_pending(conn: sqlite3.Connection, user_id: int, actor: dict) -> int:
+    """19.11: the person got the «без штрафов» toggle — their still-undecided violations are waived at once,
+    so the staff don't waive them by hand one by one. Inside its own transaction; returns how many."""
+    with transaction(conn):
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id FROM attendance_violations WHERE user_id = ? AND status = 'pending'", (user_id,))]
+        for v in rows:
+            conn.execute(
+                """UPDATE attendance_violations SET status = 'waived', resolution_admin_id = ?,
+                       resolution_comment = ?, resolved_at = ? WHERE id = ? AND status = 'pending'""",
+                (actor["id"], "Освобождён от штрафов", now_iso(), v["id"]))
+            log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="VIOLATION_WAIVED",
+                      key=svc.new_key(), new={"violation": v["id"], "auto": True},
+                      description="Освобождён от штрафов")
+    return len(rows)
 
 
 def reopen_for_rejected_fine(conn: sqlite3.Connection, tx: dict) -> dict | None:

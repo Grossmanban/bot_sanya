@@ -272,7 +272,9 @@ async def no_shows(conn, notifier: Notifier, now: datetime, since: date) -> int:
         shift = reports.mark_no_show(conn, s["id"], now)
         if shift:
             marked += 1
-            await notifier.no_show(shift)
+            # 19.11: «без штрафов» — the shift is excused by mark_no_show itself, no review card for anyone
+            if not shift["shortfall_status"]:
+                await notifier.no_show(shift)
     return marked
 
 
