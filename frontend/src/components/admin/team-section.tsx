@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Ban, Check, ChevronRight, Copy, LoaderCircle, MessageCircle, Pause, Play, Send, Wallet, X } from "lucide-react";
+import { Ban, Check, ChevronRight, Copy, EyeOff, LoaderCircle, MessageCircle, Pause, Play, Send, Wallet, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -43,13 +43,26 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
   const candidates = data.items.filter((u) => u.status === "pending" && u.candidate).length;
   const leads = data.items.filter((u) => live(u) && u.role !== "employee");
   const staff = data.items.filter((u) => live(u) && u.role === "employee");
-  const blocked = data.items.filter((u) => u.status === "approved" && u.account_state === "blocked");
+  const blocked = data.items.filter((u) => u.status === "approved" && u.account_state === "blocked" && !u.hidden);
+  // 19.11: hidden blocked members — out of every list, sit under «Скрытые» below until returned
+  const hidden = data.items.filter((u) => u.status === "approved" && u.hidden);
   const closed = data.items.filter((u) => u.status === "rejected");
   const canDecide = caps.includes("registrations");
 
   async function decide(user: User, allow: boolean) {
     try {
       await run(`${allow ? "ok" : "no"}-${user.id}`, (k) => api.admin.setAccess(user.id, allow, k), allow ? "Заявка принята" : "Заявка отклонена");
+      await reload();
+    } catch {
+      /* toast shown */
+    }
+  }
+
+  /** 19.11: a blocked member leaves the lists («Скрыть») or comes back from «Скрытые» («Вернуть»). */
+  async function setHidden(user: User, on: boolean) {
+    try {
+      await run(`${on ? "hide" : "unhide"}-${user.id}`, (k) => api.admin.hideUser(user.id, on, k),
+        on ? "Скрыт из списка" : "Вернул в список");
       await reload();
     } catch {
       /* toast shown */
@@ -114,6 +127,32 @@ export function TeamSection({ me, caps, network }: { me: User; caps: Capability[
       <Group title="Сотрудники" users={staff} me={me} onPick={setSelected}
              empty={canDecide ? "Пока никого. Отправьте приглашение выше." : "В вашей сети пока никого."} />
       {blocked.length > 0 && <Group title="Заблокированы" users={blocked} me={me} onPick={setSelected} muted />}
+      {hidden.length > 0 && (
+        <details className="rounded-3xl bg-card shadow-lift">
+          <summary className="flex cursor-pointer items-center gap-2 px-5 py-4 font-semibold text-muted-foreground md:px-6">
+            Скрытые
+            <span className="rounded-full bg-muted px-2 text-xs tabular">{hidden.length}</span>
+          </summary>
+          <ul className="divide-y border-t">
+            {hidden.map((u) => (
+              <li key={u.id} className="row-in flex flex-wrap items-center gap-3 px-5 py-3.5 md:px-6">
+                <button type="button" className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                        onClick={() => setSelected(u)}>
+                  <Avatar user={u} className="size-10 rounded-xl bg-muted text-sm text-muted-foreground" />
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium text-muted-foreground">{u.name}</span>
+                    <span className="block text-sm text-muted-foreground">заблокирован и скрыт из списков</span>
+                  </span>
+                </button>
+                <Button size="sm" variant="secondary" className="press h-10 rounded-xl" disabled={!!busy}
+                        onClick={() => setHidden(u, false)}>
+                  {busy === `unhide-${u.id}` ? <LoaderCircle className="animate-spin" /> : <EyeOff />} Вернуть
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       {closed.length > 0 && <Group title="Заявка отклонена" users={closed} me={me} onPick={setSelected} muted />}
 
       <MemberSheet
@@ -365,7 +404,9 @@ function MemberSheet({
                   state === "paused" ? "bg-wait-soft text-wait" : "bg-cancel-soft text-cancel")}>
                   {state === "paused" ? <Pause className="mt-0.5 size-4 shrink-0" /> : <Ban className="mt-0.5 size-4 shrink-0" />}
                   <div className="text-sm">
-                    <p className="font-semibold">{state === "paused" ? "На паузе" : "Заблокирован"}</p>
+                    <p className="font-semibold">
+                      {state === "paused" ? "На паузе" : user.hidden ? "Заблокирован · скрыт из списков" : "Заблокирован"}
+                    </p>
                     {user.state_reason && <p className="mt-0.5 text-foreground/80">{user.state_reason}</p>}
                   </div>
                 </div>
@@ -535,6 +576,18 @@ function MemberSheet({
                   <Button className="press h-14 w-full rounded-2xl text-base font-semibold" disabled={!!busy}
                           onClick={() => act("unblock", (k) => api.admin.setState(user.id, "active", null, k), "Разблокирован")}>
                     {busy === "unblock" && <LoaderCircle className="animate-spin" />} Разблокировать
+                  </Button>
+                )}
+                {canBlock && state === "blocked" && !user.hidden && (
+                  <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
+                          onClick={() => act("hide", (k) => api.admin.hideUser(user.id, true, k), "Скрыт из списка")}>
+                    {busy === "hide" ? <LoaderCircle className="animate-spin" /> : <EyeOff />} Скрыть из списка
+                  </Button>
+                )}
+                {canBlock && user.hidden && (
+                  <Button variant="secondary" className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy}
+                          onClick={() => act("unhide", (k) => api.admin.hideUser(user.id, false, k), "Вернул в список")}>
+                    {busy === "unhide" ? <LoaderCircle className="animate-spin" /> : <EyeOff />} Вернуть в список
                   </Button>
                 )}
                 {canBlock && state !== "blocked" && (

@@ -22,6 +22,8 @@ export interface User {
   role: Role;
   work_status: "working" | "not_working";
   account_state: "active" | "paused" | "blocked";
+  /** 19.11: a hidden blocked member — tucked under «Скрытые» in «Команда», out of every other list */
+  hidden?: boolean;
   state_reason: string | null;
   network_id: number | null;
   /** network name (team listing) */
@@ -1867,6 +1869,9 @@ export const api = {
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/access`, { allow, idempotency_key: key }),
     setState: (userId: number, state: User["account_state"], reason: string | null, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/state`, { state, reason, idempotency_key: key }),
+    // 19.11: «Скрыть» a blocked member — out of the team lists, under «Скрытые»
+    hideUser: (userId: number, on: boolean, key: string) =>
+      post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/hide`, { on, idempotency_key: key }),
     raspred: (when: "today" | "tomorrow" = "tomorrow") => request<Raspred>(`/api/admin/raspred/${when}`),
     raspredOn: (date: string) => request<Raspred>(`/api/admin/raspred?date=${date}`),
     setNorm: (userId: number, norm: number | null, key: string) =>

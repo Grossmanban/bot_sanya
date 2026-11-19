@@ -522,9 +522,34 @@ def set_account_state(conn, actor: dict, user_id: int, state: str, reason: str |
         )
         if state == "blocked":
             conn.execute("UPDATE networks SET trainer_id = NULL WHERE trainer_id = ?", (user_id,))
+        if state != "blocked":  # 19.11: unblocked — back to the lists; «Скрытые» is for blocked ones only
+            conn.execute("UPDATE users SET hidden_at = NULL, hidden_by = NULL WHERE id = ? AND hidden_at IS NOT NULL",
+                         (user_id,))
         event = {"paused": "ACCOUNT_PAUSED", "blocked": "ACCOUNT_BLOCKED", "active": "ACCOUNT_ACTIVATED"}[state]
         log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type=event, key=key,
                   old={"account_state": current}, new={"account_state": state}, description=reason)
+    return get_user(conn, user_id), True
+
+
+def set_user_hidden(conn, actor: dict, user_id: int, on: bool, key: str) -> tuple[dict, bool]:
+    """19.11: «Скрыть» a blocked member — out of «Команда» and every picker list (the payout wizard never had
+    blocked people), under «Скрытые» below. Unblock returns the person to the lists on its own."""
+    _check_key(key)
+    with transaction(conn):
+        actor = _fresh_actor(conn, actor)
+        user = get_user(conn, user_id)
+        if user is None:
+            raise ServiceError("Пользователь не найден", 404, "not_found")
+        if _seen(conn, key):
+            return user, False
+        if user["status"] != "approved" or user["account_state"] != "blocked":
+            raise ServiceError("Скрывать можно только заблокированных", 409, "not_blocked")
+        if bool(user["hidden_at"]) == on:
+            return user, False
+        conn.execute("UPDATE users SET hidden_at = ?, hidden_by = ? WHERE id = ?",
+                     (now_iso() if on else None, actor["id"] if on else None, user_id))
+        log_event(conn, user_id=user_id, actor_id=actor["telegram_id"], event_type="MEMBER_HIDDEN",
+                  key=key, old={"hidden": bool(user["hidden_at"])}, new={"hidden": bool(on)})
     return get_user(conn, user_id), True
 
 

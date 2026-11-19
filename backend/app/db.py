@@ -1646,3 +1646,13 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
     else:
         conn.execute("COMMIT")
+
+
+def _member_hidden(conn: sqlite3.Connection) -> None:
+    """Migration 52 — 19.11: a blocked member can be hidden from the team lists («Скрыть» in «Команда»,
+    the hidden ones sit under «Скрытые»). Unblock brings the person back to the lists by itself."""
+    _run_script(conn, "ALTER TABLE users ADD COLUMN hidden_at TEXT; "
+                      "ALTER TABLE users ADD COLUMN hidden_by INTEGER;")
+
+
+MIGRATIONS.append(_member_hidden)

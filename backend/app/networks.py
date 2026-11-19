@@ -56,7 +56,7 @@ def listing(conn: sqlite3.Connection, viewer: dict, include_archived: bool = Fal
             "members": [{"id": u["id"], "name": svc.full_name(u), "username": u["username"], "telegram_id": u["telegram_id"],
                          "role": perms.role_of(u), "work_status": u["work_status"], "account_state": u["account_state"],
                          "status_days": svc.status_days(u), "instructor_id": u["instructor_id"]}
-                        for u in people if not trainer or u["id"] != trainer["id"]],
+                        for u in people if (not trainer or u["id"] != trainer["id"]) and not u["hidden_at"]],
         })
     return out
 

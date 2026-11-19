@@ -48,10 +48,11 @@
 
 ## Админ: команда, доступ, группы
 
-`GET /api/admin/users` · `GET /api/admin/team` (18.11: держателю `money` — `lazy_pool`, копилка налога на лень человека) ·
+`GET /api/admin/users` (19.11: скрытые заблокированные не отдаются вовсе) · `GET /api/admin/team` (18.11: держателю `money` — `lazy_pool`, копилка налога на лень человека; 19.11: карточки несут `hidden`, «Команда» уносит их под «Скрытые») ·
 `POST /api/admin/team/{uid}/role|access|state|work-status|norm|network|instructor|rates|training-access|products|manuals|payment-profile|profile`
 (`work-status`, 18.11: `{work_status}` — переключают только начальники: инструктор своим, тренер своей сети, админ/владелец любому; 403 у чужих;
 `rates` (19.11): тело с `fines_exempt` — при `true` висящие нарушения и неявки человека прощаются, ответ несёт `cleared {violations, no_shows}`) ·
+`POST /api/admin/team/{uid}/hide` `{on}` (19.11, право `block`): «Скрыть»/«Вернуть» заблокированного — только заблокированных (иначе 409 `not_blocked`), `users.hidden_at`, событие `MEMBER_HIDDEN`; разблокировка снимает скрытие сама ·
 `POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?}` (owner/admin, 18.11; в `GET /api/me`
 и «Команде» поля приходят как `grants`) ·
 инвайты `GET/POST /api/admin/invites`, `/{id}/revoke|qr`, `POST /api/admin/invites/rotate` · попытки доступа

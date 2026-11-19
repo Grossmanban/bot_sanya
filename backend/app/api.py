@@ -741,6 +741,8 @@ def public_user(user: dict) -> dict:
         "work_status": user["work_status"],
         "account_state": user["account_state"],
         "state_reason": user["state_reason"],
+        # 19.11: a hidden blocked member — «Команда» tucks the card under «Скрытые»
+        "hidden": bool(user.get("hidden_at")),
         "network_id": user["network_id"],
         "instructor_id": user.get("instructor_id"),  # ТЗ 27.10 §22: None — directly under the trainer
         "is_owner": svc.is_owner(user),
@@ -1506,7 +1508,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/users")
     async def admin_users(admin: dict = Depends(admin_user)):
-        return {"items": [public_user(u) for u in visible(admin, svc.list_users(conn))]}
+        # 19.11: a hidden blocked member is out of every list — «Команда» keeps them under «Скрытые» only
+        return {"items": [public_user(u) for u in visible(admin, svc.list_users(conn)) if not u["hidden_at"]]}
 
     @api.get("/admin/team")
     async def admin_team(admin: dict = Depends(admin_user)):
@@ -1558,6 +1561,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         """18.11: «Работаю» switches only whoever stands above the person — the instructor, the trainer, the admin."""
         user = svc.set_work_status(conn, admin, body.work_status, body.idempotency_key, user_id)
         return {"user": public_user(user)}
+
+    @api.post("/admin/team/{user_id}/hide")
+    async def admin_user_hide(user_id: int, body: PriorityBody, admin: dict = Depends(staff("block"))):
+        """19.11: «Скрыть» a blocked member — out of the team lists and pickers, under «Скрытые»; unblock returns."""
+        user, changed = svc.set_user_hidden(conn, admin, user_id, body.on, body.idempotency_key)
+        return {"user": public_user(user), "changed": changed}
 
     @api.get("/admin/points")
     async def admin_points(_: dict = Depends(admin_user)):
