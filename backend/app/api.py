@@ -935,6 +935,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         return {"svg": invites.qr_svg(link["url"]), "link": link["url"], "expires_at": link["expires_at"],
                 "seconds_left": link["seconds_left"]}
 
+    @api.post("/me/referrals/{app_id}/hide")
+    async def my_referral_hide(app_id: int, body: PriorityBody, user: dict = Depends(current_user)):
+        """19.11: the referrer hides their own referral from «Мои рефералы» («Скрыть», «Вернуть» from «Скрытые»)."""
+        recruiting.set_ref_hidden(conn, user, app_id, body.on, body.idempotency_key)
+        return {"ok": True}
+
     # ------------------------------------------------------------ access (ТЗ 27.10 §5–8)
 
     def invite_list() -> dict:

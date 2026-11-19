@@ -443,6 +443,10 @@ export interface Referral {
   stage2_counted: number | null;
   telegram_id?: number | null;
   username?: string | null;
+  /** 19.11: the referrer hid the card — it sits under «Скрытые» until brought back */
+  hidden?: boolean;
+  /** 19.11: the bonuses for the confirmed stages; `paid` comes from the money (the payout took the bonus) */
+  bonuses?: { stage: number; amount: number; paid: boolean; status: string }[];
 }
 
 /** ТЗ №20, №22: what goals and events share once running. */
@@ -1477,6 +1481,9 @@ export const api = {
   referrals: () => request<{ link: string | null; expires_at: string; seconds_left: number; ttl_minutes: number;
     items: Referral[]; targets: { internship_units: number; second_stage_units: number } }>("/api/me/referrals"),
   referralQr: () => request<{ svg: string; link: string; expires_at: string; seconds_left: number }>("/api/me/referrals/qr"),
+  // 19.11: the referrer hides their own referral from the list («Скрыть», «Вернуть» from «Скрытые»)
+  hideReferral: (id: number, on: boolean, key: string) =>
+    post<{ ok: boolean }>(`/api/me/referrals/${id}/hide`, { on, idempotency_key: key }),
   /** ТЗ 27.10 §11: a person without a username — the bot sends a card with a link to the profile */
   profileLink: (telegram_id: number) => post<{ sent: boolean; opens: boolean | null; bot_username: string | null }>("/api/profile-link", { telegram_id }),
   work: () => request<{ items: { product: Product; title: string }[] }>("/api/work"),

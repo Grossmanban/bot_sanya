@@ -1,12 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, LoaderCircle, QrCode, Share2 } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, LoaderCircle, QrCode, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Referral } from "@/lib/api";
-import { useLoad } from "@/lib/hooks";
+import { useAction, useLoad } from "@/lib/hooks";
 import { haptic, openProfile, webApp } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 import { LinkTimer, QrImage, useCountdown } from "../link-timer";
@@ -20,7 +20,67 @@ const STATUS: Record<Referral["status"], { label: string; tone: string }> = {
   returned: { label: "Заполняет анкету заново", tone: "bg-muted text-muted-foreground" },
 };
 
-/** «Мои рефералы» (the customer's module 3): my link and where everyone I invited is now. */
+// 19.11: the pipeline groups — nobody reads one flat list of twenty people with different statuses
+const GROUPS: { label: string; statuses: Referral["status"][] }[] = [
+  { label: "Анкета у кураторов", statuses: ["new"] },
+  { label: "На обучении", statuses: ["scheduled"] },
+  { label: "На стажировке", statuses: ["internship"] },
+  { label: "В команде", statuses: ["done"] },
+  { label: "Отклонённые", statuses: ["rejected", "returned"] },
+];
+
+/** One referral card: where the person is now, and the referrer's bonus state — «ждёт выплаты» until the payout
+ * actually took the bonus (the money's word, not the stage's). 19.11: the card can be hidden from the list. */
+function RefCard({ r, onDone }: { r: Referral; onDone: () => void }) {
+  const { busy, run } = useAction();
+  const p = r.progress;
+  const st = p?.stage === 2 ? (p.finished ? { label: "Второй этап засчитан", tone: "bg-go-soft text-go" } : STATUS.done) : STATUS[r.status];
+  const pct = p ? Math.min(100, Math.round((p.units / Math.max(p.target, 1)) * 100)) : 0;
+  const hide = async (on: boolean) => {
+    try {
+      if (await run("hide", (k) => api.hideReferral(r.id, on, k), on ? "Скрыт: карточка внизу списка, в «Скрытых»" : "Возвращён в список")) onDone();
+    } catch {
+      /* toast shown */
+    }
+  };
+  return (
+    <li className="space-y-2 px-5 py-3.5 md:px-6">
+      <div className="flex items-center justify-between gap-3">
+        <button className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline"
+                onClick={() => openProfile(r.username, r.telegram_id, r.name)}>{r.name}</button>
+        <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", st.tone)}>
+          {p?.review ? "На проверке" : st.label}
+        </span>
+      </div>
+      {p && !p.finished && (
+        <>
+          <div className="relative h-1.5 overflow-hidden rounded-full bg-muted">
+            <span className="absolute inset-y-0 left-0 rounded-full bg-primary" style={{ width: `${pct}%` }} />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {p.stage === 1 ? "Стажировка" : "Работа после стажировки"}: {p.units} из {p.target}
+            {r.stage1_counted != null && p.stage === 2 ? ` · стажировка засчитана: ${r.stage1_counted}` : ""}
+          </p>
+        </>
+      )}
+      {r.bonuses?.map((b) => (
+        <p key={b.stage} className={cn("text-xs font-semibold", b.paid ? "text-go" : "text-wait")}>
+          Бонус {b.amount} ₽ за {b.stage === 1 ? "стажировку" : "второй этап"}: {b.paid ? "выплачен" : "ждёт выплаты"}
+        </p>
+      ))}
+      <div>
+        <Button variant="ghost" size="sm" className="h-8 rounded-lg text-muted-foreground" disabled={!!busy}
+                onClick={() => hide(!r.hidden)}>
+          {busy === "hide" ? <LoaderCircle className="animate-spin" /> : r.hidden ? <Eye /> : <EyeOff />}
+          {r.hidden ? "Вернуть в список" : "Скрыть"}
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+/** «Мои рефералы» (the customer's module 3): my link and where everyone I invited is now — grouped by the
+ * pipeline stage, bonuses in plain sight, hidden ones tucked under «Скрытые». */
 export function Referrals() {
   const { data, reload } = useLoad(() => api.referrals(), []);
   const [copied, setCopied] = useState(false);
@@ -30,6 +90,9 @@ export function Referrals() {
   const left = useCountdown(data?.seconds_left, () => { setQr(null); void reload(); });
   if (!data) return <Skeleton className="h-48 rounded-3xl" />;
   const link = data.link;
+  const items = data.items;
+  const visible = items.filter((r) => !r.hidden);
+  const hiddenItems = items.filter((r) => r.hidden);
 
   async function makeQr() {
     setQrBusy(true);
@@ -95,39 +158,34 @@ export function Referrals() {
       </section>
 
       <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
-        <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">Приглашённые <span className="text-muted-foreground">{data.items.length}</span></h2>
-        {data.items.length === 0 ? (
+        <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">Приглашённые <span className="text-muted-foreground">{visible.length}</span></h2>
+        {visible.length === 0 ? (
           <p className="px-5 pb-5 text-sm text-muted-foreground md:px-6">Пока никого. Отправьте ссылку другу.</p>
         ) : (
-          <ul className="divide-y">
-            {data.items.map((r) => {
-              const p = r.progress;
-              const st = p?.stage === 2 ? (p.finished ? { label: "Второй этап засчитан", tone: "bg-go-soft text-go" } : STATUS.done) : STATUS[r.status];
-              const pct = p ? Math.min(100, Math.round((p.units / Math.max(p.target, 1)) * 100)) : 0;
-              return (
-                <li key={r.id} className="space-y-2 px-5 py-3.5 md:px-6">
-                  <div className="flex items-center justify-between gap-3">
-                    <button className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline"
-                            onClick={() => openProfile(r.username, r.telegram_id, r.name)}>{r.name}</button>
-                    <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold", st.tone)}>
-                      {p?.review ? "На проверке" : st.label}
-                    </span>
-                  </div>
-                  {p && !p.finished && (
-                    <>
-                      <div className="relative h-1.5 overflow-hidden rounded-full bg-muted">
-                        <span className="absolute inset-y-0 left-0 rounded-full bg-primary" style={{ width: `${pct}%` }} />
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        {p.stage === 1 ? "Стажировка" : "Работа после стажировки"}: {p.units} из {p.target}
-                        {r.stage1_counted != null && p.stage === 2 ? ` · стажировка засчитана: ${r.stage1_counted}` : ""}
-                      </p>
-                    </>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+          GROUPS.map((g) => {
+            const rows = visible.filter((r) => g.statuses.includes(r.status));
+            if (rows.length === 0) return null;
+            return (
+              <div key={g.label}>
+                <h3 className="flex items-center gap-2 border-t bg-muted/40 px-5 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground md:px-6">
+                  {g.label} <span className="rounded-full bg-card px-2 py-0.5 tabular">{rows.length}</span>
+                </h3>
+                <ul className="divide-y">
+                  {rows.map((r) => <RefCard key={r.id} r={r} onDone={reload} />)}
+                </ul>
+              </div>
+            );
+          })
+        )}
+        {hiddenItems.length > 0 && (
+          <details className="border-t">
+            <summary className="flex cursor-pointer items-center gap-2 px-5 py-3.5 font-semibold text-muted-foreground md:px-6">
+              Скрытые <span className="rounded-full bg-muted px-2 text-xs tabular">{hiddenItems.length}</span>
+            </summary>
+            <ul className="divide-y border-t">
+              {hiddenItems.map((r) => <RefCard key={r.id} r={r} onDone={reload} />)}
+            </ul>
+          </details>
         )}
       </section>
     </div>

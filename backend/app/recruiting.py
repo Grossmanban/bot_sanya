@@ -370,8 +370,21 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
     return out
 
 
+def _referral_bonus(conn: sqlite3.Connection, app: dict, stage: int) -> dict | None:
+    """The referrer's bonus for a confirmed stage, straight from the money: `active` — waiting for the payout,
+    `offset` — the payout took it («выплачено»). No tx — the stage was confirmed without a bonus."""
+    tx_id = app[f"stage{stage}_bonus_tx"]
+    if not tx_id:
+        return None
+    row = conn.execute("SELECT amount, status FROM financial_transactions WHERE id = ?", (tx_id,)).fetchone()
+    if row is None:
+        return None
+    return {"stage": stage, "amount": row["amount"], "paid": row["status"] in ("offset", "paid"), "status": row["status"]}
+
+
 def referrals(conn: sqlite3.Connection, user: dict) -> list[dict]:
-    """«Мои рефералы»: everyone this person invited, with where they are now."""
+    """«Мои рефералы»: everyone this person invited, with where they are now (19.11: the bonus state —
+    «ждёт выплаты» / «выплачено» — and the `hidden` flag; the UI groups by status and tucks hidden away)."""
     rows = conn.execute("""SELECT a.* FROM applications a WHERE a.referrer_id = ? AND a.id = (
                                SELECT MAX(b.id) FROM applications b WHERE b.user_id = a.user_id) ORDER BY a.id DESC""",
                         (user["id"],))
@@ -383,8 +396,28 @@ def referrals(conn: sqlite3.Connection, user: dict) -> list[dict]:
         out.append({"id": app["id"], "name": app["full_name"], "status": app["status"], "created_at": app["created_at"],
                     # ТЗ 27.10 §11: the profile by the Telegram ID
                     "telegram_id": person.get("telegram_id"), "username": person.get("username"),
-                    "progress": p, "stage1_counted": app["stage1_counted"], "stage2_counted": app["stage2_counted"]})
+                    "progress": p, "stage1_counted": app["stage1_counted"], "stage2_counted": app["stage2_counted"],
+                    "hidden": bool(app["ref_hidden_at"]),
+                    "bonuses": [b for b in (_referral_bonus(conn, app, 1), _referral_bonus(conn, app, 2)) if b]})
     return out
+
+
+def set_ref_hidden(conn: sqlite3.Connection, actor: dict, app_id: int, on: bool, key: str) -> dict | None:
+    """19.11: the referrer hides their own referral («Скрыть» on the card, «Вернуть» from «Скрытые») — a personal
+    view thing, the pipeline and the staff's onboarding don't change."""
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return get(conn, app_id)
+        app = get(conn, app_id)
+        if app is None:
+            raise ServiceError("Анкета не найдена", 404, "not_found")
+        if app["referrer_id"] != actor["id"]:
+            raise ServiceError("Это не ваш реферал", 403, "forbidden")
+        conn.execute("UPDATE applications SET ref_hidden_at = ? WHERE id = ?", (now_iso() if on else None, app_id))
+        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="REFERRAL_HIDDEN",
+                  key=key, old={"hidden": bool(app["ref_hidden_at"])}, new={"hidden": bool(on)})
+    return get(conn, app_id)
 
 
 # ---------------------------------------------------------------- staff actions

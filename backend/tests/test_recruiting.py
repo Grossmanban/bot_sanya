@@ -375,3 +375,42 @@ def test_hide_http_and_pending_counts(conn):
     r = client.post(f"/api/admin/onboarding/{app['id']}/hide", json={"on": False, "idempotency_key": svc.new_key()}, headers=h)
     assert r.json()["application"]["hidden"] is False
     assert [a["id"] for a in recruiting.listing(conn, "done")] == [app["id"]]
+
+
+def test_referral_bonuses_follow_the_money_and_hide(conn, make_user):
+    """19.11: the referrer's list carries the bonus state from the money — «ждёт выплаты» while the bonus is
+    active, «выплачен» once the payout takes it; a referral can be hidden and brought back, but only by the
+    person who invited."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    friend = make_user(first="Аня")
+    link = invites.current_ref(conn, friend)
+    user, app = recruiting.submit(conn, {"id": 5201}, FORM, f"ref_{link['token']}")
+    view = recruiting.referrals(conn, friend)[0]
+    assert view["bonuses"] == [] and view["hidden"] is False
+    conn.execute("UPDATE applications SET status = 'internship' WHERE id = ?", (app["id"],))
+    app, tx, changed = recruiting.confirm_stage(conn, owner, app["id"], 1, 20, 500, svc.new_key())
+    assert changed and tx is not None and tx["status"] == "active"
+    assert [(b["stage"], b["amount"], b["paid"]) for b in recruiting.referrals(conn, friend)[0]["bonuses"]] == [(1, 500, False)]
+    conn.execute("UPDATE financial_transactions SET status = 'offset' WHERE id = ?", (tx["id"],))  # the payout took it
+    assert recruiting.referrals(conn, friend)[0]["bonuses"][0]["paid"] is True
+    app, tx2, changed = recruiting.confirm_stage(conn, owner, app["id"], 2, 50, 1000, svc.new_key())
+    assert changed and tx2 is not None
+    assert [b["stage"] for b in recruiting.referrals(conn, friend)[0]["bonuses"]] == [1, 2]
+
+    stranger = make_user(first="Олег")
+    with pytest.raises(svc.ServiceError) as e:  # not your referral
+        recruiting.set_ref_hidden(conn, stranger, app["id"], True, svc.new_key())
+    assert e.value.code == "forbidden"
+    recruiting.set_ref_hidden(conn, friend, app["id"], True, svc.new_key())
+    assert recruiting.referrals(conn, friend)[0]["hidden"] is True
+    recruiting.set_ref_hidden(conn, friend, app["id"], False, svc.new_key())
+    assert recruiting.referrals(conn, friend)[0]["hidden"] is False
+
+    n = FakeNotifier(conn)
+    client = TestClient(create_app(conn, n))
+    r = client.post(f"/api/me/referrals/{app['id']}/hide", json={"on": True, "idempotency_key": svc.new_key()},
+                    headers=headers(friend["telegram_id"], "Аня", "Аньева", "anya"))
+    assert r.status_code == 200 and recruiting.referrals(conn, friend)[0]["hidden"] is True
+    r = client.post(f"/api/me/referrals/{app['id']}/hide", json={"on": True, "idempotency_key": svc.new_key()},
+                    headers=headers(stranger["telegram_id"]))
+    assert r.status_code == 403

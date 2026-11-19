@@ -17,7 +17,8 @@
 |---|---|
 | `GET /api/me` | всё о текущем: user, role_title, capabilities, products, manageable_products, training, manuals, internship, pricing, global_link, header, events |
 | `POST /api/register` | анкета кандидата |
-| `GET /api/me/referrals` · `/qr` | реферальная ссылка (TTL, секунды), QR SVG, список приглашённых |
+| `GET /api/me/referrals` · `/qr` | реферальная ссылка (TTL, секунды), QR SVG, список приглашённых; 19.11: у каждого `hidden` и `bonuses [{stage, amount, paid, status}]` — бонус «ждёт выплаты» (`active`) / «выплачен» (`offset`), статус меняет только выплата |
+| `POST /api/me/referrals/{app}/hide` | 19.11: `{on}` — пригласивший скрывает своего реферала из списка (чужой — 403 `forbidden`) |
 | `PATCH /api/me/work-status` | «Работаю/Не работаю» (18.11: сам сотрудник больше не переключает — 403; персонал свой статус меняет) |
 | `PATCH /api/me/notifications` | включить/выключить напоминания |
 | `POST /api/profile-link` | карточка человека без username (в чат с ботом) |
@@ -135,3 +136,5 @@
 - 2026-11-19 — `POST /api/admin/onboarding/{app}/hide` («Скрыть/Вернуть», миграция 50); в анкетах `hidden`;
   в `GET /api/admin/onboarding` вкладка `done` без заблокированных, счётчики вкладок — без скрытых и
   заблокированных; «Стажировки на проверку» (`GET /api/admin/pending`) не считает завершённые стажировки.
+- 2026-11-19 — `POST /api/me/referrals/{app}/hide` (миграция 51, `applications.ref_hidden_at`); в
+  `GET /api/me/referrals` у каждого — `hidden` и `bonuses [{stage, amount, paid, status}]`.

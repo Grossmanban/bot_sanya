@@ -1588,6 +1588,16 @@ def _app_hidden(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_app_hidden)
 
 
+def _ref_hidden(conn: sqlite3.Connection) -> None:
+    """Migration 51 — 19.11: the referrer hides their own referral from «Мои рефералы» («Скрыть» on the card,
+    the hidden ones sit under «Скрытые»). The staff's `hidden_at` on a finished questionnaire is a different
+    thing — this one belongs to the person who invited."""
+    _run_script(conn, "ALTER TABLE applications ADD COLUMN ref_hidden_at TEXT;")
+
+
+MIGRATIONS.append(_ref_hidden)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):
