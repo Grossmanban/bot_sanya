@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { CalendarPlus, CalendarX, Check, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Search, Send, ShieldCheck, Star, Timer, UserCog, UserX, Users } from "lucide-react";
+import { CalendarPlus, CalendarX, Check, Eye, EyeOff, GraduationCap, LoaderCircle, MessageCircle, MoreHorizontal, Play, RotateCcw, Search, Send, ShieldCheck, Star, Timer, UserCog, UserX, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Application, type Role, type StageProgress, type TrainingRequest, type User } from "@/lib/api";
@@ -87,6 +87,9 @@ export function OnboardingSection({ me }: { me: User }) {
     || !!metro.trim() || !!minDays || prioOnly || respOnly || !!q.trim();
   // the chip counts the ⭐ ones in the current tab (before the other filters)
   const prioCount = (data?.items ?? []).filter((a) => a.priority).length;
+  // 19.11: hidden finished cards sit under «Скрытые» below the list — out of sight until brought back
+  const shown = tab === "done" ? items.filter((a) => !a.hidden) : items;
+  const hiddenItems = tab === "done" ? items.filter((a) => a.hidden) : [];
   // 18.11: in all the pickers the owners and the trainers/instructors come first (the inviter tops it on the card)
   const trainersSorted = useMemo(() => sortedTrainers(data?.trainers ?? []), [data]);
 
@@ -207,19 +210,36 @@ export function OnboardingSection({ me }: { me: User }) {
         <Requests items={data.requests} trainers={trainersSorted} points={data.points} onDone={reload} />
       )}
 
-      {!data ? <Skeleton className="h-48 rounded-3xl" /> : items.length === 0 ? (
-        <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">
-          {q.trim() ? `Никого не нашлось по «${q.trim()}».` : filtered ? "Под фильтры никто не подходит." : "Здесь пока пусто."}
-        </p>
-      ) : (
-        <ul className="space-y-3">
-          {tab === "scheduled" && items.some((a) => a.agreement === "agreed") && (
-            <li className="px-1 text-xs text-muted-foreground">Сверху — кандидаты, у которых дату и время подтвердили и кандидат, и тренер.</li>
+      {!data ? <Skeleton className="h-48 rounded-3xl" /> : (
+        <>
+          {shown.length === 0 ? (
+            <p className="rounded-3xl bg-card p-5 text-sm text-muted-foreground shadow-lift md:p-6">
+              {q.trim() ? `Никого не нашлось по «${q.trim()}».` : filtered ? "Под фильтры никто не подходит." : "Здесь пока пусто."}
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {tab === "scheduled" && shown.some((a) => a.agreement === "agreed") && (
+                <li className="px-1 text-xs text-muted-foreground">Сверху — кандидаты, у которых дату и время подтвердили и кандидат, и тренер.</li>
+              )}
+              {shown.map((a) => (
+                <Candidate key={a.id} a={a} me={me} trainers={trainersSorted} points={data.points} onDone={reload} />
+              ))}
+            </ul>
           )}
-          {items.map((a) => (
-            <Candidate key={a.id} a={a} me={me} trainers={trainersSorted} points={data.points} onDone={reload} />
-          ))}
-        </ul>
+          {hiddenItems.length > 0 && (
+            <details className="rounded-3xl bg-card shadow-lift">
+              <summary className="flex cursor-pointer items-center gap-2 px-5 py-4 font-semibold text-muted-foreground md:px-6">
+                Скрытые
+                <span className="rounded-full bg-muted px-2 text-xs tabular">{hiddenItems.length}</span>
+              </summary>
+              <ul className="space-y-3 border-t p-4 md:p-5">
+                {hiddenItems.map((a) => (
+                  <Candidate key={a.id} a={a} me={me} trainers={trainersSorted} points={data.points} onDone={reload} />
+                ))}
+              </ul>
+            </details>
+          )}
+        </>
       )}
     </div>
   );
@@ -277,6 +297,17 @@ function Candidate({ a, me, trainers, points, onDone }: {
             onClick={() => toggle("stage")}>
       <Check /> {a.status === "internship" ? "Принять в команду" : "Проверить второй этап"}
     </Button>);
+  // 19.11: a finished card can be hidden — out of «Завершённые», and back from «Скрытые»
+  add(a.status === "done" && !a.hidden, "hide",
+    <Button variant="ghost" size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("hide", (k) => api.admin.hideApplication(a.id, true, k), "Скрыто: карточка внизу списка, в «Скрытых»")}>
+      <EyeOff /> Скрыть из списка
+    </Button>);
+  add(a.status === "done" && !!a.hidden, "unhide",
+    <Button variant="secondary" size="sm" className="h-9 rounded-xl" disabled={!!busy}
+            onClick={() => act("unhide", (k) => api.admin.hideApplication(a.id, false, k), "Возвращено в «Завершённые»")}>
+      <Eye /> Вернуть в список
+    </Button>);
   add(a.status === "rejected", "return",
     <Button variant="secondary" size="sm" className="h-9 rounded-xl" disabled={!!busy}
             onClick={() => act("return", (k) => api.admin.returnApplication(a.id, k), "Возвращён в резерв: блокировка снята, бот попросит заполнить анкету заново")}>
@@ -321,7 +352,8 @@ function Candidate({ a, me, trainers, points, onDone }: {
   const primary: string[] = a.status === "new" ? ["trainer", "reject"]
     : scheduled ? (!a.trainer ? ["trainer"] : !a.training_date ? ["training"]
       : !a.training_started_at ? ["start", "training"] : ["intern"])
-    : a.status === "internship" || a.status === "done" ? ["stage"]
+    : a.status === "internship" ? ["stage"]
+    : a.status === "done" ? (a.hidden ? ["unhide"] : ["stage", "hide"])
     : a.status === "rejected" ? ["return"] : [];
   let main = all.filter((x) => primary.includes(x.id));
   let rest = all.filter((x) => !primary.includes(x.id));

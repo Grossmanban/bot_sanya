@@ -77,9 +77,11 @@ def counts(conn: sqlite3.Connection, viewer: dict, today: date | None = None) ->
             f"""SELECT COUNT(*) FROM users u WHERE u.status = 'pending' AND NOT EXISTS (
                     SELECT 1 FROM applications a WHERE a.user_id = u.id AND a.status IN {recruiting.OPEN})""").fetchone()[0]
         out["onboarding_new"] = conn.execute("SELECT COUNT(*) FROM applications WHERE status = 'new'").fetchone()[0]
+        # 19.11: a finished internship whose second stage was never checked is not a decision anyone waits for —
+        # only a running internship (the goal reached, the trainer asked to finish) counts here
         out["internship_review"] = sum(
-            1 for a in conn.execute("SELECT * FROM applications WHERE status IN ('internship', 'done')")
-            if (recruiting.progress(conn, dict(a)) or {}).get("review") or (a["status"] == "internship" and a["finish_requested_at"]))
+            1 for a in conn.execute("SELECT * FROM applications WHERE status = 'internship'")
+            if (recruiting.progress(conn, dict(a)) or {}).get("review") or a["finish_requested_at"])
         # §3–§4: the trainers' and candidates' requests waiting for an admin — «Ожидает согласования»
         out["training_requests"] = conn.execute("SELECT COUNT(*) FROM training_requests WHERE status = 'pending'").fetchone()[0]
     if perms.can(viewer, "profiles"):  # §7: profile changes — owners and admins; payment details — owners (В20)

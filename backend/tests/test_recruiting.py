@@ -15,6 +15,7 @@ from app.config import settings
 from app.timeutil import now_local
 
 from .conftest import requisites
+from .test_api import headers
 from .test_features import FakeNotifier, run
 
 def invited(conn, referrer: dict, telegram_id: int) -> None:
@@ -309,3 +310,68 @@ def test_unnetworked_people_count_as_a_decision(conn, make_user):
     assert pending.counts(conn, owner)["no_network"] == 1  # the owner without a network doesn't count
     networks.set_member(conn, owner, loose["id"], north["id"], svc.new_key())
     assert pending.counts(conn, owner)["no_network"] == 0
+
+
+# ---------------------------------------------------------------- 19.11: «Скрыть» и заблокированные в «Завершённых»
+
+
+def _finished(conn, referrer: dict, telegram_id: int) -> tuple[dict, dict]:
+    """A hired person: the application is done (as after «Принять в команду»)."""
+    link = invites.current_ref(conn, referrer)
+    user, app = recruiting.submit(conn, {"id": telegram_id}, FORM, f"ref_{link['token']}")
+    conn.execute("UPDATE applications SET status = 'done', stage1_at = ?, stage1_counted = 20 WHERE id = ?",
+                 (svc.now_iso(), app["id"]))
+    return user, app
+
+
+def test_blocked_hired_vanishes_from_done(conn):
+    """A person the team blocked is not shown in «Завершённые» at all — «принят в команду» would be a lie."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    good = _finished(conn, owner, 5101)
+    bad = _finished(conn, owner, 5102)
+    conn.execute("UPDATE users SET account_state = 'blocked' WHERE id = ?", (bad[0]["id"],))
+    assert [a["id"] for a in recruiting.listing(conn, "done")] == [good[1]["id"]]
+    assert recruiting.counts(conn)["done"] == 1
+
+
+def test_hide_and_return_finished(conn):
+    """«Скрыть» takes a finished card out of «Завершённые» and its count; «Вернуть» brings it back."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    user, app = _finished(conn, owner, 5103)
+    hidden = recruiting.set_hidden(conn, owner, app["id"], True, svc.new_key())
+    assert hidden["hidden_at"] and recruiting.view(conn, hidden)["hidden"] is True
+    assert [a["id"] for a in recruiting.listing(conn, "done") if not a["hidden_at"]] == []
+    assert recruiting.counts(conn)["done"] == 0
+    assert recruiting.set_hidden(conn, owner, app["id"], False, svc.new_key())["hidden_at"] is None
+    assert [a["id"] for a in recruiting.listing(conn, "done")] == [app["id"]]
+    conn.execute("UPDATE applications SET status = 'scheduled' WHERE id = ?", (app["id"],))
+    with pytest.raises(svc.ServiceError) as e:  # only the finished ones can be hidden
+        recruiting.set_hidden(conn, owner, app["id"], True, svc.new_key())
+    assert e.value.code == "bad_status"
+
+
+def test_hide_http_and_pending_counts(conn):
+    """The route works, is idempotent and feeds the same listing; a finished internship without the checked
+    second stage is not counted as «Стажировки на проверку» anywhere — only a running one is."""
+    owner = svc.ensure_admin(conn, 999, "Саня", "Владелец", "boss")
+    user, app = _finished(conn, owner, 5104)
+    assert pending.counts(conn, owner)["internship_review"] == 0
+    conn.execute("UPDATE applications SET status = 'internship', finish_requested_at = ? WHERE id = ?",
+                 (svc.now_iso(), app["id"]))
+    assert pending.counts(conn, owner)["internship_review"] == 1
+    conn.execute("UPDATE applications SET status = 'done', finish_requested_at = NULL WHERE id = ?", (app["id"],))
+
+    n = FakeNotifier(conn)
+    client = TestClient(create_app(conn, n))
+    h = headers(999, "Саня", "Владелец", "boss")
+    key = svc.new_key()
+    r = client.post(f"/api/admin/onboarding/{app['id']}/hide", json={"on": True, "idempotency_key": key}, headers=h)
+    assert r.status_code == 200 and r.json()["application"]["hidden"] is True
+    r = client.post(f"/api/admin/onboarding/{app['id']}/hide", json={"on": True, "idempotency_key": key}, headers=h)
+    assert r.json()["application"]["hidden"] is True  # the same key — the same answer, nothing breaks
+    r = client.get("/api/admin/onboarding?tab=done", headers=h)
+    assert r.json()["counts"]["done"] == 0  # the tab pill doesn't count the hidden one
+    assert [(a["id"], a["hidden"]) for a in r.json()["items"]] == [(app["id"], True)]  # the card — to «Скрытые»
+    r = client.post(f"/api/admin/onboarding/{app['id']}/hide", json={"on": False, "idempotency_key": svc.new_key()}, headers=h)
+    assert r.json()["application"]["hidden"] is False
+    assert [a["id"] for a in recruiting.listing(conn, "done")] == [app["id"]]

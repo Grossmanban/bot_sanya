@@ -73,8 +73,13 @@ export const SECTION_COUNTS: Record<string, (keyof ReportCounts)[]> = {
   plus: ["plus_moderation", "plus_failed"],
 };
 
+/** 19.11: what the section tile itself counts, when it is narrower than the section's decisions. «Онбординг» —
+ * only the new questionnaires («Ожидают рассмотрения»): a finished internship or a training request is decided
+ * quietly and must not nag on the tile; the counts stay in «Решения» and in the section's own lists. */
+const TILE_COUNTS: Partial<Record<string, (keyof ReportCounts)[]>> = { onboarding: ["onboarding_new"] };
+
 export function sectionCount(c: ReportCounts | null, section: string): number {
-  return (SECTION_COUNTS[section] ?? []).reduce((n, k) => n + (Number(c?.[k]) || 0), 0);
+  return ((TILE_COUNTS[section] ?? SECTION_COUNTS[section]) ?? []).reduce((n, k) => n + (Number(c?.[k]) || 0), 0);
 }
 
 /** §27 «Решения»: the same words as the bot's /pending (backend pending.LABELS), in the same order. */

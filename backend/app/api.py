@@ -2464,6 +2464,12 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
         recruiting.set_priority(conn, admin, app_id, body.on, body.idempotency_key)
         return app_out(app_id)
 
+    @api.post("/admin/onboarding/{app_id}/hide")
+    async def admin_application_hide(app_id: int, body: PriorityBody, admin: dict = Depends(staff("registrations"))):
+        """19.11: «Скрыть»/«Вернуть» — a finished questionnaire leaves «Завершённые» (to «Скрытые») or comes back."""
+        recruiting.set_hidden(conn, admin, app_id, body.on, body.idempotency_key)
+        return app_out(app_id)
+
     @api.post("/admin/onboarding/{app_id}/remind-referrer")
     async def admin_remind_referrer(app_id: int, body: KeyOnly, admin: dict = Depends(staff("registrations"))):
         """§2: the inviter is asked to help the candidate reach the trainer."""

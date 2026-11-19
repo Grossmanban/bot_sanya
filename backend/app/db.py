@@ -1577,6 +1577,17 @@ def _fines_exempt(conn: sqlite3.Connection) -> None:
 MIGRATIONS.append(_fines_exempt)
 
 
+def _app_hidden(conn: sqlite3.Connection) -> None:
+    """Migration 50 — 19.11: a finished questionnaire can be hidden from «Завершённые» («Скрыть» on the card,
+    the hidden ones sit under «Скрытые» below the list). A person who was blocked after being hired isn't shown
+    there at all — no flag needed, the listing joins users and skips blocked ones."""
+    _run_script(conn, "ALTER TABLE applications ADD COLUMN hidden_at TEXT; "
+                      "ALTER TABLE applications ADD COLUMN hidden_by INTEGER;")
+
+
+MIGRATIONS.append(_app_hidden)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     for number, step in enumerate(MIGRATIONS[version:], start=version + 1):

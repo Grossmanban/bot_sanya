@@ -349,6 +349,8 @@ export interface Application {
   progress: StageProgress | null;
   /** 19.11: «приоритетное обучение» — the candidate's own mark or the staff's switch */
   priority?: boolean;
+  /** 19.11: hidden from «Завершённые» — the card sits under «Скрытые» until brought back */
+  hidden?: boolean;
   /** 19.11: how long the questionnaire has been waiting in «Ожидают рассмотрения» (the server's MSK clock) */
   waiting?: { hours: number; text: string } | null;
   avatar_url: string;
@@ -1610,6 +1612,9 @@ export const api = {
     /** 19.11: the training priority on any questionnaire (⭐ on the cards and in the bot's messages) */
     setPriority: (id: number, on: boolean, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/priority`, { on, idempotency_key: key }),
+    // 19.11: «Скрыть»/«Вернуть» on a finished questionnaire
+    hideApplication: (id: number, on: boolean, key: string) =>
+      post<{ application: Application }>(`/api/admin/onboarding/${id}/hide`, { on, idempotency_key: key }),
     remindReferrer: (id: number, key: string) =>
       post<{ application: Application }>(`/api/admin/onboarding/${id}/remind-referrer`, { idempotency_key: key }),
     startTraining: (id: number, key: string) =>

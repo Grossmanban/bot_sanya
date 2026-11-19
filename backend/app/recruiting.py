@@ -259,6 +259,23 @@ def set_internship_units(conn: sqlite3.Connection, actor: dict, app_id: int, val
 # ---------------------------------------------------------------- views
 
 
+def set_hidden(conn: sqlite3.Connection, actor: dict, app_id: int, on: bool, key: str) -> dict | None:
+    """19.11: «Скрыть» on a finished card — it leaves «Завершённые» (and the tab count) and sits under «Скрытые»,
+    «Вернуть» brings it back. Nothing else changes: the person stays in the team as they are."""
+    _check_key(key)
+    with transaction(conn):
+        if _seen(conn, key):
+            return get(conn, app_id)
+        actor, app = _load(conn, actor, app_id)
+        if app["status"] != "done":
+            raise ServiceError("Скрывать можно только завершённые анкеты", 409, "bad_status")
+        conn.execute("UPDATE applications SET hidden_at = ?, hidden_by = ? WHERE id = ?",
+                     (now_iso() if on else None, actor["id"] if on else None, app_id))
+        log_event(conn, user_id=app["user_id"], actor_id=actor["telegram_id"], event_type="APPLICATION_HIDDEN",
+                  key=key, old={"hidden": bool(app["hidden_at"])}, new={"hidden": bool(on)})
+    return get(conn, app_id)
+
+
 def _days(app: dict) -> list[int]:
     return json.loads(app["training_days"] or "[]")
 
@@ -300,6 +317,7 @@ def view(conn: sqlite3.Connection, app: dict) -> dict:
                                "contact_answer_at", "stage1_counted", "stage1_at", "stage2_counted", "stage2_at")},
         "training_days": _days(app),
         "priority": bool(app["priority"]),
+        "hidden": bool(app["hidden_at"]),
         "waiting": waiting,
         # ТЗ 30.10 §7: the moment the candidate sent the questionnaire, in Moscow time
         "submitted_text": msk_datetime(app["created_at"]),
@@ -324,8 +342,13 @@ def listing(conn: sqlite3.Connection, tab: str) -> list[dict]:
     if tab not in TABS:
         raise ServiceError("Неизвестная вкладка", 422, "bad_tab")
     statuses = TABS[tab]
+    # 19.11: hidden finished cards come back with the `hidden` flag — the UI tucks them under «Скрытые»; a blocked
+    # person isn't shown in «Завершённые» at all — «принят в команду» for someone the team blocked is noise
+    blocked = "" if tab != "done" else " AND COALESCE(u.account_state, '') != 'blocked'"
     rows = [dict(r) for r in conn.execute(
-        f"SELECT * FROM applications WHERE status IN ({','.join('?' * len(statuses))}) ORDER BY id DESC LIMIT 300", statuses)]
+        f"""SELECT a.* FROM applications a LEFT JOIN users u ON u.id = a.user_id
+            WHERE a.status IN ({','.join('?' * len(statuses))}){blocked}
+            ORDER BY a.id DESC LIMIT 300""", statuses)]
     if tab == "scheduled":  # ТЗ 30.10 §4: both confirmed first
         from . import training
 
@@ -334,8 +357,13 @@ def listing(conn: sqlite3.Connection, tab: str) -> list[dict]:
 
 
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """The tab pills — the same rule as the listing: without the hidden ones, without blocked people in «Завершённые»."""
     out = {tab: 0 for tab in TABS}
-    for status, n in conn.execute("SELECT status, COUNT(*) FROM applications GROUP BY status"):
+    rows = conn.execute(
+        """SELECT a.status, COUNT(*) FROM applications a LEFT JOIN users u ON u.id = a.user_id
+           WHERE a.hidden_at IS NULL AND NOT (a.status = 'done' AND u.account_state = 'blocked')
+           GROUP BY a.status""")
+    for status, n in rows:
         for tab, statuses in TABS.items():
             if status in statuses:
                 out[tab] += n

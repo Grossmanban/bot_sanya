@@ -84,11 +84,13 @@
 ## Админ: онбординг и обучение
 
 `GET /api/admin/onboarding` (18.11: у тренеров в `trainers` — `role` для приоритета в списке; 19.11: в анкетах
-`priority` и `waiting {hours, text}` — «сколько ждёт» в «Ожидают рассмотрения») ·
+`priority` и `waiting {hours, text}` — «сколько ждёт» в «Ожидают рассмотрения»; в `done` заблокированные
+не показываются и не считаются, скрытые (`hidden` в анкете) — только в блоке «Скрытые» на клиенте) ·
 `GET /api/admin/onboarding/{app}/trainer-preview` ·
-`POST /api/admin/onboarding/{app}/trainer|trainer-message|timer-reset|priority|remind-referrer|training|reject|cancel-training|start-training|cancel-ack|return|contact|internship|stage|internship-units`
+`POST /api/admin/onboarding/{app}/trainer|trainer-message|timer-reset|priority|hide|remind-referrer|training|reject|cancel-training|start-training|cancel-ack|return|contact|internship|stage|internship-units`
 (`internship-units`, 18.11: `{units}` — правка зачёта стажировки владельцем; цель закрывает стажировку;
-`priority`, 19.11: `{on}` — приоритетное обучение на любой анкете) ·
+`priority`, 19.11: `{on}` — приоритетное обучение на любой анкете;
+`hide`, 19.11: `{on}` — «Скрыть»/«Вернуть» завершённой анкеты, только `done`, иначе 409 `bad_status`) ·
 `POST /api/admin/training-requests/{id}/decide` · тренер: `GET /api/training`, `POST /api/training/{app}/request|confirm|schedule|cancel|finish`.
 
 ## Админ: Алиса/Плюс, методички, рассылки, настройки
@@ -130,3 +132,6 @@
   в анкетах `priority` и `waiting`, `GET /api/me`: `application.priority`.
 - 2026-11-19 — `POST /api/admin/team/{uid}/rates`: `fines_exempt` («без штрафов», миграция 49); ответ несёт
   `cleared {violations, no_shows}`; в людях `GET /api/admin/team` и `public_user` — `fines_exempt`.
+- 2026-11-19 — `POST /api/admin/onboarding/{app}/hide` («Скрыть/Вернуть», миграция 50); в анкетах `hidden`;
+  в `GET /api/admin/onboarding` вкладка `done` без заблокированных, счётчики вкладок — без скрытых и
+  заблокированных; «Стажировки на проверку» (`GET /api/admin/pending`) не считает завершённые стажировки.
