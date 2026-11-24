@@ -1205,6 +1205,9 @@ export interface PayoutRow {
   total: number;
   carried_debt: number;
   has_deductions: boolean;
+  /** 24.11: the open deductions and fines (oldest first) — the wizard subtracts them from the typed
+   * amount live, before any «Пересчитать»; the same order the server settles on commit */
+  open_debts?: { id: number; type: "deduction" | "fine"; amount: number; pieces?: number | null; event_date: string }[];
   /** pieces × the person's rate of each day */
   pieces_pay: number;
   /** the trainer's ladder money for the network */

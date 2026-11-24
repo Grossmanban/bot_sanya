@@ -72,7 +72,9 @@
 `POST /api/admin/finances/pay-all` · `POST /api/admin/finances/pieces` (вычет в штуках; 18.11 — ставка сотрудника
 личная/общая базовая, части тренера и инструктора) ·
 выплаты `POST /api/admin/payouts/preview` (18.11: `manual: true` + `amounts` + `included` — ручные суммы; без них —
-легаси-авторасчёт), `POST /api/admin/payouts` (choices с `amount`), `GET /api/admin/payouts(/{id})` (в списке — флаг `ocr`),
+легаси-авторасчёт; 19.11: в ручном режиме `pieces_pay` = введённой сумме, `lazy_units` = 0 — копилка не режет сумму;
+24.11: каждая строка несёт `open_debts [{id, type, amount, pieces, event_date}]` — активные вычеты и штрафы человека
+старыми первыми, мастер вычитает их из вписанной суммы живьём), `POST /api/admin/payouts` (choices с `amount`), `GET /api/admin/payouts(/{id})` (в списке — флаг `ocr`),
 `POST /api/admin/payouts/{id}/edit|annul|excel` · `POST /api/admin/lazy-pool/reset` (18.11: обнулить копилки налога на лень) ·
 `POST /api/admin/payouts/parse-photo?network_id=` (18.11: raw-картинка ведомости → строки с сопоставлением; 409 `ocr_not_configured`) ·
 продуктовые выплаты `POST /api/admin/alice/payout/preview|commit`.
@@ -143,3 +145,8 @@
   `last_name + first_name + инициал` — у анкетных «Имя Отчество» лежит в `first_name`, у старых — отчество в
   `middle_name`); анкеты (`GET /api/admin/onboarding`, «Ожидает согласования») и «Мои рефералы» отдают
   «Фамилия Имя О.» из сырого текста анкеты; все списки на `svc.full_name` — тот же формат.
+- 2026-11-19 — `POST /api/admin/team/{uid}/hide` `{on}` (миграция 52): «Скрыть»/«Вернуть» заблокированного;
+  `GET /api/admin/users` скрытых не отдаёт. Хотфикс выплат: в ручном режиме `pieces_pay` = введённой сумме,
+  `lazy_units` = 0 — копилка налога на лень не режет ручную сумму и не списывается ею.
+- 2026-11-24 — хотфикс выплат: в строках `POST /api/admin/payouts/preview` — `open_debts` (активные вычеты и
+  штрафы, старыми первыми); мастер вычитает их из вписанной суммы живьём, без «Пересчитать».

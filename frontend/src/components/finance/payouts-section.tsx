@@ -184,15 +184,13 @@ function Wizard({ defaults, ocr, onClose }: { defaults: PayoutRates; ocr: boolea
     }
   }
 
-  // the server recalculates on commit; here the row is shown as amount + commission + bonuses − fines (19.11:
-  // the hand-entered amount stands in full — no fact-derived adjustments touch it)
-  const shown = (r: PayoutRow) => {
-    const amt = entered[r.user_id] ?? 0;
-    return Math.max(0, amt + r.commission + r.bonuses - r.fines - r.deductions);
-  };
+  // 24.11: the debts leave the typed amount at once — the row shows «к выплате» already without them,
+  // the same walk the server does on commit (deductions, then fines, oldest first; the payout never
+  // goes below zero, what doesn't fit stays the debt)
+  const shown = (r: PayoutRow) => settleDebts(r, entered[r.user_id] ?? 0).total;
   const picked = rows.filter((r) => include[r.user_id]);
   const total = picked.reduce((s, r) => s + shown(r), 0);
-  const needsDedProof = picked.some((r) => r.deductions > 0);
+  const needsDedProof = picked.some((r) => r.deductions > 0 || (r.open_debts ?? []).some((d) => d.type === "deduction"));
 
   async function commit() {
     try {
@@ -441,6 +439,31 @@ function PhotoDialog({ report, people, busy, onApply, onClose, onNewPhoto }: {
   );
 }
 
+/** 24.11: the live settling as the owner types — the same walk the server applies on commit: the entered
+ * amount + commission + bonuses, then deductions, then fines (oldest first); what doesn't fit stays the
+ * debt and the payout never goes below zero. A debt bigger than the sum pays out 0 and keeps the rest. */
+function settleDebts(row: PayoutRow, amount: number) {
+  let available = amount + (row.commission ?? 0) + (row.bonuses ?? 0);
+  let fines = 0, deductions = 0, carried = 0, fineUnits = 0;
+  for (const kind of ["deduction", "fine"] as const) {
+    for (const t of (row.open_debts ?? []).filter((d) => d.type === kind)) {
+      const amt = t.amount ?? 0;
+      if (available > 0) {
+        const take = Math.min(amt, available);
+        available -= take;
+        carried += amt - take;
+        if (kind === "fine") {
+          fines += take;
+          if (take === amt) fineUnits += t.pieces ?? 0;  // the units of a fully taken fine
+        } else deductions += take;
+      } else {
+        carried += amt;
+      }
+    }
+  }
+  return { total: Math.max(0, available), fines, deductions, carried, fineUnits };
+}
+
 function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: {  row: PayoutRow; on: boolean; total: number; amount: string; onToggle: () => void; onAmount: (v: string) => void;
   onMoney: () => void;
 }) {
@@ -449,6 +472,7 @@ function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: 
   const rate = row.rate_base ?? 0;
   const units = amount && rate > 0 ? Number((Number(amount) / rate).toFixed(2)) : 0;
   const pool = row.lazy_before ?? 0;
+  const live = settleDebts(row, Number(amount) || 0);
   const detail = row.commission_detail;
   return (
     <li className={cn("px-5 py-4 md:px-6", on ? "bg-primary/5" : "opacity-50")}>
@@ -489,8 +513,8 @@ function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: 
                  className="h-9 w-full rounded-lg border-0 bg-card px-2 text-sm font-semibold tabular outline-none focus:ring-2 focus:ring-ring/25" />
         </label>
         <Money label="Бонусы" value={row.bonuses} sign="+" tone="text-go" />
-        <Money label="Штрафы" value={row.fines} sign="−" tone="text-cancel" />
-        <Money label="Вычеты" value={row.deductions} sign="−" tone="text-final" />
+        <Money label="Штрафы" value={live.fines} sign="−" tone="text-cancel" />
+        <Money label="Вычеты" value={live.deductions} sign="−" tone="text-final" />
         {!!units && <p className="col-span-4 text-muted-foreground">≈ {units} шт. по {rate} ₽ — уйдёт в «команду» тренера.</p>}
       </div>
       {!!pool && (
@@ -507,11 +531,18 @@ function PayoutRowCard({ row, on, total, amount, onToggle, onAmount, onMoney }: 
             : " — зачёт по выплатам уже полный."}
         </p>
       )}
-      {!!row.fine_units && (
-        <p className="mt-1 pl-9 text-xs text-muted-foreground">Штрафы: {row.fine_units} ед. = {rub(row.fines)}</p>
+      {!!live.fineUnits && (
+        <p className="mt-1 pl-9 text-xs text-muted-foreground">Штрафы к списанию: {live.fineUnits} ед. = {rub(live.fines)}</p>
       )}
-      {row.carried_debt > 0 && (
-        <p className="mt-2 pl-9 text-xs text-wait">Не поместилось в выплату: {rub(row.carried_debt)} — останется долгом.</p>
+      {live.carried > 0 && (
+        <p className="mt-2 pl-9 text-xs text-wait">
+          Долг: {rub(live.carried)} — не поместилось в эту выплату, останется на следующую.
+        </p>
+      )}
+      {(row.open_debts ?? []).length > 0 && live.carried === 0 && amount !== "" && (
+        <p className="mt-2 pl-9 text-xs text-muted-foreground">
+          Долги ({(row.open_debts ?? []).length} шт.) списаны из суммы целиком — к выплате уже без них.
+        </p>
       )}
       <div className="mt-2 pl-9">
         <Button variant="ghost" size="sm" className="press h-8 rounded-lg px-2 text-muted-foreground" onClick={() => setAdding((v) => !v)}>

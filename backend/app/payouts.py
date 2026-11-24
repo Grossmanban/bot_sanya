@@ -352,6 +352,11 @@ def calculate(conn: sqlite3.Connection, date_from: date, date_to: date, rates: R
             "internship": internship,
             **lazy,
             "base_calc": base,
+            # 24.11: the open deductions and fines (oldest first) — the wizard subtracts them from the
+            # typed amount live, before any «Пересчитать»; the same list settle() walks on the server
+            "open_debts": [{"id": t["id"], "type": t["type"], "amount": t["amount"], "pieces": t["pieces"],
+                            "event_date": t["event_date"]}
+                           for t in money if t["type"] in ("deduction", "fine")],
             **settle(base, money),
         })
     return sorted(rows, key=lambda r: r["name"])

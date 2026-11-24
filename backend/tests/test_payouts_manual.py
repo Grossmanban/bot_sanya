@@ -165,6 +165,10 @@ def test_debts_settle_from_the_full_entered_amount(conn, make_user):
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1800}, {ivan["id"]})
     r = rows[ivan["id"]]
     assert (r["deductions"], r["fines"]) == (360, 1440) and r["carried_debt"] == 0 and r["total"] == 0
+    # 24.11: the row carries the open debts (oldest first) so the wizard subtracts them live, as typed
+    assert [t["id"] for t in r["open_debts"]] == [fine["id"], deduction["id"]]
+    assert {t["type"] for t in r["open_debts"]} == {"fine", "deduction"}
+    assert next(t for t in r["open_debts"] if t["type"] == "fine")["pieces"] == 12  # units of a fine come too
     # 1500: the deduction goes first, the fine takes the rest — 300 of it stays as the debt
     rows = rows_of(conn, WEEK[0], WEEK[-1], {ivan["id"]: 1500}, {ivan["id"]})
     r = rows[ivan["id"]]
