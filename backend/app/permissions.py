@@ -35,7 +35,7 @@ def is_staff(user: dict | None) -> bool:
         return False
     # a personal grant from «Команда» opens the panel too, even for a plain employee (18.11)
     return role_of(user) in (OWNER, ADMIN, TRAINER, INSTRUCTOR) or has_grant(user, "broadcast_all") \
-        or has_grant(user, "registrations")
+        or has_grant(user, "registrations") or has_grant(user, "assign_points")
 
 
 def sees_everyone(user: dict | None) -> bool:
@@ -84,6 +84,9 @@ CAN = {
     "remind_profiles": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # «📢 Напомнить о заполнении»: a trainer — their people
     "export": {OWNER, ADMIN, TRAINER, INSTRUCTOR},
     "raspred": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # the list for the work chat; a trainer gets their network's
+    "assign_points": {OWNER, ADMIN, TRAINER, INSTRUCTOR},  # 19.11: «Распределение по точкам»; a trainer — their
+    # network's employees, an instructor — their people (assign.may_assign checks the target); the personal
+    # grant of the same name lets any employee distribute anyone
     "all_people": {OWNER, ADMIN},   # works with the whole team, not one network (company-wide goals, events)
     "invites": {OWNER},             # ТЗ 27.10 §6, §8: owner invitations, «Обновить все ссылки»
     "access_log": {OWNER, ADMIN},   # ТЗ 27.10 §5: «Попытки доступа»
@@ -98,6 +101,7 @@ GRANTS = {
     "broadcast_all": "can_broadcast_all",     # may write to everyone; a trainer — outside their network too
     "broadcast_network": "can_broadcast_all",  # the grant also opens the «Рассылка» section itself
     "registrations": "can_onboard",            # onboarding: questionnaires, training, hiring — without an admin
+    "assign_points": "can_assign_points",      # 19.11: may put ANY employee on any point, outside their network
 }
 
 

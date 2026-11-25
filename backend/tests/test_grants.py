@@ -1,4 +1,5 @@
-"""18.11: личные разрешения из «Команды» — рассылка всем (тренеру — вне своей сети) и онбординг без админа."""
+"""18.11: личные разрешения из «Команды» — рассылка всем (тренеру — вне своей сети) и онбординг без админа;
+19.11: третье — «Распределение по всем точкам» (подтверждается тестами test_points_assign.py)."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,7 +32,11 @@ def client_of(conn):
 
 
 def grant(conn, owner, user_id, **flags):
-    svc.set_grants(conn, owner, user_id, flags.get("broadcast_all"), flags.get("onboarding"), svc.new_key())
+    svc.set_grants(conn, owner, user_id, flags.get("broadcast_all"), flags.get("onboarding"), svc.new_key(),
+                   flags.get("assign_points"))
+
+
+NONE = {"broadcast_all": False, "onboarding": False, "assign_points": False}  # 19.11: the third toggle exists too
 
 
 # ---------------------------------------------------------------- the toggles themselves
@@ -40,14 +45,17 @@ def grant(conn, owner, user_id, **flags):
 def test_grants_change_only_what_is_sent(conn, make_user):
     owner, trainer, mine, theirs, plain, north, south = setup_world(conn, make_user)
     user, flags, changed = svc.set_grants(conn, owner, plain["id"], True, None, key())
-    assert changed and flags == {"broadcast_all": True, "onboarding": False}
+    assert changed and flags == {**NONE, "broadcast_all": True}
     assert svc.grants_of(svc.get_user(conn, plain["id"])) == flags
     # the same key again — idempotent
     _, flags2, changed2 = svc.set_grants(conn, owner, plain["id"], None, True, key())
-    assert changed2 and flags2 == {"broadcast_all": True, "onboarding": True}  # broadcast_all untouched
+    assert changed2 and flags2 == {**NONE, "broadcast_all": True, "onboarding": True}  # broadcast_all untouched
     with pytest.raises(svc.ServiceError) as e:
         svc.set_grants(conn, owner, plain["id"], None, None, svc.new_key())
     assert e.value.code == "empty"
+    # 19.11: the third toggle goes the same way — on a plain employee, any role
+    _, flags3, changed3 = svc.set_grants(conn, owner, plain["id"], None, None, svc.new_key(), True)
+    assert changed3 and flags3 == {**flags2, "assign_points": True}
 
 
 def test_only_owners_and_admins_flip_the_toggles(conn, make_user):
@@ -61,11 +69,12 @@ def test_only_owners_and_admins_flip_the_toggles(conn, make_user):
     r = client.post(f"/api/admin/team/{mine['id']}/grants",
                     json={"broadcast_all": True, "onboarding": True, "idempotency_key": key()}, headers=headers(999))
     assert r.status_code == 200, r.text
-    assert r.json()["grants"] == {"broadcast_all": True, "onboarding": True}
-    assert r.json()["user"]["grants"] == {"broadcast_all": True, "onboarding": True}
+    both = {**NONE, "broadcast_all": True, "onboarding": True}
+    assert r.json()["grants"] == both
+    assert r.json()["user"]["grants"] == both
     # the team list carries the flags for the switches
     item = next(u for u in client.get("/api/admin/team", headers=headers(999)).json()["items"] if u["id"] == mine["id"])
-    assert item["grants"] == {"broadcast_all": True, "onboarding": True}
+    assert item["grants"] == both
     # an owner needs no grant; a pending person can't get one
     with pytest.raises(svc.ServiceError) as e:
         svc.set_grants(conn, owner, owner["id"], True, None, svc.new_key())
@@ -88,7 +97,7 @@ def test_employee_broadcasts_to_everyone_with_the_grant(conn, make_user):
     ph = headers(plain["telegram_id"], "Иван", "Петров", "ivan")
     # before: no admin panel, no capabilities
     me = client.get("/api/me", headers=ph).json()
-    assert me["capabilities"] == [] and me["user"]["grants"] == {"broadcast_all": False, "onboarding": False}
+    assert me["capabilities"] == [] and me["user"]["grants"] == NONE
     assert client.get("/api/admin/broadcasts", headers=ph).status_code == 403
 
     grant(conn, owner, plain["id"], broadcast_all=True)

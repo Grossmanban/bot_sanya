@@ -26,11 +26,13 @@ MAX_REPLY_MEDIA = 10
 # ---------------------------------------------------------------- templates
 
 
-def templates(conn: sqlite3.Connection) -> list[dict]:
+def templates(conn: sqlite3.Connection, kind: str = "broadcast") -> list[dict]:
+    """kind (19.11): «broadcast» — the saved messages; «assign» — the schedule templates («Распределение»).
+    Each screen sees only its own kind."""
     return [dict(r) for r in conn.execute(
         """SELECT t.id, t.title, t.html, t.created_by, t.created_at, t.updated_at, u.first_name, u.last_name
            FROM broadcast_templates t LEFT JOIN users u ON u.telegram_id = t.created_by
-           WHERE t.deleted_at IS NULL ORDER BY t.title COLLATE NOCASE""")]
+           WHERE t.deleted_at IS NULL AND t.kind = ? ORDER BY t.title COLLATE NOCASE""", (kind,))]
 
 
 def _template(conn: sqlite3.Connection, template_id: int) -> dict:
@@ -40,21 +42,29 @@ def _template(conn: sqlite3.Connection, template_id: int) -> dict:
     return dict(row)
 
 
+def kind_of(conn: sqlite3.Connection, template_id: int) -> str:
+    """19.11: «broadcast» or «assign» — what the template is for (the route checks the matching right)."""
+    return _template(conn, template_id)["kind"]
+
+
 def _may_change(actor: dict, template: dict) -> None:
     if not (perms.sees_everyone(actor) or template["created_by"] == actor["telegram_id"]):
         raise ServiceError("Менять шаблон может его автор или администратор", 403, "forbidden")
 
 
-def save_template(conn: sqlite3.Connection, actor: dict, title: str, html: str, template_id: int | None = None) -> dict:
-    """New (template_id None) or an edit of an existing one."""
+def save_template(conn: sqlite3.Connection, actor: dict, title: str, html: str, template_id: int | None = None,
+                  kind: str = "broadcast") -> dict:
+    """New (template_id None) or an edit of an existing one. kind (19.11): «broadcast» or «assign» —
+    the edit keeps the kind the template already has."""
     title = " ".join((title or "").split())[:MAX_TITLE]
     if not title:
         raise ServiceError("Назовите шаблон", 422, "title_required")
     clean, _ = svc.prepare_message(html)
     with transaction(conn):
         if template_id is None:
-            cur = conn.execute("INSERT INTO broadcast_templates (title, html, created_by, created_at) VALUES (?, ?, ?, ?)",
-                               (title, clean, actor["telegram_id"], now_iso()))
+            cur = conn.execute(
+                "INSERT INTO broadcast_templates (title, html, created_by, created_at, kind) VALUES (?, ?, ?, ?, ?)",
+                (title, clean, actor["telegram_id"], now_iso(), kind))
             template_id = cur.lastrowid
         else:
             _may_change(actor, _template(conn, template_id))

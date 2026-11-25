@@ -75,6 +75,9 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "show_colleague_names": ("1", "bool"),
     # ТЗ №22: finished goals and events leave the feed for «Архив» after this many days (0 — at once)
     "feed_hide_after_days": ("7", "count"),
+    # 19.11: «Запретить самостоятельно выбирать точку» — plain employees book the day without a point;
+    # the manager puts them on a point in «Распределение». Managers and the admin screens are not bound
+    "shift_point_locked": ("0", "bool"),
     # 19.11: service notices to managers («встал в график», «взял выходной»…) may be grouped into one digest
     # per chat instead of pinging every time; «без звука» sends them silently; «тихие часы» hold the digest
     # overnight and it comes when they end

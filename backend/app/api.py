@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from . import app_settings, export, media, pricing
 from . import permissions as perms
 from . import broadcasts, day_actual, events, finance, goals, groups, invites, lifecycle, networks, payouts, rates
-from . import recruiting
+from . import assign, recruiting
 from . import alice, manuals, notify, ocr, pending, products, profiles, reports, templates, training, violations
 from . import services as svc
 from .auth import InitDataError, validate_init_data
@@ -34,7 +34,9 @@ class ShiftPayload(BaseModel):
     start_time: str
     end_time: str
     volume: int
-    location: str
+    # 19.11: None/"" — a shift without a point (the setting «Запретить самостоятельно выбирать точку»;
+    # the manager assigns it in «Распределение по точкам»)
+    location: str | None = None
     idempotency_key: str
 
 
@@ -163,6 +165,8 @@ class GrantsBody(BaseModel):
     """18.11: the personal toggles from «Команда»; only what is sent changes."""
     broadcast_all: bool | None = None
     onboarding: bool | None = None
+    # 19.11: «Распределение по всем точкам» — any role, even a plain employee
+    assign_points: bool | None = None
     idempotency_key: str
 
 
@@ -554,9 +558,39 @@ class NotifyBody(BaseModel):
     enabled: bool
 
 
+class BonusTier(BaseModel):
+    """19.11: a step of the point's allowance — «от N оплаченных штук → R ₽ за день»."""
+    from_: int = Field(alias="from")
+    amount: int
+
+
+class PointBonus(BaseModel):
+    """19.11: the point's allowance — steps (up to 5) and the weekdays (0 = Monday) it acts on."""
+    tiers: list[BonusTier]
+    days: list[int]
+
+
 class PointBody(BaseModel):
     name: str
     capacity: int | None = None
+    bonus: PointBonus | None = None
+
+
+class AssignBody(BaseModel):
+    """19.11: «Назначить» — a person on a point for a day."""
+    user_id: int
+    date: str
+    location: str | None = None
+    idempotency_key: str
+
+
+class AssignNoticeBody(BaseModel):
+    """19.11: «Отправить график» за дату — the template text, the mode and the signature."""
+    date: str
+    html: str
+    mode: str = "all"
+    signed: bool = True
+    idempotency_key: str
 
 
 class PointPatch(BaseModel):
@@ -564,6 +598,8 @@ class PointPatch(BaseModel):
     capacity: int | None = None
     clear_capacity: bool = False
     active: bool | None = None
+    # 19.11: the allowance; an empty step list clears it
+    bonus: PointBonus | None = None
 
 
 class BroadcastBody(BaseModel):
@@ -706,6 +742,8 @@ class InternshipUnits(BaseModel):
 class TemplateBody(BaseModel):
     title: str
     html: str
+    # 19.11: «assign» — the texts of «Отправить график»; they live in the same table, apart from the broadcast ones
+    kind: str = "broadcast"
 
 
 class RemindBody(BaseModel):
@@ -724,7 +762,8 @@ class AdminDelete(BaseModel):
 
 
 def _payload(body: ShiftPayload) -> dict:
-    return {"start_time": body.start_time, "end_time": body.end_time, "volume": body.volume, "location": body.location}
+    return {"start_time": body.start_time, "end_time": body.end_time, "volume": body.volume,
+            "location": body.location or ""}
 
 
 def public_user(user: dict) -> dict:
@@ -909,7 +948,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             "global_link": (lambda g: {"title": g["title"], "url": g["url"]} if g and g.get("active") else None)(
                 app_settings.global_link(conn)),
             # a trainee's shifts are training ones and not paid
-            "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user)},
+            # a trainee's shifts are training ones and not paid; 19.11: «Запретить самостоятельно выбирать точку» —
+            # plain employees book the day without a point (the shift form has no picker then)
+            "pricing": {**pricing.pricing_info(rates.for_user(conn, user["id"])), "training": recruiting.is_trainee(user),
+                        "point_locked": svc.point_locked_for(conn, user)},
             "bot_username": app.state.bot_username,
             # ТЗ 29.10 §7: the label above the role (null — hidden)
             "header": header(),
@@ -1334,7 +1376,8 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/points")
     async def points(_: dict = Depends(current_user)):
-        return {"items": svc.list_points(conn)}
+        # 19.11: every point carries its allowance (steps + weekdays) for the badges in the shift form
+        return {"items": [svc.public_point(p) for p in svc.list_points(conn)]}
 
     @api.get("/me/penalties")
     async def my_penalties(user: dict = Depends(current_user)):
@@ -1570,18 +1613,21 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.get("/admin/points")
     async def admin_points(_: dict = Depends(admin_user)):
-        return {"items": svc.list_points(conn, include_inactive=True)}
+        return {"items": [svc.public_point(p) for p in svc.list_points(conn, include_inactive=True)]}
 
     @api.post("/admin/points")
     async def admin_point_create(body: PointBody, admin: dict = Depends(staff("points"))):
-        return {"point": svc.create_point(conn, admin, body.name, body.capacity)}
+        bonus = body.bonus.model_dump(by_alias=True) if body.bonus else None
+        return {"point": svc.public_point(svc.create_point(conn, admin, body.name, body.capacity, bonus))}
 
     @api.patch("/admin/points/{point_id}")
     async def admin_point_update(point_id: int, body: PointPatch, admin: dict = Depends(staff("points"))):
         changes = body.model_dump(exclude_unset=True, exclude={"clear_capacity"})
         if body.clear_capacity:
             changes["capacity"] = None
-        return {"point": svc.update_point(conn, admin, point_id, changes)}
+        if body.bonus is not None:  # 19.11: the allowance — tiers keep their «from» key; null clears it
+            changes["bonus"] = body.bonus.model_dump(by_alias=True)
+        return {"point": svc.public_point(svc.update_point(conn, admin, point_id, changes))}
 
     # money settings: only owners see and change them (customer round B)
     OWNER_SETTINGS = set(pricing.DEFAULTS) | {"revenue_per_piece", "alice_rate", "plus_rate"}
@@ -2601,9 +2647,10 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
 
     @api.post("/admin/team/{user_id}/grants")
     async def admin_set_grants(user_id: int, body: GrantsBody, admin: dict = Depends(staff("grants"))):
-        """18.11: personal permissions — broadcasts to everyone and onboarding without an admin."""
+        """18.11: personal permissions — broadcasts to everyone and onboarding without an admin;
+        19.11: + «Распределение по всем точкам» (any role)."""
         user, grants, changed = svc.set_grants(conn, admin, user_id, body.broadcast_all, body.onboarding,
-                                               body.idempotency_key)
+                                               body.idempotency_key, body.assign_points)
         return {"user": public_user(user), "grants": grants, "changed": changed}
 
     # ------------------------------------------------------------ «Обучение» for the candidate's trainer (§3–§4)
@@ -2792,23 +2839,65 @@ def create_app(conn: sqlite3.Connection, notifier: Notifier, bot_username: str |
             raise svc.ServiceError("Фото нет", 404, "not_found")
         return Response(found[0], media_type=found[1], headers={"Cache-Control": "private, max-age=3600"})
 
+    def template_access(admin: dict, kind: str) -> None:
+        """19.11: the broadcast templates — for whoever writes broadcasts; the schedule ones («assign») — for
+        whoever distributes points (a grant holder without the broadcast grant sees only those)."""
+        if kind not in ("broadcast", "assign"):
+            raise svc.ServiceError("Неизвестный вид шаблона", 422, "bad_kind")
+        if not perms.can(admin, "broadcast_network" if kind == "broadcast" else "assign_points"):
+            raise svc.ServiceError("Недостаточно прав", 403, "forbidden")
+
     @api.get("/admin/broadcast-templates")
-    async def admin_templates(admin: dict = Depends(staff("broadcast_network"))):
+    async def admin_templates(kind: str = "broadcast", admin: dict = Depends(admin_user)):
+        template_access(admin, kind)
         return {"items": [{**t, "can_edit": perms.sees_everyone(admin) or t["created_by"] == admin["telegram_id"],
-                           "author": svc.full_name(t) if t["first_name"] else None} for t in broadcasts.templates(conn)]}
+                           "author": svc.full_name(t) if t["first_name"] else None}
+                          for t in broadcasts.templates(conn, kind)]}
 
     @api.post("/admin/broadcast-templates")
-    async def admin_template_create(body: TemplateBody, admin: dict = Depends(staff("broadcast_network"))):
-        return {"template": broadcasts.save_template(conn, admin, body.title, body.html)}
+    async def admin_template_create(body: TemplateBody, admin: dict = Depends(admin_user)):
+        template_access(admin, body.kind)
+        return {"template": broadcasts.save_template(conn, admin, body.title, body.html, kind=body.kind)}
 
     @api.patch("/admin/broadcast-templates/{template_id}")
-    async def admin_template_update(template_id: int, body: TemplateBody, admin: dict = Depends(staff("broadcast_network"))):
+    async def admin_template_update(template_id: int, body: TemplateBody, admin: dict = Depends(admin_user)):
+        template_access(admin, broadcasts.kind_of(conn, template_id))  # the kind stays as it was
         return {"template": broadcasts.save_template(conn, admin, body.title, body.html, template_id)}
 
     @api.post("/admin/broadcast-templates/{template_id}/delete")
-    async def admin_template_delete(template_id: int, admin: dict = Depends(staff("broadcast_network"))):
+    async def admin_template_delete(template_id: int, admin: dict = Depends(admin_user)):
+        template_access(admin, broadcasts.kind_of(conn, template_id))
         broadcasts.delete_template(conn, admin, template_id)
         return {"deleted": True}
+
+    # ------------------------------------------------------------ «Распределение по точкам» (19.11)
+
+    @api.get("/admin/assign")
+    async def admin_assign_day(day: str, admin: dict = Depends(staff("assign_points"))):
+        """Дата → люди, которых этот руководитель вправе распределить, с их сменами на дату, и точки с надбавками."""
+        return assign.day(conn, admin, svc.parse_date(day))
+
+    @api.post("/admin/assign")
+    async def admin_assign(body: AssignBody, admin: dict = Depends(staff("assign_points"))):
+        """«Назначить»: no shift — one is created with this point («время уточняется»); without a point — the
+        point is set; another point — replaced (the client asks first). Nothing is sent to the person here —
+        the schedule notice goes only by «Отправить график»."""
+        result = assign.assign(conn, admin, body.user_id, svc.parse_date(body.date), body.location,
+                               body.idempotency_key)
+        return {"shift_id": result["shift_id"], "location": result["location"], "changed": result["changed"]}
+
+    @api.post("/admin/assign/notice")
+    async def admin_assign_notice(body: AssignNoticeBody, admin: dict = Depends(staff("assign_points"))):
+        """«Отправить график» за дату: one registry row, a personal rendering per person (their point, their
+        colleagues, the point's allowance of that weekday) — through the bot, by the button only."""
+        if notifier.bot is None:
+            raise svc.ServiceError("Бот не запущен: отправка недоступна", 503, "no_bot")
+        row, recipients, bodies, repeated = assign.send(conn, admin, svc.parse_date(body.date), body.html, body.mode,
+                                                         notify.broadcast_signature(admin, body.signed),
+                                                         body.idempotency_key)
+        if not repeated:
+            notifier.spawn(notifier.assign_broadcast(row["id"], recipients, bodies, row["signature"]))
+        return {"broadcast": row, "repeated": repeated}
 
     @api.post("/admin/media")
     async def admin_upload_media(request: Request, admin: dict = Depends(admin_user)):

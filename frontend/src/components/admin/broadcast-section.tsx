@@ -355,13 +355,23 @@ function Recipients({ people, networks, trainerNetwork, value, onChange, unmarke
   );
 }
 
+/** «assign:<date>:<all|point>» in broadcasts.audience — the schedule notice sent from «Распределение по точкам» */
+const ASSIGN_AUDIENCE = "assign:";
+const isAssignAudience = (a: string) => a.startsWith(ASSIGN_AUDIENCE);
+
 function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Record<string, string>; networks: { id: number; name: string }[] }) {
   // html is sanitized by the server to Telegram's tag whitelist; spoilers become spans for display
   const html = b.html?.replace(/<tg-spoiler>/g, '<span class="tg-spoiler">').replace(/<\/tg-spoiler>/g, "</span>");
   const [open, setOpen] = useState(false);
   const [full, setFull] = useState(false);
   const who = [
-    ...b.audience.split(",").filter(Boolean).map((a) => (a === "all" ? "все сотрудники" : (audiences[a] ?? a).toLowerCase())),
+    ...b.audience.split(",").filter(Boolean).map((a) => {
+      if (isAssignAudience(a)) {  // 19.11: «график на 25.11 · только своя точка»
+        const [, day, mode] = a.slice(ASSIGN_AUDIENCE.length).split(":");
+        return `график на ${ddmm(day)}${mode === "point" ? " · только своя точка" : " · весь список"}`;
+      }
+      return a === "all" ? "все сотрудники" : (audiences[a] ?? a).toLowerCase();
+    }),
     ...(b.network_id ? [`сеть «${networks.find((n) => n.id === b.network_id)?.name ?? b.network_id}»`] : []),
   ].join(", ") || "выбранные люди";
   return (
@@ -390,6 +400,10 @@ function HistoryItem({ b, audiences, networks }: { b: Broadcast; audiences: Reco
       <p className="mt-1.5 text-xs text-muted-foreground">
         {b.media_file_id ? (b.media_kind === "video" ? "🎬 " : "📷 ") : ""}{who}, доставлено {b.delivered} из {b.recipients}
         {[b.last_name, b.first_name].filter(Boolean).length ? `, ${[b.last_name, b.first_name].filter(Boolean).join(" ")}` : ""}, {ddmm(b.created_at.slice(0, 10))} в {b.created_at.slice(11, 16)}
+        {b.audience.split(",").some(isAssignAudience) && (
+          // 19.11: the registry keeps the common text; every person got their own point, colleagues and allowance
+          <span className="block">Каждому пришло своё сообщение — с его точкой, коллегами и надбавкой; здесь общий текст.</span>
+        )}
       </p>
       <SentMessage b={b} html={html} meta={`${who}, ${ddmm(b.created_at.slice(0, 10))} в ${b.created_at.slice(11, 16)}`}
                    open={full} onOpenChange={setFull} />
@@ -543,15 +557,32 @@ function Receipts({ id, ack, replies }: { id: number; ack: boolean; replies: boo
   );
 }
 
-/** Saved texts: pick one to fill the editor; save the current text as a new one or over the picked one. */
-function Templates({ editor }: { editor: React.RefObject<RichEditorHandle | null> }) {
-  const { data, reload } = useLoad(() => api.admin.templates(), []);
+/** Saved texts: pick one to fill the editor; save the current text as a new one or over the picked one.
+ *  19.11: kind «assign» — the texts of «Отправить график» (the same table, shown apart from the broadcast ones). */
+export function Templates({ editor, kind = "broadcast", variables, autoPick }: {
+  editor: React.RefObject<RichEditorHandle | null>; kind?: "broadcast" | "assign";
+  /** 19.11: the template variables of the kind, as buttons that put them where the caret is */
+  variables?: { name: string; hint: string }[];
+  /** 19.11: fill the empty editor with the first template as soon as they are loaded */
+  autoPick?: boolean;
+}) {
+  const { data, reload } = useLoad(() => api.admin.templates(kind), [kind]);
   const [current, setCurrent] = useState<BroadcastTemplate | null>(null);
   const [naming, setNaming] = useState(false);
   const [title, setTitle] = useState("");
   const [manage, setManage] = useState(false);
   const { busy, run } = useAction();
   const items = data?.items ?? [];
+  const firstId = items[0]?.id;
+
+  useEffect(() => {
+    if (!autoPick || !firstId || editor.current?.getHtml().html) return;
+    const first = items[0];
+    editor.current?.setHtml(first.html);
+    setCurrent(first);
+    // only when the list has arrived: the editor ref is stable, the template is taken by its id
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPick, firstId]);
 
   const save = async (over: BroadcastTemplate | null) => {
     const html = editor.current?.getHtml().html ?? "";
@@ -560,7 +591,7 @@ function Templates({ editor }: { editor: React.RefObject<RichEditorHandle | null
       return;
     }
     try {
-      const res = await run("save", () => api.admin.saveTemplate(over ? over.title : title.trim(), html, over?.id),
+      const res = await run("save", () => api.admin.saveTemplate(over ? over.title : title.trim(), html, over?.id, kind),
         over ? "Шаблон обновлён" : "Шаблон сохранён");
       if (res) {
         setCurrent(res.template.id ? { ...res.template, author: null, can_edit: true } : null);
@@ -575,6 +606,19 @@ function Templates({ editor }: { editor: React.RefObject<RichEditorHandle | null
 
   return (
     <div className="space-y-2">
+      {variables && variables.length > 0 && (
+        // 19.11: what each person gets in their own message — a tap puts the variable where the caret is
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-xs text-muted-foreground">Подстановки:</span>
+          {variables.map((v) => (
+            <button key={v.name} type="button" title={v.hint} aria-label={`Вставить {${v.name}}: ${v.hint}`}
+                    className="press inline-flex h-7 items-center rounded-full bg-go-soft px-2.5 text-xs font-semibold text-go"
+                    onClick={() => editor.current?.insert(`{${v.name}}`)}>
+              {`{${v.name}}`}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-sm text-muted-foreground">Шаблоны:</span>
         {items.length === 0 && <span className="text-sm text-muted-foreground">пока нет</span>}

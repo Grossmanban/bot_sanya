@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Clock3, LoaderCircle, MapPin } from "lucide-react";
+import { Clock3, Coins, LoaderCircle, MapPin } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Drawer, DrawerContent, DrawerDescription, DrawerTitle } from "@/components/ui/drawer";
 import { api, type Day, type Point, type Pricing, type Shift, type User } from "@/lib/api";
-import { STATUS_META, WEEKDAYS, dayMonth, dayState, parseDay, rub, timeRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS, bonusText, dayMonth, dayState, parseDay, rub, timeRange, weekdaysText } from "@/lib/format";
 import { readLocal, useAction, writeLocal } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { DayLanes, type Lane } from "../day-line";
@@ -133,13 +133,16 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
 
   const { weekday } = parseDay(day.date);
 
+  // 19.11: «Запретить самостоятельно выбирать точку» — the form has no picker and books the day without a point
+  const pointLocked = !!pricing.point_locked;
+
   async function submit() {
-    const payload = validateForm(form);
+    const payload = validateForm(form, pointLocked);
     if (typeof payload === "string") {
       toast.error(payload);
       return;
     }
-    writeLocal("last-location", payload.location);
+    writeLocal("last-location", payload.location ?? "");
     try {
       if (mode === "create") {
         const res = await run("create", (k) => api.create(day.date, payload, k));
@@ -235,6 +238,8 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
             ownLocation={mode === "edit" ? shift?.location : null}
             disabled={blocked}
             volumeLocked={volumeLocked}
+            pointLocked={pointLocked}
+            date={day.date}
           />
         </div>
       ) : (
@@ -340,7 +345,7 @@ export function DayDetail({ day, user, pricing, locations, points, onChanged, on
                   setMode("edit");
                 }}
               >
-                {shift.volume_open ? "Изменить время, точку или объём" : "Изменить время или точку"}
+                {shift.volume_open ? (pointLocked ? "Изменить время или объём" : "Изменить время, точку или объём") : "Изменить время или точку"}
               </Button>
             )}
             {shift.can_cancel && (
@@ -401,6 +406,9 @@ function ShiftView({ shift }: { shift: Shift }) {
     return <Notice tone="muted">Ты отметил этот день как выходной. Коллеги это видят.</Notice>;
   }
   const struck = status === "cancelled" || status === "finally_cancelled" || status === "rejected_by_admin";
+  const bonus = shift.location_bonus;
+  // «сейчас у тебя X»: the paid pieces — the approved fact (a report still waiting isn't paid yet)
+  const paid = shift.report_state === "approved" ? shift.fact_volume ?? 0 : 0;
   return (
     <div className="space-y-4">
       <div className={cn(struck && "opacity-55")}>
@@ -411,23 +419,52 @@ function ShiftView({ shift }: { shift: Shift }) {
           <Fact label="Точка">
             <span className="inline-flex items-center gap-1.5">
               <MapPin className="size-4 text-muted-foreground" />
-              {shift.location}
+              {shift.location ?? "ещё не назначена"}
             </span>
           </Fact>
-          <Fact label="Объём">{shift.volume} шт.</Fact>
+          <Fact label="Объём">{shift.volume != null ? `${shift.volume} шт.` : "уточняется"}</Fact>
           {shift.training ? (
             <Fact label="Оплата">Учебная смена — не оплачивается</Fact>
           ) : (
             <>
-              <Fact label="Ставка">
-                {shift.rate} ₽ за шт.
-                {shift.lazy && <span className="block text-xs text-wait">налог на лень</span>}
-              </Fact>
+              {shift.rate != null && (
+                <Fact label="Ставка">
+                  {shift.rate} ₽ за шт.
+                  {shift.lazy && <span className="block text-xs text-wait">налог на лень</span>}
+                </Fact>
+              )}
               {!struck && shift.expected_pay != null && <Fact label="План заработка">{rub(shift.expected_pay)}</Fact>}
+              {/* 19.11: the point's allowance in the earnings plan — the next step to reach */}
+              {!struck && bonus?.weekday_ok && bonus.next && (
+                <Fact label="Надбавка">
+                  <span className="text-go">+ {rub(bonus.next.amount)}</span>
+                  <span className="block text-xs font-normal text-muted-foreground">при {bonus.next.from}+ шт. оплач.</span>
+                </Fact>
+              )}
             </>
           )}
         </dl>
       </div>
+      {!struck && !shift.training && bonus && (
+        // 19.11: the allowance plate as of this day — honest when the weekday isn't one of its own
+        <Notice tone={bonus.weekday_ok ? "go" : "muted"}>
+          <span className="flex items-start gap-1.5 font-medium">
+            <Coins className="mt-0.5 size-4 shrink-0" />
+            <span>{bonusText({ tiers: bonus.tiers, days: bonus.days })}</span>
+          </span>
+          {!bonus.weekday_ok ? (
+            <span className="block">В этот день надбавка не действует — действует только: {weekdaysText(bonus.days)}.</span>
+          ) : bonus.next ? (
+            <span className="block">
+              до бонуса {rub(bonus.next.amount)}: {bonus.next.from} оплаченных, сейчас у тебя {paid}
+              {shift.report_state === "approved" ? "" : " — отчёт ещё не принят"}
+              {bonus.reached ? `; ступень «от ${bonus.reached.from}» уже взята` : ""}.
+            </span>
+          ) : (
+            <span className="block">Все ступени достигнуты — надбавка {rub(bonus.reached?.amount ?? 0)}.</span>
+          )}
+        </Notice>
+      )}
       {status === "awaiting_approval" && (
         <Notice tone="wait">Администратор ещё не ответил на срочную заявку. Статус обновится сам.</Notice>
       )}
@@ -461,6 +498,7 @@ const TONES = {
   wait: "bg-wait-soft",
   cancel: "bg-cancel-soft",
   muted: "bg-muted",
+  go: "bg-go-soft",  // 19.11: the point's allowance plate
 };
 
 export function Notice({ tone, children }: { tone: keyof typeof TONES; children: React.ReactNode }) {

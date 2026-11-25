@@ -1,4 +1,4 @@
-import type { Shift, ShiftStatus } from "./api";
+import type { PointBonus, Shift, ShiftStatus } from "./api";
 
 export const WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"];
 export const WEEKDAYS_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
@@ -99,8 +99,46 @@ export const STATUS_META: Record<DayState, StatusMeta> = {
 
 export const dayState = (shift: Shift | null): DayState => shift?.status ?? "none";
 
+/** 19.11: a shift assigned by its point alone has no time yet — said so instead of a dash */
 export const timeRange = (s: { start_time: string | null; end_time: string | null }) =>
-  s.start_time && s.end_time ? `${s.start_time}–${s.end_time}` : "—";
+  s.start_time && s.end_time ? `${s.start_time}–${s.end_time}` : "время уточняется";
+
+/* 19.11: «Надбавка за точку» — the texts of the steps and their weekdays (shared by the points editor,
+   the shift form, the day sheet and «Распределение по точкам») */
+
+/** The allowance's days as a text: «пн–ср» when they run in a row, «пн, ср, пт» otherwise, «ежедневно» for all seven. */
+export function weekdaysText(days: number[]): string {
+  const sorted = [...days].sort((a, b) => a - b);
+  if (sorted.length === 7) return "ежедневно";
+  if (!sorted.length) return "дни не выбраны";
+  const last = sorted[sorted.length - 1];
+  if (sorted.length === last - sorted[0] + 1) return sorted.length === 1 ? WEEKDAYS_SHORT[sorted[0]] : `${WEEKDAYS_SHORT[sorted[0]]}–${WEEKDAYS_SHORT[last]}`;
+  return sorted.map((d) => WEEKDAYS_SHORT[d]).join(", ");
+}
+
+/** The steps as a text. Full: «от 21 оплач. → 500 ₽, от 28 оплач. → 1 000 ₽»; short (the badges): the later steps
+ * keep «от» and drop «оплач.» — «от 21 оплач. → 500 ₽, от 28 → 1 000 ₽». */
+export function tiersText(tiers: { from: number; amount: number }[], short = false): string {
+  return tiers.map((t, i) => `от ${t.from}${!short || i === 0 ? " оплач." : ""} → ${rub(t.amount)}`).join(", ");
+}
+
+/** With 30% of the done pieces rejected, a threshold in PAID pieces takes this many done ones: 21 paid ≈ 30 done. */
+export const donePieces = (paid: number) => (paid > 0 ? Math.ceil(Math.round((paid / 0.7) * 100) / 100) : 0);
+
+/** The badge of a point with an allowance — «Надбавка: от 21 оплач. → 500 ₽, от 28 → 1 000 ₽ (пн–ср)»; null — none. */
+export function bonusText(bonus?: PointBonus | null): string | null {
+  if (!bonus?.tiers.length) return null;
+  return `Надбавка: ${tiersText(bonus.tiers, true)}${bonus.days.length ? ` (${weekdaysText(bonus.days)})` : ""}`;
+}
+
+/** 19.11: a shift's point and volume for one-line captions — honest when the point isn't assigned yet (the
+ * setting «Запретить самостоятельно выбирать точку») or the shift was made by its point alone (no volume yet). */
+export function planText(s: { location: string | null; volume: number | null }, fact?: number | null): string {
+  const parts = [s.location || "точка не назначена"];
+  if (s.volume != null) parts.push(fact != null ? `план ${s.volume}, факт ${fact} шт.` : `${s.volume} шт.`);
+  else parts.push(fact != null ? `факт ${fact} шт.` : "объём уточняется");
+  return parts.join(", ");
+}
 
 export const isGoing = (s: Shift | null) => !!s && (s.status === "active" || s.status === "restored");
 

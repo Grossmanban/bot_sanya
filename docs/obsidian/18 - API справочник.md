@@ -1,6 +1,6 @@
 # Справочник REST API
 
-**Обновлено:** 2026-11-19 · **Исходники:** `backend/app/api.py` (все маршруты), фронтенд-клиент `frontend/src/lib/api.ts`
+**Обновлено:** 2026-11-24 · **Исходники:** `backend/app/api.py` (все маршруты), фронтенд-клиент `frontend/src/lib/api.ts`
 
 ## Общие правила
 
@@ -15,14 +15,14 @@
 
 | Метод и путь | Что |
 |---|---|
-| `GET /api/me` | всё о текущем: user, role_title, capabilities, products, manageable_products, training, manuals, internship, pricing, global_link, header, events |
+| `GET /api/me` | всё о текущем: user, role_title, capabilities, products, manageable_products, training, manuals, internship, pricing, global_link, header, events; 24.11: `pricing.point_locked` — настройка «Запретить самостоятельно выбирать точку» действует на этого человека |
 | `POST /api/register` | анкета кандидата |
 | `GET /api/me/referrals` · `/qr` | реферальная ссылка (TTL, секунды), QR SVG, список приглашённых; 19.11: у каждого `hidden` и `bonuses [{stage, amount, paid, status}]` — бонус «ждёт выплаты» (`active`) / «выплачен» (`offset`), статус меняет только выплата |
 | `POST /api/me/referrals/{app}/hide` | 19.11: `{on}` — пригласивший скрывает своего реферала из списка (чужой — 403 `forbidden`) |
 | `PATCH /api/me/work-status` | «Работаю/Не работаю» (18.11: сам сотрудник больше не переключает — 403; персонал свой статус меняет) |
 | `PATCH /api/me/notifications` | включить/выключить напоминания |
 | `POST /api/profile-link` | карточка человека без username (в чат с ботом) |
-| `GET /api/points` | справочник точек |
+| `GET /api/points` | справочник точек; 24.11: каждая несёт `bonus {tiers: [{from, amount}], days: [0..6]}` (пустые `tiers` — надбавки нет) |
 
 ## Профиль, реквизиты, история, смены
 
@@ -30,6 +30,10 @@
 `GET /api/me/finances` · `GET /api/schedule/week?offset=` · `GET /api/history` ·
 `POST /api/shifts/create` · `PATCH /api/shifts/{id}` · `POST /api/shifts/{id}/cancel|restore|contact-admin|report` ·
 `POST /api/shifts/pre-declare-off` · `POST /api/shifts/{id}/clear-off` · `GET /api/media/report/{id}`.
+24.11: в `create`/`edit`/`restore` поле `location` может быть `null`/`""` — смена без точки (при включённой настройке
+«Запретить самостоятельно выбирать точку» для сотрудников; иначе пустая точка — 422 `bad_location`). Сотруднику с запретом
+назвать точку — 403 `point_locked`; при `edit`/`restore` пустая точка сохраняет назначенную, другая — 403. В карточке смены
+(`serialize_shift`) точки с надбавкой несут блок `location_bonus {point, tiers, days, weekday_ok, paid_now, next, reached}`.
 
 ## Цели и события (сотрудник)
 
@@ -53,8 +57,8 @@
 (`work-status`, 18.11: `{work_status}` — переключают только начальники: инструктор своим, тренер своей сети, админ/владелец любому; 403 у чужих;
 `rates` (19.11): тело с `fines_exempt` — при `true` висящие нарушения и неявки человека прощаются, ответ несёт `cleared {violations, no_shows}`) ·
 `POST /api/admin/team/{uid}/hide` `{on}` (19.11, право `block`): «Скрыть»/«Вернуть» заблокированного — только заблокированных (иначе 409 `not_blocked`), `users.hidden_at`, событие `MEMBER_HIDDEN`; разблокировка снимает скрытие сама ·
-`POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?}` (owner/admin, 18.11; в `GET /api/me`
-и «Команде» поля приходят как `grants`) ·
+`POST /api/admin/team/{uid}/grants` — личные разрешения `{broadcast_all?, onboarding?, assign_points?}` (owner/admin, 18.11;
+24.11 — третье, «Распределение по всем точкам», любой роли; в `GET /api/me` и «Команде» поля приходят как `grants`) ·
 инвайты `GET/POST /api/admin/invites`, `/{id}/revoke|qr`, `POST /api/admin/invites/rotate` · попытки доступа
 `GET /api/admin/access-attempts`, `POST /api/admin/access-attempts/restore` · группы `GET/POST /api/admin/groups(/check|/invite|/mode|/not-newbie|/remove)`.
 
@@ -65,6 +69,16 @@
 `POST /api/admin/shifts/{id}/review|no-show|result|delete` · `GET /api/admin/violations` · `POST /api/admin/violations/scan` ·
 `POST /api/admin/violations/{id}/fine|waive` · `GET /api/media/violation/{id}/{index}` ·
 факт дня `GET /api/admin/day-actuals`, `POST /api/admin/day-actuals/{day}`, `POST …/{day}/annul` · `GET /api/media/tx/{id}`.
+точки `GET/POST /api/admin/points`, `PATCH /api/admin/points/{id}` (право `points`; тело `{name?, capacity?, clear_capacity?,
+active?, bonus?}`, `bonus: {tiers: [{from, amount}], days}` — до 5 ступеней, `null` снимает надбавку, без ключа не трогает;
+422 `bad_bonus` по неверной надбавке).
+**Распределение по точкам** (24.11, право `assign_points`): `GET /api/admin/assign?date=` — люди, которых этот
+руководитель вправе распределять, с их записями на дату (`items [{user_id, name, username, shift_id, status, start_time,
+end_time, volume, location, trainee, assignable}]`), и точки (`points` с `bonus_today` — надбавка, действующая в этот день
+недели, — и загрузкой `taken`); `POST /api/admin/assign {user_id, date, location}` — «Назначить» (`location: null` — снять
+точку), ответ `{shift_id, location, changed}`; отказы 403 `forbidden` (не своего человека), 409 `past_date`/`day_off`/
+`cancelled`/`point_full`, 422 `unknown_point`; `POST /api/admin/assign/notice {date, html, mode: all|point, signed}` —
+«Отправить график», ответ `{broadcast, repeated}` ([[16 - Рассылки]]).
 
 ## Админ: деньги
 
@@ -106,7 +120,8 @@
 `shift_today`/`shift_tomorrow` валидны и в `POST`; 19.11: в POST — `ack_deadline_min` (5 мин…30 дней, включает
 `require_ack`) и `ack_fine_units` (1…1000, None — без штрафа); в списке — `ack_deadline_at`, `fined`),
 `GET /api/admin/broadcasts/{id}` (в `items` — `fined_at`), `GET /api/media/broadcast/{id}`,
-`POST …/{id}/remind`, `POST /api/admin/broadcasts/test`, шаблоны `/api/admin/broadcast-templates`.
+`POST …/{id}/remind`, `POST /api/admin/broadcasts/test`, шаблоны `/api/admin/broadcast-templates` (24.11: `?kind=broadcast|assign`
+и `kind` в теле POST — тексты рассылок или тексты «Отправить график»; право по виду — `broadcast_network` / `assign_points`).
 Настройки: `GET/PATCH /api/admin/settings` · `GET/POST/PATCH /api/admin/reasons(/{id})` · `GET/PUT /api/admin/texts/{key}` ·
 `GET/PUT/DELETE /api/admin/header-title` · `GET/PUT/DELETE /api/admin/global-link` · `GET /api/reasons` · `POST /api/admin/media(/video)`.
 Счётчики: `GET /api/admin/pending` (18.11: ключ `no_network` — сотрудники без сети, для владельца/админов). Экспорт: `POST /api/admin/export`.
@@ -150,3 +165,7 @@
   `lazy_units` = 0 — копилка налога на лень не режет ручную сумму и не списывается ею.
 - 2026-11-24 — хотфикс выплат: в строках `POST /api/admin/payouts/preview` — `open_debts` (активные вычеты и
   штрафы, старыми первыми); мастер вычитает их из вписанной суммы живьём, без «Пересчитать».
+- 2026-11-24 — «Надбавка за точку» и «Распределение по точкам»: `bonus` в точках (`GET /api/points`, `/api/admin/points`),
+  `location_bonus` в карточке смены, `assign_points` в грантах, `pricing.point_locked` в `GET /api/me`, `location: null`
+  в сменах; новые `GET/POST /api/admin/assign`, `POST /api/admin/assign/notice`; `kind` у шаблонов; `/api/admin/points`
+  дописан в справочник (раньше не был описан).

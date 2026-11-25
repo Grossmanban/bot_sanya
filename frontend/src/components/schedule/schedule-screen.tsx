@@ -5,7 +5,7 @@ import { Camera, ChevronLeft, ChevronRight, Pause, RotateCcw, Trophy, X } from "
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { api, type Day, type Pricing, type StageProgress, type User, type Week } from "@/lib/api";
-import { STATUS_META, WEEKDAYS_SHORT, dayMonth, dayState, isGoing, parseDay, plural, rub, timeRange, weekRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS_SHORT, dayMonth, dayState, isGoing, parseDay, planText, plural, rub, timeRange, weekRange } from "@/lib/format";
 import { moscowTime, readLocal, useAction, useLoad, writeLocal } from "@/lib/hooks";
 import { tapHaptic } from "@/lib/telegram";
 import { useWide } from "@/lib/use-media";
@@ -380,10 +380,10 @@ function DayRow({ day, index, selected, onOpen }: { day: Day; index: number; sel
                   {Math.round((mine.fact_volume / Math.max(mine.volume, 1)) * 100) - 100}%
                 </span>
               ) : (
-                `${mine.location}, план ${mine.volume}, факт ${mine.fact_volume} шт.`
+                planText(mine, mine.fact_volume)
               )
             ) : isGoing(mine) || state === "awaiting_approval"
-              ? `${mine!.location}, ${mine!.volume} шт.`
+              ? planText(mine!)
               : names.length
                 ? day.names_hidden
                   ? `Выходят: ${names.length} ${plural(names.length, "человек", "человека", "человек")}`
@@ -425,7 +425,7 @@ function ReportDue({ week, onOpen }: { week: Week | null | undefined; onOpen: (d
                 {back ? "Отчёт вернули — сдай заново" : d.is_today ? "Сдать отчёт за сегодня" : `Сдать отчёт за ${dayMonth(d.date)}`}
               </span>
               <span className="block text-sm opacity-80">
-                {timeRange(shift)} · план {shift.volume} шт. · {deadlineText(shift.report!.deadline, d.date)}
+                {timeRange(shift)} · {planText(shift)} · {deadlineText(shift.report!.deadline, d.date)}
               </span>
             </span>
             <ChevronRight className="size-5 shrink-0 opacity-80" />

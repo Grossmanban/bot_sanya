@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from . import day_actual, finance, media
+from . import assign, day_actual, finance, media
 from . import permissions as perms
 from . import services as svc
 from .config import settings
@@ -262,6 +262,8 @@ def submit(conn: sqlite3.Connection, user: dict, shift_id: int, value: int, phot
         if by_team:
             conn.execute("UPDATE shifts SET report_note = ?, shortfall_status = 'waived' WHERE id = ?",
                          (day_actual.TEAM_NOTE, shift_id))
+        if by_team:
+            assign.award(conn, svc.get_shift(conn, shift_id), user["telegram_id"], key)  # 19.11: the day's step
         event = "REPORT_TEAM_APPROVED" if by_team else "REPORT_SUBMITTED"
         log_event(conn, user_id=shift["user_id"], actor_id=user["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, old={"fact_volume": shift["fact_volume"], "report_state": shift["report_state"]},
@@ -338,6 +340,9 @@ def review(conn: sqlite3.Connection, actor: dict, shift_id: int, action: str, ke
                               svc.report_fine_reason(svc.get_shift(conn, shift_id)), actor["telegram_id"], fine_status)
         else:
             finance.cancel_linked(conn, shift_id, ("report",), actor["telegram_id"], "Отчёт принят")
+        # 19.11: an approved day on a point with an allowance pays its step (a bonus, one per shift)
+        if action == "approve":
+            assign.award(conn, svc.get_shift(conn, shift_id), actor["telegram_id"], key)
         event = {"approve": "REPORT_APPROVED", "return": "REPORT_RETURNED", "fine": "REPORT_FINED"}[action]
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type=event, key=key,
                   shift_id=shift_id, old={"report_state": shift["report_state"]},
@@ -395,6 +400,7 @@ def manual_result(conn: sqlite3.Connection, actor: dict, shift_id: int, value: i
         actor, shift = _staff_shift(conn, actor, shift_id, "review")
         if shift_start(shift) > now_local():
             raise ServiceError("Смена ещё не началась", 409, "too_early")
+        was_approved = shift["report_state"] == "approved"  # 19.11: a correction, not the first approval
         last = latest(conn, shift_id)
         if last and last["status"] == "pending_review":
             conn.execute("UPDATE reports SET status = 'rejected_retry', reviewed_by = ?, reviewed_at = ?, "
@@ -416,6 +422,8 @@ def manual_result(conn: sqlite3.Connection, actor: dict, shift_id: int, value: i
              actor["telegram_id"] if under else None, now_iso() if under else None, now_iso(), shift_id),
         )
         finance.cancel_linked(conn, shift_id, ("report", "no_show"), actor["telegram_id"], "Результат внесён вручную")
+        # 19.11: the day's allowance step — on a first approval it is made; a correction follows the new figure
+        assign.award(conn, svc.get_shift(conn, shift_id), actor["telegram_id"], key, corrected=was_approved)
         log_event(conn, user_id=shift["user_id"], actor_id=actor["telegram_id"], event_type="REPORT_MANUAL", key=key,
                   shift_id=shift_id, old={"fact_volume": shift["fact_volume"], "report_state": shift["report_state"]},
                   new={"fact_volume": value, "report_id": cur.lastrowid}, description=comment)

@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, isStaff, type Pricing, type User } from "@/lib/api";
-import { STATUS_META, WEEKDAYS_SHORT, offFor, parseDay, rub, timeRange, weekRange } from "@/lib/format";
+import { STATUS_META, WEEKDAYS_SHORT, offFor, parseDay, planText, rub, timeRange, weekRange } from "@/lib/format";
 import { useAction, useLoad } from "@/lib/hooks";
 import { bindBackButton } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
@@ -270,7 +270,7 @@ function HistoryView({ onBack }: { onBack: () => void }) {
                       </span>
                       <DayTrack className="mt-2.5" state={s.status} mine={s.start_time ? s : null} others={[]} index={i} />
                       <span className="mt-2 block text-xs text-muted-foreground">
-                        {s.location ? `${s.location}, план ${s.volume} шт.` : ""}
+                        {s.location || s.volume != null ? planText(s) : ""}
                         {s.fact_volume != null ? `, факт ${s.fact_volume} шт.` : ""}
                         {s.shortfall > 0 && <span className="font-semibold text-cancel">, не по норме −{s.shortfall}</span>}
                         {s.fact_volume != null && s.volume != null && s.fact_volume > s.volume && (

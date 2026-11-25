@@ -912,11 +912,12 @@ function TrainingAccess({ user, onChanged }: { user: User; onChanged: () => void
 }
 
 /** 18.11: personal permissions — broadcasts to everyone (a trainer: outside their network too) and onboarding
- * without an admin's confirmation. Owners and admins flip them; the roles that already have the right don't need them. */
+ * without an admin's confirmation; 19.11: «Распределение по всем точкам». Owners and admins flip them; the roles
+ * that already have the right don't need the first two. */
 function Grants({ user, onUpdated }: { user: User; onUpdated: (u: User) => void }) {
   const [state, setState] = useState(user.grants ?? { broadcast_all: false, onboarding: false });
   const { busy, run } = useAction();
-  const flip = async (field: "broadcast_all" | "onboarding", v: boolean) => {
+  const flip = async (field: "broadcast_all" | "onboarding" | "assign_points", v: boolean) => {
     try {
       const res = await run(`grant-${field}`, (k) => api.admin.setGrants(user.id, { [field]: v }, k),
         v ? "Разрешение выдано" : "Разрешение снято");
@@ -933,6 +934,9 @@ function Grants({ user, onUpdated }: { user: User; onUpdated: (u: User) => void 
     : user.role === "instructor"
       ? "Рассылки всей команде — и не только своим людям"
       : "Рассылки всей команде";
+  const assignHint = user.role === "employee"
+    ? "Любого сотрудника — на любую точку, вне сети; открывает раздел «Смены → Распределение по точкам»"
+    : "Любого сотрудника — на любую точку, вне своей сети и подчинённости";
   return (
     <div className="mt-4 space-y-2 rounded-2xl bg-muted/50 px-4 py-3">
       <span className="block text-[15px] font-semibold">Личные разрешения</span>
@@ -949,6 +953,13 @@ function Grants({ user, onUpdated }: { user: User; onUpdated: (u: User) => void 
           <span className="block text-xs text-muted-foreground">Анкеты, обучение и приём в команду — без согласования</span>
         </span>
         <Switch checked={state.onboarding} disabled={!!busy} onCheckedChange={(v) => flip("onboarding", v)} />
+      </label>
+      <label className="flex cursor-pointer items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[15px]">Распределение по всем точкам</span>
+          <span className="block text-xs text-muted-foreground">{assignHint}</span>
+        </span>
+        <Switch checked={!!state.assign_points} disabled={!!busy} onCheckedChange={(v) => flip("assign_points", v)} />
       </label>
     </div>
   );

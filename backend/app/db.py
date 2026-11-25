@@ -1656,3 +1656,29 @@ def _member_hidden(conn: sqlite3.Connection) -> None:
 
 
 MIGRATIONS.append(_member_hidden)
+
+
+def _point_allowance(conn: sqlite3.Connection) -> None:
+    """Migration 53 — 24.11: «Надбавка за точку» + «Распределение по точкам». points.bonus — the allowance
+    (steps «от N оплаченных штук → R ₽ за день» + the weekdays it acts on, JSON); users.can_assign_points —
+    the personal grant «Распределение по всем точкам» (any role, set by owner/admin); the ledger's source
+    CHECK learns 'location_bonus' — the auto-bonus when a report is approved; broadcast_templates.kind —
+    «Распределение» templates next to the broadcast ones (a default one is seeded)."""
+    from .timeutil import now_iso  # local: db.py is below timeutil's users
+
+    _run_script(conn, "ALTER TABLE points ADD COLUMN bonus TEXT; "
+                      "ALTER TABLE users ADD COLUMN can_assign_points INTEGER NOT NULL DEFAULT 0; "
+                      "ALTER TABLE broadcast_templates ADD COLUMN kind TEXT NOT NULL DEFAULT 'broadcast';")
+    _widen_check(conn, "financial_transactions",
+                 "IN ('manual','final_cancel','report','no_show','payout','attendance','broadcast')",
+                 "IN ('manual','final_cancel','report','no_show','payout','attendance','broadcast','location_bonus')")
+    # the stamp is the app's own (Moscow time with the offset), the same as every saved template's
+    conn.execute(
+        """INSERT INTO broadcast_templates (title, html, created_by, created_at, kind)
+           VALUES ('График на день',
+                   '<p>Привет, {имя}!</p><p>График на {дата}.</p><p>Твоя точка: <b>{точка}</b></p>'
+                   || '<p>Коллеги рядом:</p><p>{коллеги}</p><p>{надбавка}</p>',
+                   0, ?, 'assign')""", (now_iso(),))
+
+
+MIGRATIONS.append(_point_allowance)

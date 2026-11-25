@@ -184,13 +184,23 @@ async def eve_reminders(conn, notifier: Notifier, day: date) -> int:
     sent = 0
     for s in rows:
         conn.execute("UPDATE shifts SET reminded_at = ? WHERE id = ?", (now_iso(), s["id"]))
-        mates = [m for m in everyone if m["id"] != s["id"] and (m["location"] or "").casefold() == (s["location"] or "").casefold()]
+        # 19.11: a shift may be assigned by its point alone — no time (and no volume) yet; or booked without
+        # a point («Запретить самостоятельно выбирать точку») — the manager assigns it later
+        when = f"{s['start_time']}–{s['end_time']}" if s["start_time"] else "время уточняется"
+        mates = [m for m in everyone if s["location"] and m["id"] != s["id"]
+                 and (m["location"] or "").casefold() == s["location"].casefold()]
         text = (
             f"🔔 Завтра, {ddmm_wd(day)}, у тебя выход\n"
-            f"<b>{s['start_time']}–{s['end_time']}</b>, точка «{escape(s['location'])}», план {s['volume']} шт."
+            f"<b>{when}</b>"
+            + (f", точка «{escape(s['location'])}»" if s["location"] else "")
+            + (f", план {s['volume']} шт." if s["volume"] else "")
         )
+        if not s["location"]:
+            text += "\nТочку назначит ваш тренер или инструктор."
         if mates:
-            text += "\nНа точке также: " + ", ".join(f"{escape(m['first_name'])} {m['start_time']}–{m['end_time']}" for m in mates)
+            text += "\nНа точке также: " + ", ".join(
+                f"{escape(m['first_name'])} {m['start_time']}–{m['end_time']}" if m["start_time"]
+                else f"{escape(m['first_name'])} (время уточняется)" for m in mates)
         sent += await notifier.send(s["telegram_id"], text, _open_app())
     return sent
 

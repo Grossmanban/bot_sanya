@@ -13,6 +13,7 @@ import {
   addDays,
   dayMonth,
   parseDay,
+  planText,
   plural,
   rub,
   timeRange,
@@ -36,6 +37,7 @@ import { PayoutsSection } from "../finance/payouts-section";
 import { GoalsSection } from "../goals/goals";
 import { EventsAdmin } from "../events/events-admin";
 import { ExportCard, PointsSection, SettingsSection } from "./admin-extra";
+import { AssignSection } from "./assign-section";
 import { BroadcastSection } from "./broadcast-section";
 import { UnmarkedFineDrawer, ViolationsSection } from "./violations-section";
 import { OnboardingSection } from "./onboarding-section";
@@ -44,11 +46,13 @@ import { GroupsSection } from "./groups-section";
 import { AliceAdmin } from "./alice-admin";
 import { ManualsAdmin } from "../training/manuals";
 
-type Section = "decisions" | "manuals" | "alice" | "plus" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
+type Section = "decisions" | "manuals" | "alice" | "plus" | "groups" | "access" | "onboarding" | "discipline" | "events" | "goals" | "payouts" | "networks" | "raspred" | "assign" | "reports" | "actual" | "day" | "stats" | "penalties" | "team" | "points" | "broadcast" | "settings";
 // need: the capability that unlocks the section (trainers get a smaller, network-scoped panel)
 const SECTIONS: { id: Section; label: string; need: Capability }[] = [
   { id: "decisions", label: "Решения", need: "review" },
   { id: "raspred", label: "Распред", need: "raspred" },
+  // 19.11: «Распределение по точкам» — managers for their people, the grant holder for everyone
+  { id: "assign", label: "Распределение", need: "assign_points" },
   { id: "onboarding", label: "Онбординг", need: "registrations" },
   { id: "reports", label: "Отчёты", need: "review" },
   { id: "discipline", label: "Дисциплина", need: "review" },
@@ -76,7 +80,7 @@ type Group = "decisions" | "people" | "shifts" | "money" | "products" | "comms";
 const GROUPS: { id: Group; label: string; sections: Section[] }[] = [
   { id: "decisions", label: "Решения", sections: ["decisions"] },
   { id: "people", label: "Люди", sections: ["team", "onboarding", "groups", "access"] },
-  { id: "shifts", label: "Смены", sections: ["raspred", "day", "reports", "discipline", "actual", "stats"] },
+  { id: "shifts", label: "Смены", sections: ["raspred", "assign", "day", "reports", "discipline", "actual", "stats"] },
   { id: "money", label: "Деньги", sections: ["penalties", "payouts"] },
   { id: "products", label: "Продукты", sections: ["alice", "plus", "manuals", "goals", "events"] },
   { id: "comms", label: "Связь и настройки", sections: ["broadcast", "points", "networks", "settings"] },
@@ -188,6 +192,7 @@ export function AdminScreen({ me, caps, network, manageable = [], productsEnable
       <div key={section} className="screen-in">
         {section === "decisions" && <DecisionsSection counts={counts} visible={visible} onOpen={setSection} />}
         {section === "raspred" && <RaspredSection version={version} onEdit={setEditing} />}
+        {section === "assign" && <AssignSection version={version} me={me} onEdit={setEditing} />}
         {section === "onboarding" && <OnboardingSection me={me} />}
         {section === "reports" && <ReportsSection onChanged={() => setVersion((v) => v + 1)} />}
         {section === "discipline" && <ViolationsSection onChanged={() => setVersion((v) => v + 1)} />}
@@ -398,8 +403,9 @@ function RaspredSection({ version, onEdit }: { version: number; onEdit: EditFn }
                     <span className="text-sm text-muted-foreground">{r.location}</span>
                   </span>
                   <span className="shrink-0 text-right">
-                    <span className="block text-sm font-semibold tabular">{r.start_time}–{r.end_time}</span>
-                    <span className="text-sm text-muted-foreground">{r.volume} шт.</span>
+                    {/* 19.11: a shift may be assigned by its point alone — «время уточняется», no volume yet */}
+                    <span className="block text-sm font-semibold tabular">{timeRange(r)}</span>
+                    <span className="text-sm text-muted-foreground">{r.volume != null ? `${r.volume} шт.` : "объём уточняется"}</span>
                   </span>
                 </button>
               </li>
@@ -506,7 +512,7 @@ function DaySection({ version, onEdit }: { version: number; onEdit: EditFn }) {
                       {/* a long place name wraps inside its column instead of pushing the row off the screen */}
                       <span className="min-w-0 max-w-[55%] text-right text-sm">
                         <span className="block font-semibold whitespace-nowrap tabular">{s.start_time ? timeRange(s) : ""}</span>
-                        <span className="block break-words text-muted-foreground">{s.location ? `${s.location}, ${s.volume} шт.` : ""}</span>
+                        <span className="block break-words text-muted-foreground">{s.location || s.volume != null ? planText(s) : ""}</span>
                         {s.fact_volume != null && (
                           <span className={cn("block text-xs font-semibold", s.shortfall ? "text-cancel" : "text-go")}>
                             факт {s.fact_volume}{s.shortfall ? ` (−${s.shortfall})` : ""}
@@ -892,7 +898,7 @@ function StatsRow({ item, index, onClick }: { item: StatsItem; index: number; on
         )}
         <span className="mt-2 block truncate text-xs text-muted-foreground">
           {[
-            item.location && `${item.location}, план ${item.volume} шт.`,
+            item.location && planText(item),
             item.fact_volume != null && `факт ${item.fact_volume} шт.`,
             item.notes.toLowerCase(),
           ]

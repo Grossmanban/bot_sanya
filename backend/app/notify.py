@@ -185,6 +185,12 @@ def registration_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
+def _point(shift: dict) -> str:
+    """19.11: a shift may be booked without a point («Запретить самостоятельно выбирать точку» — the manager
+    assigns it later) — said so instead of an empty «Точка:»."""
+    return escape(shift["location"]) if shift.get("location") else "не назначена"
+
+
 def shift_created_text(conn, user: dict, shift: dict) -> str:
     return (
         "🆕 <b>Новая запись в график</b>\n"
@@ -192,7 +198,7 @@ def shift_created_text(conn, user: dict, shift: dict) -> str:
         f"Дата: {ddmm_wd(_day(shift))}\n"
         f"Время: {shift['start_time']}–{shift['end_time']}\n"
         f"Объём: {shift['volume']} шт.\n"
-        f"Точка: {escape(shift['location'])}\n"
+        f"Точка: {_point(shift)}\n"
         f"Итого на день: {_totals(conn, _day(shift))}"
     )
 
@@ -203,7 +209,7 @@ def urgent_text(user: dict, shift: dict) -> str:
         f"ФИО: {escape(svc.full_name(user))}\n"
         f"Время: {shift['start_time']}–{shift['end_time']}\n"
         f"Объём: {shift['volume']} шт.\n"
-        f"Точка: {escape(shift['location'])}"
+        f"Точка: {_point(shift)}"
     )
 
 
@@ -230,7 +236,7 @@ def restored_text(conn, user: dict, shift: dict) -> str:
         f"{who(user)} вернулся в график на {ddmm_wd(_day(shift))}\n"
         f"Время: {shift['start_time']}–{shift['end_time']}\n"
         f"Новый объём: {shift['volume']} шт.\n"
-        f"Точка: {escape(shift['location'])}\n"
+        f"Точка: {_point(shift)}\n"
         f"Итого на день: {_totals(conn, _day(shift))}"
     )
 
@@ -257,8 +263,8 @@ def penalty_keyboard(shift_id: int) -> InlineKeyboardMarkup:
 def edited_text(user: dict, shift: dict, old: dict) -> str:
     return (
         f"✏️ {handle(user)} изменил смену на {ddmm_wd(_day(shift))}:\n"
-        f"Было: {old['start_time']}–{old['end_time']}, {old['volume']} шт., {escape(old['location'])}\n"
-        f"Стало: {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт., {escape(shift['location'])}"
+        f"Было: {old['start_time']}–{old['end_time']}, {old['volume']} шт., {_point(old)}\n"
+        f"Стало: {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт., {_point(shift)}"
     )
 
 
@@ -266,7 +272,8 @@ def schedule_line(event: str, user: dict, shift: dict, old: dict | None = None) 
     """One compact line about a schedule change — for the grouped digest (19.11): the full versions above
     are four lines each, ten of them would bury the chat."""
     day = ddmm_wd(_day(shift))
-    place = f"«{escape(shift['location'] or '')}»"
+    # 19.11: a shift may be booked without a point («Запретить самостоятельно выбирать точку»)
+    place = f"«{escape(shift['location'])}»" if shift.get("location") else "точка не назначена"
     if event == "SHIFT_CREATED":
         return f"🆕 {who(user)} встал(а) в график {day}: {shift['start_time']}–{shift['end_time']}, {shift['volume']} шт., {place}"
     if event == "SHIFT_CANCELLED":
@@ -598,6 +605,26 @@ class Notifier:
         if deadline is not None:
             self.conn.execute("UPDATE broadcasts SET ack_deadline_at = ? WHERE id = ?",
                               (deadline.isoformat(timespec="seconds"), broadcast_id))
+        return delivered
+
+    async def assign_broadcast(self, broadcast_id: int, recipients: list[dict], bodies: dict[int, str],
+                               signature: str | None) -> int:
+        """19.11: «Отправить график» — every person gets their own rendering (their point, their colleagues),
+        unlike `broadcast` which sends one text to everyone. Delivered the same way, receipts included."""
+        delivered = 0
+        for i, user in enumerate(recipients):
+            message_id = await self._deliver(user["telegram_id"],
+                                             self.broadcast_body(bodies.get(user["id"], ""), signature), None, None)
+            ok = message_id is not None
+            delivered += ok
+            self.conn.execute(
+                """INSERT INTO broadcast_deliveries (broadcast_id, user_id, message_id, delivered, sent_at)
+                   VALUES (?, ?, ?, ?, ?) ON CONFLICT(broadcast_id, user_id) DO NOTHING""",
+                (broadcast_id, user["id"], message_id, int(ok), svc.now_iso()))
+            if i % 10 == 9:
+                self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
+            await asyncio.sleep(0.05)  # stay well under Telegram's ~30 msg/s limit
+        self.conn.execute("UPDATE broadcasts SET delivered = ? WHERE id = ?", (delivered, broadcast_id))
         return delivered
 
     async def broadcast_remind(self, broadcast_id: int, user_ids: list[int] | None = None) -> int:
@@ -1493,8 +1520,8 @@ class Notifier:
     async def day_marked_by_manager(self, shift: dict, actor: dict) -> None:
         """«День»: the person learns that their manager marked the day for them."""
         user = svc.get_user(self.conn, shift["user_id"])
-        what = ("выходной" if shift["status"] == "pre_declared_off" else
-                f"смена {shift['start_time']}–{shift['end_time']}, {escape(shift['location'] or '')}, {shift['volume']} шт.")
+        what = ("выходной" if shift["status"] == "pre_declared_off"
+                else f"смена {escape(svc.shift_plan_text(shift))}")  # 19.11: the time may still be «уточняется»
         await self.send(user["telegram_id"], f"📅 {role_title(actor)} {escape(svc.full_name(actor))} отметил(а) вам "
                                              f"{ddmm_wd(_day(shift))}: {what}. Подробности — в приложении.", _open_schedule())
         await self.archive(["график"], f"📅 {who(user)}: {ddmm_wd(_day(shift))} — {what}\nОтметил: {who(actor)}", user)
@@ -1507,7 +1534,7 @@ class Notifier:
         if shift["status"] in svc.DAY_OFF:
             plan = "выходной"
         else:
-            plan = f"{shift['start_time']}–{shift['end_time']}, {escape(shift['location'] or '')}, {shift['volume']} шт."
+            plan = escape(svc.shift_plan_text(shift))  # 19.11: the time may still be «уточняется»
         full = (f"📨 <b>Сотрудник просит изменить смену</b>\n{who(user)}\n"
                 f"Смена {ddmm_wd(_day(shift))}: {plan}\n💬 {escape(text)}\n"
                 "Смена не изменена — если согласны, поправьте её в приложении, раздел «День».")

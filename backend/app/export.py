@@ -78,8 +78,10 @@ def build_xlsx(conn: sqlite3.Connection, date_from: date, date_to: date, user_id
         )
         if s["status"] in ACTIVE:
             t["shifts"] += 1
-            t["plan"] += s["volume"]
-            t["plan_pay"] += pricing.expected_pay(s["volume"], own(s))
+            # 19.11: a shift assigned by its point alone has no volume yet
+            t["plan"] += s["volume"] or 0
+            if s["volume"]:
+                t["plan_pay"] += pricing.expected_pay(s["volume"], own(s))
             if s["fact_volume"] is not None:
                 t["fact"] += s["fact_volume"]
                 t["fact_pay"] += pricing.expected_pay(s["fact_volume"], own(s))

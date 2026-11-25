@@ -1,8 +1,8 @@
 "use client";
 
-import { Minus, Plus } from "lucide-react";
+import { Coins, Lock, Minus, Plus } from "lucide-react";
 import type { Point, Pricing, Shift, ShiftPayload } from "@/lib/api";
-import { rub } from "@/lib/format";
+import { bonusText, parseDay, rub } from "@/lib/format";
 import { tapHaptic } from "@/lib/telegram";
 import { cn } from "@/lib/utils";
 
@@ -14,9 +14,11 @@ export interface FormState {
 }
 
 export function initialForm(prefill?: Partial<ShiftPayload> | null, fallbackLocation?: string): FormState {
+  // an existing shift fills the form from itself; a shift made by its point alone («Распределение») has no
+  // time and no volume yet — the fields stay empty to be filled in, never the «16:00–19:00» of a new booking
   return {
-    start_time: prefill?.start_time ?? "16:00",
-    end_time: prefill?.end_time ?? "19:00",
+    start_time: prefill ? prefill.start_time ?? "" : "16:00",
+    end_time: prefill ? prefill.end_time ?? "" : "19:00",
     location: prefill?.location ?? fallbackLocation ?? "",
     volume: prefill?.volume ? String(prefill.volume) : "",
   };
@@ -31,15 +33,17 @@ export function prefillFrom(shift: Shift): Partial<ShiftPayload> {
   };
 }
 
-/** Returns the payload or an error message. Mirrors the server-side checks. */
-export function validateForm(f: FormState): ShiftPayload | string {
+/** Returns the payload or an error message. Mirrors the server-side checks.
+ *  pointLocked (19.11): the person doesn't pick a point — the day is booked without one, the manager assigns it. */
+export function validateForm(f: FormState, pointLocked = false): ShiftPayload | string {
   const time = /^([01]\d|2[0-3]):[0-5]\d$/;
   if (!time.test(f.start_time)) return "Укажи время начала";
   if (!time.test(f.end_time)) return "Укажи время окончания";
   if (f.end_time <= f.start_time) return "Конец должен быть позже начала";
-  if (!f.location.trim()) return "Укажи точку";
+  if (!pointLocked && !f.location.trim()) return "Укажи точку";
   if (!/^\d+$/.test(f.volume.trim()) || Number(f.volume) <= 0) return "Объём — целое число больше нуля";
-  return { start_time: f.start_time, end_time: f.end_time, location: f.location.trim(), volume: Number(f.volume) };
+  return { start_time: f.start_time, end_time: f.end_time,
+           location: pointLocked ? null : f.location.trim(), volume: Number(f.volume) };
 }
 
 const STEP = 5;
@@ -54,6 +58,8 @@ export function ShiftForm({
   ownLocation,
   disabled,
   volumeLocked,
+  pointLocked,
+  date,
 }: {
   form: FormState;
   onChange: (f: FormState) => void;
@@ -68,6 +74,10 @@ export function ShiftForm({
   disabled?: boolean;
   /** 22:00 the day before has passed: the volume stays as it is */
   volumeLocked?: boolean;
+  /** 19.11: «Запретить самостоятельно выбирать точку» — no picker; the day is booked without a point */
+  pointLocked?: boolean;
+  /** the day being booked (ISO) — the allowance badge says whether it acts on that weekday */
+  date?: string;
 }) {
   const set = (patch: Partial<FormState>) => onChange({ ...form, ...patch });
   const volume = Number(form.volume) || 0;
@@ -76,6 +86,14 @@ export function ShiftForm({
   const rate = lazy ? pricing.lazy_rate : pricing.base_rate;
   const badRange = !!form.start_time && !!form.end_time && form.end_time <= form.start_time;
   const field = "w-full rounded-2xl border-0 bg-muted px-4 outline-none transition-shadow focus:ring-2 focus:ring-ring/25";
+  const weekday = date ? parseDay(date).weekday : null;
+  const anyBonus = points.some((p) => p.bonus?.tiers.length);
+  // the point already assigned to the person (shown, not picked, when the choice is locked) — with its allowance,
+  // and honestly when the allowance does not act on the weekday being edited
+  const assigned = pointLocked ? points.find((p) => p.name.toLocaleLowerCase("ru") === form.location.toLocaleLowerCase("ru")) : undefined;
+  const assignedBonus = assigned?.bonus?.tiers.length
+    ? `${bonusText(assigned.bonus)}${weekday === null || assigned.bonus.days.includes(weekday) ? "" : " — в этот день не действует"}`
+    : "";
 
   const step = (delta: number) => {
     tapHaptic();
@@ -98,7 +116,23 @@ export function ShiftForm({
       </div>
       {badRange && <p className="-mt-3 text-sm text-cancel">Конец должен быть позже начала</p>}
 
-      {points.length > 0 ? (
+      {pointLocked ? (
+        // 19.11: the point is the manager's to assign — said so; the assigned one is only shown
+        <div className="space-y-1.5">
+          <span className="text-sm text-muted-foreground">Точка</span>
+          <p className="flex items-start gap-2 rounded-2xl bg-muted px-4 py-3 text-sm leading-relaxed">
+            <Lock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            <span>
+              Выбор точки недоступен: точку назначит ваш тренер/инструктор.
+              {form.location ? (
+                <>
+                  {" "}Сейчас назначено: <b>{form.location}</b>{assignedBonus ? ` — ${assignedBonus}` : ""}
+                </>
+              ) : null}
+            </span>
+          </p>
+        </div>
+      ) : points.length > 0 ? (
         <div className="space-y-1.5">
           <span className="text-sm text-muted-foreground">Точка</span>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -109,6 +143,9 @@ export function ShiftForm({
               ) - (ownLocation && ownLocation.toLocaleLowerCase("ru") === p.name.toLocaleLowerCase("ru") ? 1 : 0);
               const full = !!p.capacity && taken >= p.capacity;
               const picked = form.location.toLocaleLowerCase("ru") === p.name.toLocaleLowerCase("ru");
+              // 19.11: the point's allowance, and whether it acts on the weekday being booked
+              const badge = bonusText(p.bonus);
+              const acts = !p.bonus?.tiers.length || weekday === null || p.bonus.days.includes(weekday);
               return (
                 <button
                   key={p.id}
@@ -119,7 +156,7 @@ export function ShiftForm({
                     set({ location: p.name });
                   }}
                   className={cn(
-                    "press rounded-2xl px-3.5 py-2.5 text-left disabled:opacity-40",
+                    "press space-y-1 rounded-2xl px-3.5 py-2.5 text-left disabled:opacity-40",
                     picked ? "bg-primary text-primary-foreground" : "bg-muted",
                   )}
                 >
@@ -127,10 +164,22 @@ export function ShiftForm({
                   <span className={cn("block text-xs", picked ? "opacity-70" : "text-muted-foreground")}>
                     {full ? "мест нет" : p.capacity ? `занято ${taken} из ${p.capacity}` : taken ? `уже ${taken}` : "свободно"}
                   </span>
+                  {badge && (
+                    <span className={cn("flex items-start gap-1 text-[11px] font-medium leading-snug",
+                      picked ? "opacity-90" : acts ? "text-go" : "text-muted-foreground line-through decoration-go/60")}>
+                      <Coins className="mt-px size-3 shrink-0" />
+                      <span>{badge}{acts ? "" : " · в этот день не действует"}</span>
+                    </span>
+                  )}
                 </button>
               );
             })}
           </div>
+          {anyBonus && (
+            <p className="text-xs text-muted-foreground">
+              Надбавка — бонус за смену на точке, когда оплаченных штук за день не меньше порога; действует в указанные дни недели.
+            </p>
+          )}
         </div>
       ) : (
         <>

@@ -53,8 +53,9 @@ export interface User {
   personal_commission?: number | null;
   /** ТЗ 27.10 §22: the instructor this person works under (null — directly under the trainer) */
   instructor_id?: number | null;
-  /** 18.11: the personal toggles from «Команда» — broadcast to everyone and onboarding without an admin */
-  grants?: { broadcast_all: boolean; onboarding: boolean };
+  /** 18.11: the personal toggles from «Команда» — broadcast to everyone and onboarding without an admin;
+   * 19.11: assign_points — «Распределение по всем точкам» (any role) */
+  grants?: { broadcast_all: boolean; onboarding: boolean; assign_points?: boolean };
 }
 
 export type Role = "owner" | "admin" | "trainer" | "instructor" | "employee";
@@ -72,7 +73,7 @@ export type Capability =
   | "money" | "block" | "roles" | "global_actual" | "networks" | "fine_direct" | "approve_fines" | "fine_request"
   | "bonus" | "pause" | "review" | "schedule" | "broadcast_all" | "broadcast_network" | "settings" | "points"
   | "registrations" | "export" | "raspred" | "all_people" | "forgive_fines" | "invites" | "access_log" | "groups"
-  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals" | "grants" | "work_status";
+  | "products" | "alice" | "profiles" | "remind_profiles" | "manuals" | "grants" | "work_status" | "assign_points";
 
 /** ТЗ 27.10 §28: «Работа» — products a person has access to */
 export type Product = "alice" | "plus";
@@ -244,7 +245,8 @@ export interface AccessAttempt {
 
 /** 18.11: a personal grant from «Команда» opens the admin tab even for a plain employee */
 export const isStaff = (u: User) =>
-  (u.role !== "employee" || !!u.grants?.broadcast_all || !!u.grants?.onboarding) && u.account_state !== "blocked";
+  (u.role !== "employee" || !!u.grants?.broadcast_all || !!u.grants?.onboarding || !!u.grants?.assign_points)
+  && u.account_state !== "blocked";
 
 export interface Pricing {
   base_rate: number;
@@ -252,6 +254,9 @@ export interface Pricing {
   lazy_threshold: number;
   /** a trainee: shifts are training ones, not paid */
   training?: boolean;
+  /** 19.11: the setting «Запретить самостоятельно выбирать точку» binds this person — the shift form has no
+   * point picker and books the day without a point (the manager assigns it) */
+  point_locked?: boolean;
 }
 
 export interface Me {
@@ -665,6 +670,8 @@ export interface Shift {
   shortfall_penalty: number | null;
   /** the employee's own card: the shortfall fine in units */
   shortfall_units?: number | null;
+  /** 19.11: the point has an allowance — its steps as of this date, the progress and the next step */
+  location_bonus?: LocationBonus;
 }
 
 export type ReportState = "pending_review" | "approved" | "needs_fix" | "rejected" | "no_show";
@@ -943,6 +950,52 @@ export interface Point {
   name: string;
   capacity: number | null;
   active: number;
+  /** 19.11: «Надбавка за точку» — an empty tier list means there is none */
+  bonus?: PointBonus;
+}
+
+/** 19.11: the point's allowance — steps «от N оплаченных штук → R ₽ за день» (sorted by «от», up to 5) and the
+ * weekdays they act on (0 = Monday). The reached step pays its sum in full, never stacked with the lower ones. */
+export interface PointBonus {
+  tiers: { from: number; amount: number }[];
+  days: number[];
+}
+
+/** 19.11: the allowance of the shift's point as of the shift's date — the day sheet shows the plate, how much
+ * is paid so far and the next step to reach */
+export interface LocationBonus {
+  point: string;
+  tiers: { from: number; amount: number }[];
+  days: number[];
+  /** the shift's weekday is one of the allowance's */
+  weekday_ok: boolean;
+  /** approved pieces so far */
+  paid_now: number;
+  /** the first step above what is paid (null — every step is covered) */
+  next: { from: number; amount: number } | null;
+  reached: { from: number; amount: number } | null;
+}
+
+/** 19.11: one day of «Распределение по точкам» — the people this manager may distribute with what they have
+ * on that date, and the points with their allowances */
+export interface AssignDay {
+  date: string;
+  weekday: number;
+  points: (Point & { bonus_today: (PointBonus & { weekday_ok: boolean }) | null; taken: number })[];
+  items: {
+    user_id: number;
+    name: string;
+    username: string | null;
+    shift_id: number | null;
+    status: Shift["status"] | null;
+    start_time: string | null;
+    end_time: string | null;
+    volume: number | null;
+    location: string | null;
+    trainee: boolean;
+    /** false where another kind of record is in the way (a day off, a cancelled shift) — changed in «День» */
+    assignable: boolean;
+  }[];
 }
 
 export interface Colleague {
@@ -982,7 +1035,8 @@ export interface ShiftPayload {
   start_time: string;
   end_time: string;
   volume: number;
-  location: string;
+  /** 19.11: null — a shift without a point (the setting «Запретить самостоятельно выбирать точку») */
+  location: string | null;
 }
 
 export interface AdminShift extends Shift {
@@ -1057,6 +1111,8 @@ export interface PenaltyRow {
 export interface ScheduleSettings {
   weekly_attendance_quota: number;
   show_colleague_names: boolean;
+  /** 19.11: «Запретить самостоятельно выбирать точку» — plain employees book the day without a point */
+  shift_point_locked: boolean;
   /** ТЗ №22: finished goals and events move to «Архив» after this many days */
   feed_hide_after_days: number;
   /** recruiting: units of the internship and of the second stage (the referrer's bonuses) */
@@ -1593,9 +1649,11 @@ export const api = {
         { telegram_id: telegramId, referrer_id: referrerId, idempotency_key: key }),
     users: () => request<{ items: User[] }>("/api/admin/users"),
     points: () => request<{ items: Point[] }>("/api/admin/points"),
-    createPoint: (name: string, capacity: number | null) => post<{ point: Point }>("/api/admin/points", { name, capacity }),
-    updatePoint: (id: number, body: { name?: string; capacity?: number; clear_capacity?: boolean; active?: boolean }) =>
-      patch<{ point: Point }>(`/api/admin/points/${id}`, body),
+    createPoint: (name: string, capacity: number | null, bonus?: PointBonus | null) =>
+      post<{ point: Point }>("/api/admin/points", { name, capacity, ...(bonus ? { bonus } : {}) }),
+    /** 19.11: bonus — the allowance {tiers, days}; null clears it, left out — untouched */
+    updatePoint: (id: number, body: { name?: string; capacity?: number; clear_capacity?: boolean; active?: boolean;
+      bonus?: PointBonus | null }) => patch<{ point: Point }>(`/api/admin/points/${id}`, body),
     settings: () => request<SettingsResponse>("/api/admin/settings"),
     saveSettings: (body: Partial<ScheduleSettings>) => patch<SettingsResponse>("/api/admin/settings", body),
     broadcasts: () =>
@@ -1640,8 +1698,8 @@ export const api = {
       post<{ request: TrainingRequest; requests: TrainingRequest[] }>(`/api/admin/training-requests/${id}/decide`, { ...body, idempotency_key: key }),
     trainingAccess: (userId: number, allow: boolean, key: string) =>
       post<{ training: { granted: boolean; assigned: number } }>(`/api/admin/team/${userId}/training-access`, { allow, idempotency_key: key }),
-    setGrants: (userId: number, body: { broadcast_all?: boolean; onboarding?: boolean }, key: string) =>
-      post<{ user: User; grants: { broadcast_all: boolean; onboarding: boolean }; changed: boolean }>(
+    setGrants: (userId: number, body: { broadcast_all?: boolean; onboarding?: boolean; assign_points?: boolean }, key: string) =>
+      post<{ user: User; grants: { broadcast_all: boolean; onboarding: boolean; assign_points: boolean }; changed: boolean }>(
         `/api/admin/team/${userId}/grants`, { ...body, idempotency_key: key }),
     // 18.11: «Работаю» switches only whoever stands above the person (the employee themself can't)
     setUserWorkStatus: (userId: number, work_status: User["work_status"], key: string) =>
@@ -1668,10 +1726,12 @@ export const api = {
     setInternshipUnits: (id: number, units: number, key: string) =>
       post<{ application: Application; closed: boolean }>(`/api/admin/onboarding/${id}/internship-units`,
         { units, idempotency_key: key }),
-    templates: () => request<{ items: BroadcastTemplate[] }>("/api/admin/broadcast-templates"),
-    saveTemplate: (title: string, html: string, id?: number) =>
+    /** 19.11: kind — «broadcast» (default) or «assign», the texts of «Отправить график» */
+    templates: (kind: "broadcast" | "assign" = "broadcast") =>
+      request<{ items: BroadcastTemplate[] }>(`/api/admin/broadcast-templates?kind=${kind}`),
+    saveTemplate: (title: string, html: string, id?: number, kind: "broadcast" | "assign" = "broadcast") =>
       id ? patch<{ template: BroadcastTemplate }>(`/api/admin/broadcast-templates/${id}`, { title, html })
-        : post<{ template: BroadcastTemplate }>("/api/admin/broadcast-templates", { title, html }),
+        : post<{ template: BroadcastTemplate }>("/api/admin/broadcast-templates", { title, html, kind }),
     deleteTemplate: (id: number) => post<{ deleted: boolean }>(`/api/admin/broadcast-templates/${id}/delete`, {}),
     receipts: (id: number) => request<{ broadcast: Broadcast; items: Receipt[] }>(`/api/admin/broadcasts/${id}`),
     remind: (id: number, userIds: number[] | null) =>
@@ -1865,6 +1925,15 @@ export const api = {
         `/api/admin/shifts/${shiftId}/result?fact_volume=${fact_volume}&idempotency_key=${key}&comment=${encodeURIComponent(comment)}`,
         photo,
       ),
+    // 19.11: «Распределение по точкам» — the day (only the people this manager may distribute), one
+    // assignment, and «Отправить график» (a personal text per person, by the button only)
+    assignDay: (day: string) => request<AssignDay>(`/api/admin/assign?day=${day}`),
+    assignPoint: (userId: number, day: string, location: string | null, key: string) =>
+      post<{ shift_id: number | null; location: string | null; changed: boolean }>("/api/admin/assign",
+        { user_id: userId, date: day, location, idempotency_key: key }),
+    assignNotice: (day: string, html: string, mode: "all" | "point", signed: boolean, key: string) =>
+      post<{ broadcast: Broadcast; repeated: boolean }>("/api/admin/assign/notice",
+        { date: day, html, mode, signed, idempotency_key: key }),
     team: () => request<{ items: User[]; bot_username: string | null }>("/api/admin/team"),
     setRole: (userId: number, role: Exclude<Role, "owner">, key: string) =>
       post<{ user: User; changed: boolean }>(`/api/admin/team/${userId}/role`, { role, idempotency_key: key }),

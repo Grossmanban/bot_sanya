@@ -31,6 +31,9 @@ export interface RichEditorHandle {
   clear: () => void;
   /** put Telegram HTML (a saved template) into the editor */
   setHtml: (html: string) => void;
+  /** 19.11: put a piece of plain text where the caret is — a template variable such as {точка}; with no caret
+   * of this editor — at the end of the text */
+  insert: (text: string) => void;
 }
 
 type Mark = "bold" | "italic" | "underline" | "strike" | "spoiler" | "code" | "quote" | "link";
@@ -144,6 +147,25 @@ export const RichEditor = forwardRef<RichEditorHandle, {
           root.current.innerHTML = html
             .replace(/<tg-spoiler>/g, '<span class="tg-spoiler">').replace(/<\/tg-spoiler>/g, "</span>")
             .replace(/<\/blockquote>\n/g, "</blockquote>").replace(/\n/g, "<br>");
+        }
+        emit();
+      },
+      insert: (text: string) => {
+        const el = root.current;
+        const sel = document.getSelection();
+        if (!el || !sel) return;
+        el.focus();
+        const here = saved.current && el.contains(saved.current.startContainer);
+        if (!here) {  // the caret never was in this editor: the end of the text
+          const end = document.createRange();
+          end.selectNodeContents(el);
+          end.collapse(false);
+          saved.current = end;
+        }
+        sel.removeAllRanges();
+        sel.addRange(saved.current!);
+        if (!document.execCommand("insertText", false, text)) {  // engines without it: a plain text node
+          saved.current!.insertNode(document.createTextNode(text));
         }
         emit();
       },

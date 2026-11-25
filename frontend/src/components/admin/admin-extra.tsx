@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Archive, FileSpreadsheet, LoaderCircle, Plus, RotateCcw, Send } from "lucide-react";
+import { Archive, Coins, FileSpreadsheet, LoaderCircle, Plus, RotateCcw, Send, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
@@ -10,8 +10,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { api, type Point, type ScheduleSettings, type SettingsResponse, type User } from "@/lib/api";
-import { WEEKDAYS, plural } from "@/lib/format";
+import { api, type Point, type PointBonus, type ScheduleSettings, type SettingsResponse, type User } from "@/lib/api";
+import { WEEKDAYS, WEEKDAYS_SHORT, bonusText, donePieces, plural, tiersText } from "@/lib/format";
 import { useCan, useProductsEnabled } from "@/lib/caps";
 import { useAction, useLoad } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -53,10 +53,97 @@ export function ExportCard({ from, to, user }: { from: string; to: string; user:
 
 /* ---------------------------------------------------------------- points */
 
+/* 19.11: «Надбавка за точку» — steps «от N оплаченных штук → R ₽ за день» acting on chosen weekdays.
+   Any row may be added, removed and edited; the server sorts them by «от» (five at most) and an empty list
+   means there is no allowance. The rows are typed as strings, like the ladders' ones. */
+type TierInput = { from: string; amount: string };
+
+const MAX_TIERS = 5;
+const num = (v: string, max = 6) => v.replace(/\D/g, "").slice(0, max);
+
+const toTiers = (bonus?: PointBonus): TierInput[] => (bonus?.tiers ?? []).map((t) => ({ from: String(t.from), amount: String(t.amount) }));
+/** only the rows with both numbers; sorted by «от», as the server keeps them */
+const cleanTiers = (tiers: TierInput[]) =>
+  tiers.filter((t) => t.from !== "" && t.amount !== "")
+    .map((t) => ({ from: Number(t.from), amount: Number(t.amount) })).sort((a, b) => a.from - b.from);
+const sameBonus = (tiers: TierInput[], days: number[], bonus?: PointBonus) => {
+  const clean = cleanTiers(tiers), sorted = [...days].sort((a, b) => a - b);
+  return JSON.stringify(clean) === JSON.stringify(bonus?.tiers ?? []) && (!clean.length || JSON.stringify(sorted) === JSON.stringify([...(bonus?.days ?? [])].sort((a, b) => a - b)));
+};
+
+function BonusEditor({ tiers, setTiers, days, setDays }: {
+  tiers: TierInput[]; setTiers: (t: TierInput[]) => void; days: number[]; setDays: (d: number[]) => void;
+}) {
+  const preview = cleanTiers(tiers);
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Строка читается «от N оплаченных штук → R ₽ за день». Достигнутая ступень платит целиком и не складывается
+        с нижними: при «от 21 → 500 ₽, от 28 → 1 000 ₽» сделавший 28 получает 1 000 ₽. Пороги — в оплаченных штуках
+        за день; надбавка приходит бонусом к ближайшей выплате.
+      </p>
+      <ul className="space-y-2.5">
+        {tiers.map((t, i) => (
+          <li key={i} className="space-y-1">
+            <div className="flex items-center gap-2 whitespace-nowrap text-sm">
+              <span className="text-muted-foreground">от</span>
+              <input inputMode="numeric" aria-label="Порог ступени, оплаченных штук" value={t.from}
+                     onChange={(e) => setTiers(tiers.map((x, j) => (j === i ? { ...x, from: num(e.target.value, 4) } : x)))}
+                     className="h-9 w-16 shrink-0 rounded-lg border-0 bg-muted px-2 text-center text-sm tabular outline-none" />
+              <span className="text-muted-foreground">оплач. →</span>
+              <input inputMode="numeric" aria-label="Сумма ступени, ₽ за день" value={t.amount}
+                     onChange={(e) => setTiers(tiers.map((x, j) => (j === i ? { ...x, amount: num(e.target.value, 6) } : x)))}
+                     className="h-9 min-w-0 flex-1 rounded-lg border-0 bg-muted px-2 text-sm tabular outline-none" />
+              <span className="text-muted-foreground">₽</span>
+              <button aria-label="Убрать ступень" onClick={() => setTiers(tiers.filter((_, j) => j !== i))}
+                      className="press ml-auto grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted">
+                <Trash2 className="size-4" />
+              </button>
+            </div>
+            <p className="pl-1 text-xs text-muted-foreground tabular">
+              {Number(t.from) > 0 ? `≈ ${donePieces(Number(t.from))} выполненных при отклоняемости 30%` : "укажите порог в оплаченных штуках"}
+            </p>
+          </li>
+        ))}
+      </ul>
+      {tiers.length < MAX_TIERS ? (
+        <Button variant="secondary" size="sm" className="press h-9 rounded-xl"
+                onClick={() => setTiers([...tiers, { from: "", amount: "" }])}>
+          <Plus /> Ступень
+        </Button>
+      ) : (
+        <p className="text-xs text-muted-foreground">Пять ступеней — предел.</p>
+      )}
+      <div>
+        <span className="block text-xs text-muted-foreground">Дни недели действия</span>
+        <div className="mt-1.5 grid grid-cols-7 gap-1.5">
+          {WEEKDAYS_SHORT.map((w, d) => {
+            const on = days.includes(d);
+            return (
+              <button key={w} type="button" aria-pressed={on} aria-label={`${w}: ${on ? "надбавка действует" : "надбавка не действует"}`}
+                      onClick={() => setDays(on ? days.filter((x) => x !== d) : [...days, d])}
+                      className={cn("press h-9 min-w-0 rounded-xl px-1 text-sm font-semibold",
+                        on ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+                {w}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {!preview.length ? "Ступеней нет — надбавки на точке нет."
+          : <>Как увидит сотрудник: <span className="text-foreground">{bonusText({ tiers: preview, days })}</span></>}
+      </p>
+    </div>
+  );
+}
+
 export function PointsSection() {
   const { data, reload } = useLoad(() => api.admin.points(), []);
   const [name, setName] = useState("");
   const [capacity, setCapacity] = useState("");
+  const [newTiers, setNewTiers] = useState<TierInput[]>([]);
+  const [newDays, setNewDays] = useState<number[]>([]);
   const { busy, run } = useAction();
 
   async function add() {
@@ -65,9 +152,14 @@ export function PointsSection() {
       return;
     }
     try {
-      await run("add", () => api.admin.createPoint(name.trim(), capacity ? Number(capacity) : null), "Точка добавлена");
+      const tiers = cleanTiers(newTiers);
+      const point = await run("add", () => api.admin.createPoint(name.trim(), capacity ? Number(capacity) : null,
+        tiers.length ? { tiers, days: newDays } : null), "Точка добавлена");
+      if (point && tiers.length && !newDays.length) toast("Надбавка сохранена без дней недели — выберите дни, чтобы она действовала");
       setName("");
       setCapacity("");
+      setNewTiers([]);
+      setNewDays([]);
       await reload();
     } catch {
       /* toast shown */
@@ -76,6 +168,7 @@ export function PointsSection() {
 
   const active = data?.items.filter((p) => p.active) ?? [];
   const hidden = data?.items.filter((p) => !p.active) ?? [];
+  const withBonus = active.filter((p) => p.bonus?.tiers.length).length;
 
   return (
     <div className="space-y-4">
@@ -92,6 +185,14 @@ export function PointsSection() {
           <input className={cn(field, "text-center")} inputMode="numeric" placeholder="Лимит" aria-label="Лимит людей, пусто — без лимита" value={capacity}
                  onChange={(e) => setCapacity(e.target.value.replace(/\D/g, "").slice(0, 3))} />
         </div>
+        <details className="rounded-2xl bg-muted/50 p-4">
+          <summary className="cursor-pointer text-sm font-semibold">
+            Надбавка за точку{newTiers.length ? `: ${tiersText(cleanTiers(newTiers), true)}` : " — не задана"}
+          </summary>
+          <div className="mt-3">
+            <BonusEditor tiers={newTiers} setTiers={setNewTiers} days={newDays} setDays={setNewDays} />
+          </div>
+        </details>
         <Button className="press h-12 w-full rounded-2xl text-[15px] font-semibold" disabled={!!busy} onClick={add}>
           {busy === "add" ? <LoaderCircle className="animate-spin" /> : <Plus />} Добавить точку
         </Button>
@@ -103,6 +204,11 @@ export function PointsSection() {
         <section className="overflow-hidden rounded-3xl bg-card shadow-lift">
           <h2 className="px-5 pt-5 pb-2 font-semibold md:px-6">
             Точки <span className="text-muted-foreground">{active.length}</span>
+            {withBonus > 0 && (
+              <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-go-soft px-2.5 py-0.5 text-xs font-semibold text-go">
+                <Coins className="size-3.5" /> надбавка на {withBonus}
+              </span>
+            )}
           </h2>
           {active.length === 0 && (
             <p className="px-5 pb-5 text-sm text-muted-foreground md:px-6">Пока точек нет: сотрудники вводят точку текстом.</p>
@@ -121,18 +227,48 @@ export function PointsSection() {
 function PointRow({ point, onChanged }: { point: Point; onChanged: () => Promise<void> }) {
   const [name, setName] = useState(point.name);
   const [capacity, setCapacity] = useState(point.capacity ? String(point.capacity) : "");
+  const [bonusOpen, setBonusOpen] = useState(false);
+  const [tiers, setTiers] = useState<TierInput[]>(() => toTiers(point.bonus));
+  const [days, setDays] = useState<number[]>(() => [...(point.bonus?.days ?? [])]);
   const { busy, run } = useAction();
   const dirty = name.trim() !== point.name || capacity !== (point.capacity ? String(point.capacity) : "");
+  // the saved allowance comes back from the server sorted — show it as it is stored
+  useEffect(() => {
+    setTiers(toTiers(point.bonus));
+    setDays([...(point.bonus?.days ?? [])]);
+  }, [point.bonus]);
+  const bonusDirty = !sameBonus(tiers, days, point.bonus);
 
-  async function save(body: Parameters<typeof api.admin.updatePoint>[1], success: string) {
+  async function save(body: Parameters<typeof api.admin.updatePoint>[1], success: string, what = "save") {
     try {
-      await run("save", () => api.admin.updatePoint(point.id, body), success);
+      await run(what, () => api.admin.updatePoint(point.id, body), success);
       await onChanged();
     } catch {
       /* toast shown */
     }
   }
 
+  async function saveBonus() {
+    const clean = cleanTiers(tiers);
+    if (clean.some((t) => t.from < 1 || t.amount < 1)) {
+      toast.error("Порог и сумма ступени — числа от 1");
+      return;
+    }
+    if (clean.length && !days.length) {
+      toast.error("Выберите хотя бы один день недели — иначе надбавка нигде не действует");
+      return;
+    }
+    try {
+      await run("bonus", () => api.admin.updatePoint(point.id, { bonus: clean.length ? { tiers: clean, days } : null }),
+                clean.length ? "Надбавка сохранена" : "Надбавка снята");
+      setBonusOpen(false);
+      await onChanged();
+    } catch {
+      /* toast shown */
+    }
+  }
+
+  const badge = bonusText(point.bonus);
   return (
     <li className={cn("space-y-2 px-5 py-3.5 md:px-6", !point.active && "opacity-55")}>
       <div className="grid grid-cols-[1fr_5.5rem] gap-2">
@@ -156,10 +292,34 @@ function PointRow({ point, onChanged }: { point: Point; onChanged: () => Promise
                       "Точка сохранена",
                     )
                   }>
-            {busy && <LoaderCircle className="animate-spin" />} Сохранить
+            {busy === "save" && <LoaderCircle className="animate-spin" />} Сохранить
           </Button>
         )}
       </div>
+      {/* 19.11: the allowance — a folded row with its summary, the editor opens on tap */}
+      <button type="button" className="press flex w-full items-center gap-3 rounded-2xl bg-muted/50 px-3 py-2.5 text-left"
+              aria-expanded={bonusOpen} onClick={() => setBonusOpen((v) => !v)}>
+        <span className={cn("grid size-9 shrink-0 place-items-center rounded-xl", badge ? "bg-go-soft text-go" : "bg-muted text-muted-foreground")}>
+          <Coins className="size-4" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-medium">Надбавка за точку</span>
+          <span className="block text-xs text-muted-foreground">{badge ?? "нет — смены на точке оплачиваются как обычно"}</span>
+        </span>
+        <span className="shrink-0 text-xs font-semibold text-muted-foreground">{bonusOpen ? "Свернуть" : "Изменить"}</span>
+      </button>
+      {bonusOpen && (
+        <div className="row-in space-y-3">
+          <BonusEditor tiers={tiers} setTiers={setTiers} days={days} setDays={setDays} />
+          {/* the button appears only when there is something to save — a disabled «Снять» on a point without an allowance read as enabled */}
+          {bonusDirty && (
+            <Button size="sm" className="press h-9 rounded-xl px-4" disabled={!!busy} onClick={saveBonus}>
+              {busy === "bonus" && <LoaderCircle className="animate-spin" />}
+              {cleanTiers(tiers).length ? "Сохранить надбавку" : "Снять надбавку"}
+            </Button>
+          )}
+        </div>
+      )}
     </li>
   );
 }
@@ -207,7 +367,7 @@ const ROWS: Row[] = [
 
 export function SettingsSection() {
   const canRates = useCan("money"); // rates are money: owners only
-  const { data } = useLoad(() => api.admin.settings(), []);
+  const { data, setData } = useLoad(() => api.admin.settings(), []);
   const [cfg, setCfg] = useState<ScheduleSettings | null>(null);
   const { busy, run } = useAction();
   useEffect(() => {
@@ -222,7 +382,12 @@ export function SettingsSection() {
   async function save() {
     try {
       const res = await run("save", () => api.admin.saveSettings(cfg!), "Настройки сохранены");
-      if (res) setCfg(res.settings);
+      // the saved state becomes the reference too: «dirty» is counted against it. Earlier the reference stayed
+      // the one loaded on open — the button did not go out after saving and «Всё сохранено» lied on a toggle back
+      if (res) {
+        setCfg(res.settings);
+        setData((d) => (d ? { ...d, settings: res.settings } : d));
+      }
     } catch {
       /* toast shown */
     }
@@ -386,6 +551,21 @@ export function SettingsSection() {
             </span>
           </span>
           <Switch checked={cfg.show_colleague_names} onCheckedChange={(v) => set({ show_colleague_names: v })} />
+        </label>
+      </section>
+      {/* 19.11: the point of a shift is the manager's to assign — «Смены → Распределение по точкам» */}
+      <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">
+        <label className="flex cursor-pointer items-start gap-4">
+          <span className="flex-1">
+            <span className="block font-medium">Запретить самостоятельно выбирать точку</span>
+            <span className="block text-sm text-muted-foreground">
+              {cfg.shift_point_locked
+                ? "Сотрудник записывается на день без точки и видит: «Выбор точки недоступен: точку назначит ваш тренер/инструктор». Точку назначает тренер или инструктор в «Смены → Распределение по точкам» и может отправить график кнопкой."
+                : "Сейчас сотрудник сам выбирает точку при записи на смену. С запретом он записывается без точки, а точку назначает тренер или инструктор в «Смены → Распределение по точкам»."}
+              {" "}На руководителей и админку не действует.
+            </span>
+          </span>
+          <Switch checked={cfg.shift_point_locked} onCheckedChange={(v) => set({ shift_point_locked: v })} />
         </label>
       </section>
       <section className="rounded-3xl bg-card p-5 shadow-lift md:p-6">

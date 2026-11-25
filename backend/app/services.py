@@ -89,6 +89,13 @@ def full_name(user: dict) -> str:
     return format_name(user.get("last_name") or "", first[0] if first else "", middle)
 
 
+def given_name(user: dict) -> str:
+    """19.11: what the person is called by — the first word of first_name (the questionnaires keep
+    «Имя Отчество» there); without one — the last name, so a text never addresses an empty name."""
+    parts = (user.get("first_name") or "").split()
+    return parts[0] if parts else (user.get("last_name") or "").strip()
+
+
 def fio_text(text: str) -> str:
     """A questionnaire's raw «Фамилия Имя Отчество» → «Фамилия Имя О.» — display only, the stored text stays."""
     parts = (text or "").split()
@@ -159,7 +166,7 @@ def parse_date(value: str) -> date:
         raise ServiceError("Некорректная дата", 422, "bad_date") from exc
 
 
-def validate_payload(start_time, end_time, volume, location) -> dict:
+def validate_payload(start_time, end_time, volume, location, location_required: bool = True) -> dict:
     if not isinstance(start_time, str) or not TIME_RE.match(start_time):
         raise ServiceError("Укажите время начала в формате ЧЧ:ММ", 422, "bad_start_time")
     if not isinstance(end_time, str) or not TIME_RE.match(end_time):
@@ -171,11 +178,13 @@ def validate_payload(start_time, end_time, volume, location) -> dict:
     if volume > MAX_VOLUME:
         raise ServiceError(f"Объём не может быть больше {MAX_VOLUME}", 422, "bad_volume")
     location = (location or "").strip() if isinstance(location, str) else ""
-    if not location:
+    # 19.11: with «Запретить самостоятельно выбирать точку» the day is booked without one — the manager
+    # puts the person on a point later («Распределение по точкам»)
+    if not location and location_required:
         raise ServiceError("Укажите точку", 422, "bad_location")
     if len(location) > MAX_LOCATION:
         raise ServiceError("Слишком длинное название точки", 422, "bad_location")
-    return {"start_time": start_time, "end_time": end_time, "volume": volume, "location": location}
+    return {"start_time": start_time, "end_time": end_time, "volume": volume, "location": location or None}
 
 
 # ---------------------------------------------------------------- users
@@ -449,18 +458,20 @@ GRANT_COLUMNS = {"broadcast_all": "can_broadcast_all", "onboarding": "can_onboar
 
 
 def grants_of(user: dict) -> dict[str, bool]:
-    return {"broadcast_all": bool(user.get("can_broadcast_all")), "onboarding": bool(user.get("can_onboard"))}
+    return {"broadcast_all": bool(user.get("can_broadcast_all")), "onboarding": bool(user.get("can_onboard")),
+            "assign_points": bool(user.get("can_assign_points"))}
 
 
 def set_grants(conn, actor: dict, user_id: int, broadcast_all: bool | None, onboarding: bool | None,
-               key: str) -> tuple[dict, dict[str, bool], bool]:
-    """The personal permissions from «Команда»: broadcast to everyone (a trainer — outside their network too)
-    and onboarding without an admin's confirmation. Owners and admins set them (the «grants» capability)."""
+               key: str, assign_points: bool | None = None) -> tuple[dict, dict[str, bool], bool]:
+    """The personal permissions from «Команда»: broadcast to everyone (a trainer — outside their network too),
+    onboarding without an admin's confirmation, and «Распределение по всем точкам» (19.11 — any role, even a
+    plain employee). Owners and admins set them (the «grants» capability)."""
     _check_key(key)
     with transaction(conn):
         actor = _fresh_actor(conn, actor)
         if not perms.can(actor, "grants"):
-            raise ServiceError("Разрешения меняют владелец и администраторы", 403, "forbidden")
+            raise ServiceError("Разрешения меняет владелец и администраторы", 403, "forbidden")
         user = get_user(conn, user_id)
         if user is None or user["status"] != "approved":
             raise ServiceError("Сотрудник не найден", 404, "not_found")
@@ -468,7 +479,8 @@ def set_grants(conn, actor: dict, user_id: int, broadcast_all: bool | None, onbo
             return user, grants_of(user), False
         if is_owner(user):
             raise ServiceError("Владельцу разрешения не нужны", 409, "owner")
-        changes = {c: int(v) for c, v in (("can_broadcast_all", broadcast_all), ("can_onboard", onboarding)) if v is not None}
+        changes = {c: int(v) for c, v in (("can_broadcast_all", broadcast_all), ("can_onboard", onboarding),
+                                          ("can_assign_points", assign_points)) if v is not None}
         if not changes:
             raise ServiceError("Нечего менять", 422, "empty")
         before = grants_of(user)
@@ -636,6 +648,29 @@ def _after_deadline(what: str) -> ServiceError:
                         409, "after_deadline")
 
 
+def _location_bonus_view(conn, shift: dict, day: date) -> dict | None:
+    """The allowance block of a serialized shift: the steps as of the shift's date (weekday_ok honest),
+    how much is paid so far and the next step to reach. None — the point has no allowance."""
+    point = _point_named(conn, shift["location"]) if shift.get("location") else None
+    if point is None:
+        return None
+    bonus = parse_point_bonus(point["bonus"])
+    if not bonus["tiers"]:
+        return None
+    paid = shift.get("fact_volume") or 0
+    tiers = bonus["tiers"]
+    return {
+        "point": point["name"],
+        "tiers": tiers,
+        "days": bonus["days"],
+        "weekday_ok": day.weekday() in bonus["days"],
+        "paid_now": paid,
+        # the first step above what is paid so far (None — every step is already covered)
+        "next": next((t for t in tiers if t["from"] > paid), None),
+        "reached": next((t for t in reversed(tiers) if paid >= t["from"]), None),
+    }
+
+
 def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | None = None,
                     now: datetime | None = None, staff: bool = False) -> dict | None:
     """conn adds the report block (state, deadline, last attempt); `now` — see clock().
@@ -697,6 +732,11 @@ def serialize_shift(shift: dict | None, today: date, conn: sqlite3.Connection | 
     if shift.get("fact_volume") is not None and not shift.get("training"):
         data["fact_pay"] = pricing.expected_pay(shift["fact_volume"], own)
     if conn is not None:
+        # 19.11: the point's allowance as of this shift's date — the day sheet shows the plate, the
+        # «до бонуса» progress and the «+ надбавка при N+ шт» line in the earnings plan
+        badge = _location_bonus_view(conn, shift, day)
+        if badge is not None:
+            data["location_bonus"] = badge
         from . import reports  # reports builds on this module
 
         data["report"] = reports.view(conn, shift)
@@ -874,7 +914,6 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
     now = clock(today, now)
     today = now.date()
     _check_key(key)
-    data = validate_payload(**payload)
     with transaction(conn):
         if _seen(conn, key):
             return Result(get_user_shift_on(conn, user["id"], day), False)
@@ -883,6 +922,11 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
         _require_bookable(day, today)
         if get_user_shift_on(conn, user["id"], day) is not None:
             raise ServiceError("На эту дату у вас уже есть запись", 409, "already_exists")
+        # 19.11: «Запретить самостоятельно выбирать точку» — a plain employee books the day without a point
+        locked = point_locked_for(conn, user)
+        data = validate_payload(**payload, location_required=not locked)
+        if locked and data["location"]:
+            raise ServiceError("Выбор точки недоступен: точку назначит ваш тренер или инструктор", 403, "point_locked")
         if phase(day, now) == "late":
             raise ServiceError(f"После {SCHEDULE['deadline']} записаться на завтра нельзя. С 00:00 можно попроситься "
                                "на сегодня — срочной записью", 409, "after_deadline")
@@ -908,19 +952,33 @@ def create_shift(conn, user: dict, day: date, payload: dict, key: str, today: da
     return Result(get_shift(conn, cur.lastrowid), True, event)
 
 
+def _guard_point_lock(conn, user: dict, shift: dict, data: dict) -> None:
+    """19.11: with «Запретить самостоятельно выбирать точку» a plain employee doesn't manage the point: what
+    was assigned stays (also when the form sends none — the person may not even see the list), and naming
+    another one is refused — that is the manager's job («Распределение по точкам»)."""
+    if not point_locked_for(conn, user):
+        return
+    if not data["location"]:
+        data["location"] = shift["location"]
+    elif data["location"].casefold() != (shift["location"] or "").casefold():
+        raise ServiceError("Выбор точки недоступен: точку назначит ваш тренер или инструктор", 403, "point_locked")
+
+
 def edit_shift(conn, user: dict, shift_id: int, payload: dict, key: str, today: date | None = None,
                now: datetime | None = None) -> Result:
     """Before the deadline — anything; 22:00–00:00 — the time and the point only; from 00:00 — nothing."""
     now = clock(today, now)
     _check_key(key)
-    data = validate_payload(**payload)
     with transaction(conn):
         if _seen(conn, key):
             return Result(get_shift(conn, shift_id), False)
+        user = get_user(conn, user["id"])
         shift = _own_shift(conn, user, shift_id, now.date())
+        data = validate_payload(**payload, location_required=not point_locked_for(conn, user))
+        _guard_point_lock(conn, user, shift, data)
         if shift["status"] not in ACTIVE:
             raise ServiceError("Изменить можно только активную смену", 409, "bad_status")
-        _require_working(get_user(conn, user["id"]))  # «Не работаю»: cancelling stays possible, editing doesn't (В27)
+        _require_working(user)  # «Не работаю»: cancelling stays possible, editing doesn't (В27)
         _require_no_report(shift)
         when = phase(date.fromisoformat(shift["shift_date"]), now)
         if when not in ("open", "late"):
@@ -965,12 +1023,13 @@ def restore_shift(conn, user: dict, shift_id: int, payload: dict, key: str, toda
     """«Передумал, выйду»: back to work on a day taken off — before the deadline, as often as needed."""
     now = clock(today, now)
     _check_key(key)
-    data = validate_payload(**payload)
     with transaction(conn):
         if _seen(conn, key):
             return Result(get_shift(conn, shift_id), False)
         user = get_user(conn, user["id"])
         shift = _own_shift(conn, user, shift_id, now.date())
+        data = validate_payload(**payload, location_required=not point_locked_for(conn, user))
+        _guard_point_lock(conn, user, shift, data)
         _require_working(user)
         if shift["status"] != "cancelled" or shift["admin_locked"]:
             raise ServiceError("Эту смену нельзя восстановить", 409, "cannot_restore")
@@ -1254,6 +1313,23 @@ def admin_delete_shift(conn, admin: dict, shift_id: int, reason: str, key: str) 
 # ---------------------------------------------------------------- admin reports
 
 
+def shift_plan_text(shift: dict) -> str:
+    """«16:00–19:00, Европа, 20 шт.» — and honest for a shift whose time, point or volume is not set yet
+    (19.11: «Распределение по точкам» creates a shift with the point alone — «время уточняется»)."""
+    when = f"{shift['start_time']}–{shift['end_time']}" if shift.get("start_time") else "время уточняется"
+    parts = [when]
+    if shift.get("location"):
+        parts.append(shift["location"])
+    if shift.get("volume"):
+        parts.append(f"{shift['volume']} шт.")
+    return ", ".join(parts)
+
+
+def shift_when_text(shift: dict) -> str:
+    """The time of a shift, or «время уточняется» when it isn't set yet."""
+    return f"{shift['start_time']}–{shift['end_time']}" if shift.get("start_time") else "время уточняется"
+
+
 def raspred(conn, day: date, viewer: dict | None = None) -> dict:
     """The day's list for the work chat. A trainer (viewer) gets only their own network's people,
     an instructor only the people assigned to them."""
@@ -1272,8 +1348,13 @@ def raspred(conn, day: date, viewer: dict | None = None) -> dict:
             name += f" (@{s['username']})"
         if s.get("training"):
             name += " — стажёр"
-        lines.append(f"{s['start_time']}–{s['end_time']} — {name} — {s['volume']} шт. — {s['location']}")
-    total_volume = sum(s["volume"] for s in shifts)
+        # 19.11: a shift may have no time or volume yet (assigned by its point alone)
+        parts = [shift_when_text(s), name]
+        if s["volume"]:
+            parts.append(f"{s['volume']} шт.")
+        parts.append(s["location"] or "точка не назначена")
+        lines.append(" — ".join(parts))
+    total_volume = sum(s["volume"] or 0 for s in shifts)
     title = f" · сеть «{network[0]}»" if network else ""
     if shifts:
         text = (
@@ -1333,8 +1414,9 @@ def stats(conn, user_id: int, date_from: date, date_to: date) -> dict:
         if s["status"] == "finally_cancelled":
             notes.append(f"Штраф {s['penalty_amount']} ₽" if s["penalty_amount"] is not None else "Штраф не назначен")
         if s["status"] in ACTIVE:
-            active_volume += s["volume"]
-            if not s["training"]:
+            # 19.11: a shift assigned by its point alone has no volume yet
+            active_volume += s["volume"] or 0
+            if not s["training"] and s["volume"]:
                 pay += pricing.expected_pay(s["volume"], own)
             if s["fact_volume"] is not None:
                 fact_volume += s["fact_volume"]
@@ -1432,14 +1514,93 @@ def _point_named(conn, name: str) -> dict | None:
     return next((p for p in list_points(conn, include_inactive=True) if p["name"].casefold() == name.casefold()), None)
 
 
-def create_point(conn, admin: dict, name: str, capacity: int | None) -> dict:
+# 19.11: «Надбавка за точку» — steps «от N оплаченных штук → R ₽ за день» acting on chosen weekdays
+MAX_BONUS_STEPS = 5
+
+
+def parse_point_bonus(raw) -> dict:
+    """The point's allowance: tiers [{from, amount}] sorted by the threshold and days — the weekdays
+    (0 = Monday) it acts on. Broken or missing data reads as «no allowance»."""
+    if not raw:
+        return {"tiers": [], "days": []}
+    try:
+        data = json.loads(raw)
+        tiers = sorted(({"from": int(t["from"]), "amount": int(t["amount"])} for t in data.get("tiers", ())),
+                       key=lambda t: t["from"])
+        days = sorted({int(d) for d in data.get("days", ())})
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {"tiers": [], "days": []}
+    return {"tiers": [t for t in tiers if t["from"] > 0 and t["amount"] > 0],
+            "days": [d for d in days if 0 <= d <= 6]}
+
+
+def validate_point_bonus(bonus) -> str | None:
+    """The allowance from the editor: up to 5 steps «от N оплаченных штук → R ₽ за день» and the weekdays.
+    An empty step list clears the allowance (None). Returns the JSON to store."""
+    if bonus is None:
+        return None
+    if not isinstance(bonus, dict):
+        raise ServiceError("Надбавка: ступени и дни недели", 422, "bad_bonus")
+    tiers, days = bonus.get("tiers"), bonus.get("days")
+    if not isinstance(tiers, list) or not isinstance(days, list):
+        raise ServiceError("Надбавка: ступени и дни недели", 422, "bad_bonus")
+    if len(tiers) > MAX_BONUS_STEPS:
+        raise ServiceError(f"Ступеней надбавки — не больше {MAX_BONUS_STEPS}", 422, "bad_bonus")
+    clean, seen = [], set()
+    for t in tiers:
+        if not isinstance(t, dict):
+            raise ServiceError("Ступень: «от N штук → R ₽»", 422, "bad_bonus")
+        start, amount = t.get("from"), t.get("amount")
+        if isinstance(start, bool) or not isinstance(start, int) or not 1 <= start <= 1000:
+            raise ServiceError("Порог ступени — оплаченные штуки от 1 до 1000", 422, "bad_bonus")
+        if isinstance(amount, bool) or not isinstance(amount, int) or not 1 <= amount <= 100_000:
+            raise ServiceError("Сумма ступени — рубли от 1 до 100 000", 422, "bad_bonus")
+        if start in seen:
+            raise ServiceError(f"Две ступени с порогом {start}", 422, "bad_bonus")
+        seen.add(start)
+        clean.append({"from": start, "amount": amount})
+    if any(isinstance(d, bool) or not isinstance(d, int) or not 0 <= d <= 6 for d in days):
+        raise ServiceError("Дни недели: пн–вс", 422, "bad_bonus")
+    if not clean:
+        return None  # no steps — no allowance, whatever the days say
+    clean.sort(key=lambda t: t["from"])
+    return json.dumps({"tiers": clean, "days": sorted(set(days))}, ensure_ascii=False)
+
+
+def bonus_tier(bonus: dict, volume: int, weekday: int) -> dict | None:
+    """The step this day has reached: the highest «от» the paid volume covers, on a weekday the allowance
+    acts on. The reached step pays its sum in full — never stacked with the lower ones."""
+    if weekday not in bonus.get("days", ()):
+        return None
+    reached = [t for t in bonus.get("tiers", ()) if volume >= t["from"]]
+    return reached[-1] if reached else None
+
+
+def public_point(p: dict) -> dict:
+    """The point as the app sees it: the allowance parsed (steps sorted, weekdays normalised)."""
+    return {"id": p["id"], "name": p["name"], "capacity": p["capacity"], "active": bool(p["active"]),
+            "bonus": parse_point_bonus(p.get("bonus"))}
+
+
+def point_locked_for(conn, user: dict) -> bool:
+    """19.11: the setting «Запретить самостоятельно выбирать точку» binds plain employees only — managers
+    (and everything in the admin screens) choose a point as before."""
+    from . import app_settings  # local: app_settings imports services
+
+    return perms.role_of(user) == perms.EMPLOYEE and bool(app_settings.get_all(conn)["shift_point_locked"])
+
+
+def create_point(conn, admin: dict, name: str, capacity: int | None, bonus: dict | None = None) -> dict:
+    """bonus (19.11): the point's allowance — {tiers: [{from, amount}], days: [0..6]}; None — none."""
     name, capacity = _validate_point(name, capacity)
+    bonus = validate_point_bonus(bonus)
     with transaction(conn):
         if _point_named(conn, name):
             raise ServiceError("Такая точка уже есть", 409, "point_exists")
-        cur = conn.execute("INSERT INTO points (name, capacity, created_at) VALUES (?, ?, ?)", (name, capacity, now_iso()))
+        cur = conn.execute("INSERT INTO points (name, capacity, created_at, bonus) VALUES (?, ?, ?, ?)",
+                           (name, capacity, now_iso(), bonus))
         log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="POINT_CREATED", key=new_key(),
-                  new={"name": name, "capacity": capacity})
+                  new={"name": name, "capacity": capacity, "bonus": parse_point_bonus(bonus)})
     return dict(conn.execute("SELECT * FROM points WHERE id = ?", (cur.lastrowid,)).fetchone())
 
 
@@ -1453,24 +1614,31 @@ def update_point(conn, admin: dict, point_id: int, changes: dict, today: date | 
         capacity = changes["capacity"] if "capacity" in changes else point["capacity"]
         name, capacity = _validate_point(name, capacity)
         active = int(bool(changes["active"])) if changes.get("active") is not None else point["active"]
+        # 19.11: the allowance steps and their weekdays (None — clear the allowance)
+        bonus = validate_point_bonus(changes["bonus"]) if "bonus" in changes else point["bonus"]
         clash = _point_named(conn, name)
         if clash and clash["id"] != point_id:
             raise ServiceError("Такая точка уже есть", 409, "point_exists")
-        conn.execute("UPDATE points SET name = ?, capacity = ?, active = ? WHERE id = ?", (name, capacity, active, point_id))
+        conn.execute("UPDATE points SET name = ?, capacity = ?, active = ?, bonus = ? WHERE id = ?",
+                     (name, capacity, active, bonus, point_id))
         if name != point["name"]:
             # keep upcoming shifts pointing at the renamed point
             upcoming = conn.execute("SELECT id, location FROM shifts WHERE shift_date >= ?", ((today or today_local()).isoformat(),))
             ids = [r["id"] for r in upcoming if (r["location"] or "").casefold() == point["name"].casefold()]
             conn.executemany("UPDATE shifts SET location = ? WHERE id = ?", [(name, i) for i in ids])
         log_event(conn, user_id=admin["id"], actor_id=admin["telegram_id"], event_type="POINT_UPDATED", key=new_key(),
-                  old={k: point[k] for k in ("name", "capacity", "active")},
-                  new={"name": name, "capacity": capacity, "active": active})
+                  old={"name": point["name"], "capacity": point["capacity"], "active": point["active"],
+                       "bonus": parse_point_bonus(point["bonus"])},
+                  new={"name": name, "capacity": capacity, "active": active, "bonus": parse_point_bonus(bonus)})
     return dict(conn.execute("SELECT * FROM points WHERE id = ?", (point_id,)).fetchone())
 
 
 def check_point(conn, day: date, location: str, exclude: int | None = None) -> str:
     """With a points list configured, the location must be one of them and the point must have room.
-    Returns the canonical point name. Without points, any location is accepted."""
+    Returns the canonical point name. Without points, any location is accepted. None — a shift without
+    a point yet (19.11: the manager assigns it later in «Распределение»)."""
+    if not location:
+        return location
     points = list_points(conn)
     if not points:
         return location
